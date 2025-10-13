@@ -1,0 +1,11 @@
+# 默认把文本在仓库内规范为 LF，检出为 LF
+* text=auto eol=lf
+
+# 明确二进制文件，避免被当作文本转换
+*.png -text
+*.jpg -text
+*.pdf -text
+*.zip -text
+
+# 如确有必须使用 CRLF 的文件（例如 .bat），单独声明
+*.bat text eol=crlf
