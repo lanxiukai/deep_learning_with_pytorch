@@ -231,11 +231,11 @@ def show_images(imgs, num_rows, num_cols, titles=None, scale=1.5):
             ax.set_title(titles[i])
     return axes
 
-def get_dataloader_workers():
-    """Use 16 processes to read the data."""
-    return 16
+def get_dataloader_workers(process_count=16):
+    """Use process_count processes to read the data."""
+    return process_count
 
-def load_data_fashion_mnist(batch_size, resize=None):
+def load_data_fashion_mnist(batch_size, resize=None, process_count=16):
     """Download the Fashion-MNIST dataset and then load it into memory.
     
     Args:
@@ -248,16 +248,18 @@ def load_data_fashion_mnist(batch_size, resize=None):
     if resize:
         trans.insert(0, transforms.Resize(resize))  # Insert at the beginning of the list
     # 'trans' is a list of transforms, so we need to use transforms.Compose to compose them
-    trans = transforms.Compose(trans)  # Anything "callable" (like a function) can be put into Compose
+    # Constructs and returns a callable transform pipeline object. 
+    # Anything "callable" (like a function) can be put into Compose
+    trans = transforms.Compose(trans)
     # 'transform' takes PIL images and returns the processed sample (transforms.Compose([transforms.ToTensor()]))
     mnist_train = torchvision.datasets.FashionMNIST(
         root=f"{bash_path}/data", train=True, transform=trans, download=True)
     mnist_test = torchvision.datasets.FashionMNIST(
         root=f"{bash_path}/data", train=False, transform=trans, download=True)
     return (data.DataLoader(mnist_train, batch_size, shuffle=True,
-                            num_workers=get_dataloader_workers()),
+                            num_workers=get_dataloader_workers(process_count)),
             data.DataLoader(mnist_test, batch_size, shuffle=False,
-                            num_workers=get_dataloader_workers()))
+                            num_workers=get_dataloader_workers(process_count)))
 
 def accuracy(y_hat, y):
     '''Compute the number of correct predictions.
@@ -527,3 +529,77 @@ def try_all_gpus():
     """Return all available GPUs, or [cpu(),] if no GPU exists. """
     devices = [torch.device(f'cuda:{i}') for i in range(torch.cuda.device_count())]
     return devices if devices else [torch.device('cpu')]
+
+def corr2d(X, K):
+    """Calculate 2D cross-correlation.
+    
+    Args:
+        X: the input tensor
+        K: the kernel tensor
+    Returns:
+        the output tensor
+    """
+    h, w = K.shape
+    Y = torch.zeros((X.shape[0] - h + 1, X.shape[1] - w + 1))
+    for i in range(Y.shape[0]):
+        for j in range(Y.shape[1]):
+            Y[i, j] = (X[i:i + h, j:j + w] * K).sum()
+    return Y
+
+def evaluate_accuracy_gpu(net, data_iter, device=None):
+    '''Evaluate the accuracy of the model on the given dataset using GPU.'''
+    if isinstance(net, nn.Module):
+        net.eval()
+        if not device:
+            # Get the device of the first parameter of the net
+            device = next(iter(net.parameters())).device
+    metric = d2l_save.Accumulator(2)  # correct predictions, total predictions
+    with torch.no_grad():
+        for X, y in data_iter:
+            if isinstance(X, list):
+                # Required for BERT fine-tuning (to be introduced later)
+                X = [x.to(device) for x in X]
+            else:
+                X = X.to(device)
+            y = y.to(device)
+            metric.add(d2l_save.accuracy(net(X), y), y.numel())
+    return metric[0] / metric[1]  # Return the accuracy
+
+def train_ch6(net, train_iter, test_iter, num_epochs, lr, device):
+    '''Train the model using GPU.'''
+    def init_weights(m):
+        if type(m) == nn.Linear or type(m) == nn.Conv2d:
+            nn.init.xavier_uniform_(m.weight)
+    net.apply(init_weights)
+    print('training on', device)
+    net.to(device)
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+    loss = nn.CrossEntropyLoss()
+    animator = d2l_save.Animator(xlabel='epoch', xlim=[1, num_epochs], 
+                                 legend=['train loss', 'train acc', 'test acc'])
+    timer, num_batches = d2l_save.Timer(), len(train_iter)
+    for epoch in range(num_epochs):
+        # (training) loss_sum, total number of correct predictions, total number of samples
+        metric = d2l_save.Accumulator(3)
+        net.train()
+        for i, (X, y) in enumerate(train_iter):
+            timer.start()
+            optimizer.zero_grad()
+            X, y = X.to(device), y.to(device)
+            y_hat = net(X)
+            l = loss(y_hat, y)
+            l.backward()
+            optimizer.step()
+            with torch.no_grad():
+                metric.add(l * X.shape[0], d2l_save.accuracy(y_hat, y), X.shape[0])
+            timer.stop()
+            train_l = metric[0] / metric[2]
+            train_acc = metric[1] / metric[2]
+            if (i + 1) % (num_batches // 5) == 0 or i == num_batches - 1:
+                animator.add(epoch + (i + 1) / num_batches, (train_l, train_acc, None))
+        test_acc = evaluate_accuracy_gpu(net, test_iter)
+        animator.add(epoch + 1, (None, None, test_acc))
+    print(f'loss {train_l:.3f}, train acc {train_acc:.3f}, '
+          f'test acc {test_acc:.3f}')
+    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec '
+          f'on {str(device)}')
