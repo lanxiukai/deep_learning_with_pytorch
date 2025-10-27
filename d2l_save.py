@@ -124,9 +124,23 @@ class Timer:
         '''Return the sum of time.'''
         return sum(self.times)
 
+    def format_time(self, seconds=None, precision=1):
+        '''Return a formatted string given seconds in h, min and sec.'''
+        total = self.sum() if seconds is None else seconds
+        hours = int(total // 3600)
+        minutes = int((total % 3600) // 60)
+        secs = total % 60
+        if precision is None:
+            return f'{hours} h {minutes} min {int(round(secs))} sec'
+        return f'{hours} h {minutes} min {secs:.{precision}f} sec'
+
     def cumsum(self):
         '''Return the accumulated time.'''
         return np.array(self.times).cumsum().tolist()
+    
+    def __str__(self):
+        '''Return the string representation of the timer.'''
+        return f'Time taken: {self.format_time()}'
 
 def synthetic_data(w, b, num_examples):
     """Generate y = Xw + b + noise (gaussian noise, N(0, 0.01)).
@@ -565,13 +579,13 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
             metric.add(d2l_save.accuracy(net(X), y), y.numel())
     return metric[0] / metric[1]  # Return the accuracy
 
-def train_ch6(net, train_iter, test_iter, num_epochs, lr, device):
+def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None):
     '''Train the model using GPU.'''
     def init_weights(m):
         if type(m) == nn.Linear or type(m) == nn.Conv2d:
             nn.init.xavier_uniform_(m.weight)
     net.apply(init_weights)
-    print('training on', device)
+    print(f'{net_name} training on {device}')
     net.to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=lr)
     loss = nn.CrossEntropyLoss()
@@ -601,5 +615,5 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device):
         animator.add(epoch + 1, (None, None, test_acc))
     print(f'loss {train_l:.3f}, train acc {train_acc:.3f}, '
           f'test acc {test_acc:.3f}')
-    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec '
-          f'on {str(device)}')
+    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec on {str(device)}')
+    print(timer)

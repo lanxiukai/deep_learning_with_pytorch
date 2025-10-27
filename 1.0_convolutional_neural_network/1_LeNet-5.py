@@ -25,13 +25,13 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
             metric.add(d2l_save.accuracy(net(X), y), y.numel())
     return metric[0] / metric[1]  # Return the accuracy
 
-def train_ch6(net, train_iter, test_iter, num_epochs, lr, device):
+def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None):
     '''Train the model using GPU.'''
     def init_weights(m):
         if type(m) == nn.Linear or type(m) == nn.Conv2d:
             nn.init.xavier_uniform_(m.weight)
     net.apply(init_weights)
-    print('training on', device)
+    print(f'{net_name} training on {device}')
     net.to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=lr)
     loss = nn.CrossEntropyLoss()
@@ -61,8 +61,14 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device):
         animator.add(epoch + 1, (None, None, test_acc))
     print(f'loss {train_l:.3f}, train acc {train_acc:.3f}, '
           f'test acc {test_acc:.3f}')
-    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec '
-          f'on {str(device)}')
+    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec on {str(device)}')
+    print(timer)
+
+def print_net(net):
+    X = torch.rand(size=(1, 1, 28, 28), dtype=torch.float32)
+    for layer in net:
+        X = layer(X)
+        print(layer.__class__.__name__,'output shape:\t', X.shape)
 
 if __name__ == '__main__':
     net = nn.Sequential(
@@ -75,15 +81,10 @@ if __name__ == '__main__':
         nn.Linear(120, 84), nn.Sigmoid(),
         nn.Linear(84, 10))
 
-    X = torch.rand(size=(1, 1, 28, 28), dtype=torch.float32)
-    for layer in net:
-        X = layer(X)
-        print(layer.__class__.__name__,'output shape:\t', X.shape)
-
-    batch_size = 256
-    train_iter, test_iter = d2l_save.load_data_fashion_mnist(batch_size=batch_size)
-
-    lr, num_epochs = 0.9, 10
-    train_ch6(net, train_iter, test_iter, num_epochs, lr, device=d2l_save.try_gpu())
+    # print_net(net)
+    lr, num_epochs, batch_size = 0.9, 10, 256
+    train_iter, test_iter = d2l_save.load_data_fashion_mnist(batch_size)
+    train_ch6(net, train_iter, test_iter, num_epochs, lr, 
+              device=d2l_save.try_gpu(), net_name='LeNet-5')
     # d2l.plt.ioff()
     # d2l.plt.show()
