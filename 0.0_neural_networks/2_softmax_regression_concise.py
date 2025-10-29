@@ -1,5 +1,5 @@
 '''
-Concise Implementation of Softmax Regression
+Softmax Regression (Concise Implementation)
 '''
 
 import torch

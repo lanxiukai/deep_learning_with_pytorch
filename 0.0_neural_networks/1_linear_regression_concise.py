@@ -1,5 +1,5 @@
 '''
-Concise Implementation of Linear Regression
+Linear Regression (Concise Implementation)
 '''
 
 import torch

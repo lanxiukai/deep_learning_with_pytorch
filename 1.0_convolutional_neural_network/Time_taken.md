@@ -1,4 +1,6 @@
 ## RTX 4060 Ti (8G)
+---(resize=224)---
+
 AlexNet training on cuda:0
 loss 0.328, train acc 0.880, test acc 0.884
 1947.0 examples/sec on cuda:0
@@ -14,28 +16,37 @@ loss 0.430, train acc 0.840, test acc 0.840
 1632.9 examples/sec on cuda:0
 Time taken: 0 h 6 min 7.4 sec
 
-GoogLeNet training on cuda:0
-loss 0.290, train acc 0.892, test acc 0.887
-556.4 examples/sec on cuda:0
-Time taken: 0 h 17 min 58.3 sec
-
 ## RTX 4070 Ti (12G)
+---(resize=224)---
+
 AlexNet training on cuda:0
-loss 0.331, train acc 0.878, test acc 0.878
-3241.1 examples/sec on cuda:0
-Time taken: 0 h 3 min 5.1 sec
+loss 0.330, train acc 0.880, test acc 0.881
+3175.8 examples/sec on cuda:0
+Time taken: 0 h 3 min 8.9 sec
 
 VGG-11 training on cuda:0
-loss 0.176, train acc 0.935, test acc 0.923
-2100.9 examples/sec on cuda:0
-Time taken: 0 h 4 min 45.6 sec
+loss 0.194, train acc 0.927, test acc 0.907
+2160.7 examples/sec on cuda:0
+Time taken: 0 h 4 min 37.7 sec
 
 NiN training on cuda:0
-loss 0.338, train acc 0.875, test acc 0.847
-2614.9 examples/sec on cuda:0
-Time taken: 0 h 3 min 49.5 sec
+loss 0.557, train acc 0.805, test acc 0.795
+2726.2 examples/sec on cuda:0
+Time taken: 0 h 3 min 40.1 sec
+
+---(resize=96)---
 
 GoogLeNet training on cuda:0
-loss 0.271, train acc 0.899, test acc 0.892
-935.2 examples/sec on cuda:0
-Time taken: 0 h 10 min 41.6 sec
+loss 0.245, train acc 0.906, test acc 0.892
+3923.3 examples/sec on cuda:0
+Time taken: 0 h 2 min 32.9 sec
+
+ResNet-18 training on cuda:0
+loss 0.007, train acc 0.999, test acc 0.919
+5908.0 examples/sec on cuda:0
+Time taken: 0 h 1 min 41.6 sec
+
+DenseNet training on cuda:0
+loss 0.139, train acc 0.949, test acc 0.847
+5381.9 examples/sec on cuda:0
+Time taken: 0 h 1 min 51.5 sec

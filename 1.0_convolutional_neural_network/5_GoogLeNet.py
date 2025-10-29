@@ -31,8 +31,7 @@ class Inception(nn.Module):
         p3 = F.relu(self.p3_2(F.relu(self.p3_1(x))))
         p4 = F.relu(self.p4_2(self.p4_1(x)))
         # Concatenate the output of the four paths
-        # The output shape is (batch_size, 4 * in_channels)
-        return torch.cat((p1, p2, p3, p4), dim=1)
+        return torch.cat((p1, p2, p3, p4), dim=1)  # (B, c1 + c2[1] + c3[1] + c4, H, W)
 
 def print_net(net):
     X = torch.rand(size=(1, 1, 96, 96), dtype=torch.float32)
@@ -57,10 +56,11 @@ if __name__ == '__main__':
                        nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
     b5 = nn.Sequential(Inception(832, 256, (160, 320), (32, 128), 128),
                        Inception(832, 384, (192, 384), (48, 128), 128),
-                       nn.AdaptiveAvgPool2d((1, 1)),
-                       nn.Flatten())
+                       nn.AdaptiveAvgPool2d((1, 1)),  # (B, C, 1, 1)
+                       nn.Flatten())                  # (B, C)
     
-    net = nn.Sequential(b1, b2, b3, b4, b5, nn.Linear(1024, 10))
+    net = nn.Sequential(b1, b2, b3, b4, b5, nn.Linear(1024, 10))  # (B, C) -> (B, 10)
+    
     # print_net(net)
 
     lr, num_epochs, batch_size = 0.1, 10, 128

@@ -1,5 +1,5 @@
 '''
-Concise Implementation of Multilayer Perceptron
+Multilayer Perceptron (Concise Implementation)
 '''
 
 import torch

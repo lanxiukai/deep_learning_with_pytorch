@@ -1,5 +1,5 @@
 '''
-Concise Implementation of Dropout
+Dropout (Concise Implementation)
 '''
 
 import torch
