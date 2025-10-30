@@ -1,0 +1,12 @@
+name: d2l
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - matplotlib
+  - pandas
+  - requests
+  - matplotlib-inline
+  - ipython
+prefix: /home/lanxiukai/mambaforge/envs/d2l
