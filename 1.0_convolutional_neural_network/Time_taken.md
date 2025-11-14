@@ -47,6 +47,6 @@ loss 0.007, train acc 0.999, test acc 0.919
 Time taken: 0 h 1 min 41.6 sec
 
 DenseNet training on cuda:0
-loss 0.139, train acc 0.949, test acc 0.847
-5381.9 examples/sec on cuda:0
-Time taken: 0 h 1 min 51.5 sec
+loss 0.139, train acc 0.950, test acc 0.876
+5386.8 examples/sec on cuda:0
+Time taken: 0 h 1 min 51.4 sec

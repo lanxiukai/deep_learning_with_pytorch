@@ -16,8 +16,7 @@ class DenseBlock(nn.Module):
         super(DenseBlock, self).__init__()
         layer = []
         for i in range(num_convs):
-            layer.append(conv_block(
-                num_channels * i + input_channels, num_channels))
+            layer.append(conv_block(num_channels * i + input_channels, num_channels))
         self.net = nn.Sequential(*layer)
 
     def forward(self, X):
@@ -27,11 +26,12 @@ class DenseBlock(nn.Module):
             X = torch.cat((X, Y), dim=1)
         return X
 
+# Add a transition layer between dense blocks to decrease the number of channels
 def transition_block(input_channels, num_channels):
     return nn.Sequential(
         nn.BatchNorm2d(input_channels), nn.ReLU(),
         nn.Conv2d(input_channels, num_channels, kernel_size=1),
-        nn.AvgPool2d(kernel_size=2, stride=2))
+        nn.AvgPool2d(kernel_size=2, stride=2))  # Reduce the spatial dimension by half
 
 def print_dense_block_shape():
     blk = DenseBlock(2, 3, 10)
@@ -50,7 +50,7 @@ if __name__ == '__main__':
         nn.BatchNorm2d(64), nn.ReLU(),
         nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
     # num_channels is the number of channels in the current block
-    num_channels, growth_rate = 64, 32
+    num_channels, growth_rate = 64, 32  # Initialize the num_channels and growth_rate
     num_convs_in_dense_blocks = [4, 4, 4, 4]
     blks = []
 

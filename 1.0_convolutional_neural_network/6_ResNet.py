@@ -15,10 +15,10 @@ class Residual(nn.Module):
                                kernel_size=3, padding=1, stride=strides)
         self.conv2 = nn.Conv2d(num_channels, num_channels,
                                kernel_size=3, padding=1)
-        if use_1x1conv:
+        if use_1x1conv:  # Use 1x1 convolution to adjust the number of channels and the spatial dimension
             self.conv3 = nn.Conv2d(input_channels, num_channels,
                                    kernel_size=1, stride=strides)
-        else:
+        else:            # If strides=1, input_channels=num_channels, no need to use 1x1 convolution
             self.conv3 = None
         self.bn1 = nn.BatchNorm2d(num_channels)
         self.bn2 = nn.BatchNorm2d(num_channels)
