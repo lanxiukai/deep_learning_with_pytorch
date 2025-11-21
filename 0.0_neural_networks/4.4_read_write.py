@@ -1,5 +1,5 @@
 '''
-Load and Save Tensor
+Read and Write Tensor
 '''
 
 import torch

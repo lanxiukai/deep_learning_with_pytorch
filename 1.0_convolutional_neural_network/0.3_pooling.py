@@ -1,5 +1,5 @@
 '''
-Pooling Layer
+Pooling
 '''
 
 import torch

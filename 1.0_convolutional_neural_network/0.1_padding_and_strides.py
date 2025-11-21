@@ -1,5 +1,5 @@
 '''
-Padding and Stride
+Padding and Strides
 '''
 
 import torch

@@ -20,6 +20,10 @@ import matplotlib
 from pathlib import Path
 import shutil
 import atexit
+import re
+import collections
+import random
+import math
 from matplotlib_inline import backend_inline
 try:
     matplotlib.use('TkAgg')
@@ -30,9 +34,6 @@ except Exception as err:  # pragma: no cover
     matplotlib.use('Agg')
 
 from d2l import torch as d2l
-# def _check_d2l_path():
-#     print(d2l.__file__)  # check the path of d2l
-# _check_d2l_path()
 
 d2l_save = sys.modules[__name__]
 
@@ -385,7 +386,7 @@ class Animator:
         self.fig, self.axes = d2l.plt.subplots(nrows, ncols, figsize=figsize)
         if nrows * ncols == 1:
             self.axes = [self.axes, ]
-        self.config_axes = lambda: d2l_save.set_axes(
+        self.config_axes = lambda: set_axes(
             self.axes[0], xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
         self.X, self.Y, self.fmts = None, None, fmts
         d2l.plt.ion()
@@ -455,10 +456,10 @@ def predict_ch3(net, test_iter, n=6):
     """
     for X, y in test_iter:
         break
-    trues = d2l_save.get_fashion_mnist_labels(y)
-    preds = d2l_save.get_fashion_mnist_labels(net(X).argmax(axis=1))
+    trues = get_fashion_mnist_labels(y)
+    preds = get_fashion_mnist_labels(net(X).argmax(axis=1))
     titles = [true +'\n' + pred for true, pred in zip(trues, preds)]
-    d2l_save.show_images(X[0:n].reshape((n, 28, 28)), 1, n, titles=titles[0:n])
+    show_images(X[0:n].reshape((n, 28, 28)), 1, n, titles=titles[0:n])
 
 def evaluate_loss(net, data_iter, loss):
     '''Evaluate the model’s loss on the given dataset.
@@ -470,7 +471,7 @@ def evaluate_loss(net, data_iter, loss):
     Returns:
         the average loss
     '''
-    metric = d2l_save.Accumulator(2)  # loss_sum, num_samples
+    metric = Accumulator(2)  # loss_sum, num_samples
     for X, y in data_iter:
         out = net(X)
         y = y.reshape(out.shape)
@@ -568,7 +569,7 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
         if not device:
             # Get the device of the first parameter of the net
             device = next(iter(net.parameters())).device
-    metric = d2l_save.Accumulator(2)  # correct predictions, total predictions
+    metric = Accumulator(2)  # correct predictions, total predictions
     with torch.no_grad():
         for X, y in data_iter:
             if isinstance(X, list):
@@ -577,7 +578,7 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
             else:
                 X = X.to(device)
             y = y.to(device)
-            metric.add(d2l_save.accuracy(net(X), y), y.numel())
+            metric.add(accuracy(net(X), y), y.numel())
     return metric[0] / metric[1]  # Return the accuracy
 
 def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None):
@@ -586,16 +587,22 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None)
         if type(m) == nn.Linear or type(m) == nn.Conv2d:
             nn.init.xavier_uniform_(m.weight)
     net.apply(init_weights)
-    print(f'{net_name} training on {device}')
+
     net.to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=lr)
     loss = nn.CrossEntropyLoss()
-    animator = d2l_save.Animator(xlabel='epoch', xlim=[1, num_epochs], 
+    animator = Animator(xlabel='epoch', xlim=[1, num_epochs], 
                                  legend=['train loss', 'train acc', 'test acc'])
-    timer, num_batches = d2l_save.Timer(), len(train_iter)
+    timer, num_batches = Timer(), len(train_iter)
+
+    if net_name is not None:
+        print(f'\n{net_name} is training on {str(device)} ...')
+    else:
+        print(f'\nTraining on {str(device)} ...')
+
     for epoch in range(num_epochs):
         # (training) loss_sum, total number of correct predictions, total number of samples
-        metric = d2l_save.Accumulator(3)
+        metric = Accumulator(3)
         net.train()
         for i, (X, y) in enumerate(train_iter):
             timer.start()
@@ -606,7 +613,7 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None)
             l.backward()
             optimizer.step()
             with torch.no_grad():
-                metric.add(l * X.shape[0], d2l_save.accuracy(y_hat, y), X.shape[0])
+                metric.add(l * X.shape[0], accuracy(y_hat, y), X.shape[0])
             timer.stop()
             train_l = metric[0] / metric[2]
             train_acc = metric[1] / metric[2]
@@ -642,3 +649,249 @@ class Residual(nn.Module):
             X = self.conv3(X)
         Y += X
         return F.relu(Y)
+
+DATA_HUB['time_machine'] = (
+    DATA_URL + 'timemachine.txt',
+    '090b5e7e70c295757f55df93cb0a180b9691891a')
+
+def read_time_machine():
+    """Load the Time Machine dataset into a list of text lines"""
+    with open(download('time_machine'), 'r') as f:
+        lines = f.readlines()
+    return [re.sub('[^A-Za-z]+', ' ', line).strip().lower() for line in lines]
+
+def tokenize(lines, token='word'):
+    """Split text lines into word or character tokens"""
+    if token == 'word':
+        return [line.split() for line in lines]
+    elif token == 'char':
+        return [list(line) for line in lines]
+    else:
+        print('Error: unknown token type: ' + token)
+
+class Vocab:
+    """Text vocabulary"""
+    def __init__(self, tokens=None, min_freq=0, reserved_tokens=None):
+        if tokens is None:
+            tokens = []
+        if reserved_tokens is None:
+            reserved_tokens = []
+        # Sort by frequency
+        counter = count_corpus(tokens)
+        self._token_freqs = sorted(counter.items(), key=lambda x: x[1],
+                                   reverse=True)
+        # The index of the unknown token is 0
+        self.idx_to_token = ['<unk>'] + reserved_tokens
+        self.token_to_idx = {token: idx
+                             for idx, token in enumerate(self.idx_to_token)}
+        for token, freq in self._token_freqs:
+            if freq < min_freq:
+                break
+            if token not in self.token_to_idx:
+                self.idx_to_token.append(token)
+                self.token_to_idx[token] = len(self.idx_to_token) - 1
+
+    def __len__(self):
+        return len(self.idx_to_token)
+
+    def __getitem__(self, tokens):
+        if not isinstance(tokens, (list, tuple)):
+            return self.token_to_idx.get(tokens, self.unk)
+        return [self.__getitem__(token) for token in tokens]
+
+    def to_tokens(self, indices):
+        if not isinstance(indices, (list, tuple)):
+            return self.idx_to_token[indices]
+        return [self.idx_to_token[index] for index in indices]
+
+    @property
+    def unk(self):  # The index of the unknown token is 0
+        return 0
+
+    @property
+    def token_freqs(self):
+        return self._token_freqs
+
+def count_corpus(tokens):
+    """Count token frequencies"""
+    # Here tokens is a 1D list or a 2D list
+    if len(tokens) == 0 or isinstance(tokens[0], list):
+        # Flatten a 2D list of tokens into a single list
+        tokens = [token for line in tokens for token in line]
+    return collections.Counter(tokens)
+
+def load_corpus_time_machine(max_tokens=-1):
+    """Return corpus indices and vocabulary of the Time Machine dataset"""
+    lines = read_time_machine()
+    tokens = tokenize(lines, 'char')
+    vocab = Vocab(tokens)
+    # Because each line in the Time Machine dataset is not necessarily a sentence or a paragraph,
+    # we flatten all text lines into a single list
+    corpus = [vocab[token] for line in tokens for token in line]
+    if max_tokens > 0:
+        corpus = corpus[:max_tokens]
+    return corpus, vocab
+
+def seq_data_iter_random(corpus, batch_size, num_steps):
+    """Generate a minibatch of subsequences using random sampling"""
+    # Partition the sequence starting from a random offset, whose range includes num_steps - 1
+    corpus = corpus[random.randint(0, num_steps - 1):]
+    # Subtract 1 because we need to account for the labels
+    num_subseqs = (len(corpus) - 1) // num_steps
+    # Starting indices of subsequences with length num_steps
+    initial_indices = list(range(0, num_subseqs * num_steps, num_steps))
+    # During iteration with random sampling,
+    # subsequences from two adjacent random minibatches are not necessarily adjacent in the original sequence
+    random.shuffle(initial_indices)
+
+    def data(pos):
+        # Return the subsequence of length num_steps starting from position pos
+        return corpus[pos: pos + num_steps]
+
+    num_batches = num_subseqs // batch_size
+    for i in range(0, batch_size * num_batches, batch_size):
+        # Here, initial_indices contains the random starting indices of subsequences
+        initial_indices_per_batch = initial_indices[i: i + batch_size]
+        X = [data(j) for j in initial_indices_per_batch]
+        Y = [data(j + 1) for j in initial_indices_per_batch]
+        yield torch.tensor(X), torch.tensor(Y)
+
+def seq_data_iter_sequential(corpus, batch_size, num_steps):
+    """Generate a minibatch of subsequences using sequential partitioning"""
+    # Split the sequence starting from a random offset
+    offset = random.randint(0, num_steps)
+    num_tokens = ((len(corpus) - offset - 1) // batch_size) * batch_size
+    Xs = torch.tensor(corpus[offset: offset + num_tokens])
+    Ys = torch.tensor(corpus[offset + 1: offset + 1 + num_tokens])
+    Xs, Ys = Xs.reshape(batch_size, -1), Ys.reshape(batch_size, -1)
+    num_batches = Xs.shape[1] // num_steps
+    for i in range(0, num_steps * num_batches, num_steps):
+        X = Xs[:, i: i + num_steps]
+        Y = Ys[:, i: i + num_steps]
+        yield X, Y
+
+class SeqDataLoader:
+    """Iterator for loading sequence data"""
+    def __init__(self, batch_size, num_steps, use_random_iter, max_tokens):
+        if use_random_iter:
+            self.data_iter_fn = seq_data_iter_random
+        else:
+            self.data_iter_fn = seq_data_iter_sequential
+        self.corpus, self.vocab = load_corpus_time_machine(max_tokens)
+        self.batch_size, self.num_steps = batch_size, num_steps
+
+    def __iter__(self):
+        return self.data_iter_fn(self.corpus, self.batch_size, self.num_steps)
+
+def load_data_time_machine(batch_size, num_steps,
+                           use_random_iter=False, max_tokens=10000):
+    """Return the iterator and vocabulary for the Time Machine dataset"""
+    data_iter = SeqDataLoader(
+        batch_size, num_steps, use_random_iter, max_tokens)
+    return data_iter, data_iter.vocab
+
+class RNNModelScratch:
+    """Recurrent neural network model implemented from scratch"""
+    def __init__(self, vocab_size, num_hiddens, device,
+                 get_params, init_state, forward_fn):
+        self.vocab_size, self.num_hiddens = vocab_size, num_hiddens
+        self.params = get_params(vocab_size, num_hiddens, device)
+        self.init_state, self.forward_fn = init_state, forward_fn
+
+    def __call__(self, X, state):
+        X = F.one_hot(X.T, self.vocab_size).type(torch.float32)
+        return self.forward_fn(X, state, self.params)
+
+    def begin_state(self, batch_size, device):
+        return self.init_state(batch_size, self.num_hiddens, device)
+
+def predict_ch8(prefix, num_preds, net, vocab, device):
+    """Generate new characters following the given prefix"""
+    state = net.begin_state(batch_size=1, device=device)
+    outputs = [vocab[prefix[0]]]  # save the indices of the prefix and generated characters
+    get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))  # (batch_size, time_step)
+    for y in prefix[1:]:  # Warm-up period
+        _, state = net(get_input(), state)
+        outputs.append(vocab[y])
+    for _ in range(num_preds):  # Predict for num_preds steps
+        y, state = net(get_input(), state)
+        outputs.append(int(y.argmax(dim=1).reshape(1)))
+    return ''.join([vocab.idx_to_token[i] for i in outputs])
+
+def grad_clipping(net, theta):
+    """Clip gradients"""
+    if isinstance(net, nn.Module):
+        params = [p for p in net.parameters() if p.requires_grad]
+    else:
+        params = net.params
+    norm = torch.sqrt(sum(torch.sum((p.grad ** 2)) for p in params))
+    if norm > theta:
+        for param in params:
+            param.grad[:] *= theta / norm
+
+def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
+    """Train the network for one epoch (see Chapter 8 for the definition)"""
+    state, timer = None, Timer()
+    metric = Accumulator(2)  # Sum of training loss, number of tokens
+    for X, Y in train_iter:
+        if state is None or use_random_iter:
+            # Initialize state during the first iteration or when using random sampling
+            state = net.begin_state(batch_size=X.shape[0], device=device)
+        else:
+            if isinstance(net, nn.Module) and not isinstance(state, tuple):
+                # For nn.GRU, state is a tensor
+                state.detach_()
+            else:
+                # For nn.LSTM or for our scratch implementation, state is a tuple of tensors
+                for s in state:
+                    s.detach_()
+        y = Y.T.reshape(-1)  # Flatten over time steps
+        X, y = X.to(device), y.to(device)
+        y_hat, state = net(X, state)
+        l = loss(y_hat, y.long()).mean()
+        if isinstance(updater, torch.optim.Optimizer):
+            updater.zero_grad()
+            l.backward()
+            grad_clipping(net, 1)
+            updater.step()
+        else:
+            l.backward()
+            grad_clipping(net, 1)
+            updater()
+        metric.add(l * y.numel(), y.numel())
+    epoch_time = timer.stop()
+    speed = metric[1] / epoch_time
+    return math.exp(metric[0] / metric[1]), speed, epoch_time  # perplexity, speed, time
+
+def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
+              use_random_iter=False, net_name=None):
+    """Train the model (see Chapter 8 for the definition)"""
+    loss = nn.CrossEntropyLoss()
+    animator = Animator(xlabel='epoch', ylabel='perplexity',
+                        legend=['train'], xlim=[10, num_epochs])
+    # Initialization
+    if isinstance(net, nn.Module):
+        updater = torch.optim.SGD(net.parameters(), lr)
+    else:
+        updater = lambda: sgd(net.params, lr)
+    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
+
+    if net_name is not None:
+        print(f'\n{net_name} is training on {str(device)} ...')
+    else:
+        print(f'\nTraining on {str(device)} ...')
+    total_time, total_speed = 0.0, 0.0
+    # Training and prediction
+    for epoch in range(num_epochs):
+        ppl, speed, epoch_time = train_epoch_ch8(
+            net, train_iter, loss, updater, device, use_random_iter)
+        total_speed += speed
+        total_time += epoch_time
+        if (epoch + 1) % 10 == 0:
+            # print(predict('time traveller'))
+            animator.add(epoch + 1, [ppl])
+    avg_speed = total_speed / num_epochs if num_epochs else 0.0
+    total_time_str = Timer().format_time(total_time)
+    print(f'Perplexity {ppl:.1f}, {avg_speed:.1f} tokens/sec, total time: {total_time_str}')
+    print(predict('time traveller'))
+    print(predict('traveller'))

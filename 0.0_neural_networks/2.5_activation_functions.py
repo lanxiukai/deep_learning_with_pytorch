@@ -1,5 +1,5 @@
 '''
-Activation Function
+Activation Functions
 '''
 
 import torch

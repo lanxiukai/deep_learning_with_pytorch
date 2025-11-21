@@ -1,5 +1,5 @@
 '''
-Polynomial Regression
+Model Selection, Underfitting and Overfitting (Polynomial Regression)
 '''
 
 import math

@@ -1,5 +1,5 @@
 '''
-Parameter Management
+Parameters
 '''
 
 import torch

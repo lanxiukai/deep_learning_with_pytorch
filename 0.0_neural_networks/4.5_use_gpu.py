@@ -1,5 +1,5 @@
 '''
-GPU computation based on PyTorch (By default, tensors are created on the CPU)
+Use GPU
 '''
 
 import torch

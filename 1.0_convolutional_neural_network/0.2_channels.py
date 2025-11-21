@@ -1,5 +1,5 @@
 '''
-Multichannel Convolution
+Channels
 '''
 
 import torch
