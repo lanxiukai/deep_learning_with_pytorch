@@ -33,19 +33,19 @@ d2l_save.plot([freqs, bigram_freqs, trigram_freqs], xlabel='token: x',
          legend=['unigram', 'bigram', 'trigram'])
 
 def seq_data_iter_random(corpus, batch_size, num_steps):  #@save
-    """Generate a minibatch of subsequences using random sampling"""
+    """Generate a batch of subsequences using random sampling"""
     # Partition the sequence starting from a random offset, whose range includes num_steps - 1
     corpus = corpus[random.randint(0, num_steps - 1):]
     # Subtract 1 because we need to account for the labels
     num_subseqs = (len(corpus) - 1) // num_steps
     # Initial indices of subsequences with length num_steps
     initial_indices = list(range(0, num_subseqs * num_steps, num_steps))
-    # During iteration with random sampling,
-    # subsequences from two adjacent random minibatches are not necessarily adjacent in the original sequence
+    # During iteration with random sampling, subsequences from two adjacent random batches 
+    # are not necessarily adjacent in the original sequence
     random.shuffle(initial_indices)
 
     def data(pos):
-        # Return the subsequence of length num_steps starting from position pos
+        # Return the subsequence of length num_steps starting from index pos
         return corpus[pos: pos + num_steps]
 
     num_batches = num_subseqs // batch_size
@@ -54,6 +54,7 @@ def seq_data_iter_random(corpus, batch_size, num_steps):  #@save
         initial_indices_per_batch = initial_indices[i: i + batch_size]
         X = [data(j) for j in initial_indices_per_batch]
         Y = [data(j + 1) for j in initial_indices_per_batch]
+        # Yield the subsequences as tensors: (batch_size, num_steps)
         yield torch.tensor(X), torch.tensor(Y)
 
 my_seq = list(range(35))
@@ -61,7 +62,7 @@ for X, Y in seq_data_iter_random(my_seq, batch_size=2, num_steps=5):
     print('X: ', X, '\nY:', Y)
 
 def seq_data_iter_sequential(corpus, batch_size, num_steps):  #@save
-    """Generate a minibatch of subsequences using sequential partitioning"""
+    """Generate a batch of subsequences using sequential partitioning"""
     # Split the sequence starting from a random offset
     offset = random.randint(0, num_steps)
     num_tokens = ((len(corpus) - offset - 1) // batch_size) * batch_size
@@ -72,6 +73,7 @@ def seq_data_iter_sequential(corpus, batch_size, num_steps):  #@save
     for i in range(0, num_steps * num_batches, num_steps):
         X = Xs[:, i: i + num_steps]
         Y = Ys[:, i: i + num_steps]
+        # Yield the subsequences as tensors: (batch_size, num_steps)
         yield X, Y
 
 for X, Y in seq_data_iter_sequential(my_seq, batch_size=2, num_steps=5):

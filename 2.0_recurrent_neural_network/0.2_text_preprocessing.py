@@ -24,9 +24,9 @@ print(lines[10])
 def tokenize(lines, token='word'):  #@save
     """Split text lines into word or character tokens"""
     if token == 'word':
-        return [line.split() for line in lines]
+        return [line.split() for line in lines]     # 2D list [([word])]
     elif token == 'char':
-        return [list(line) for line in lines]
+        return [list(line) for line in lines]  # 2D list [([char])]
     else:
         print('Error: unknown token type: ' + token)
 
@@ -44,10 +44,13 @@ class Vocab:  #@save
             reserved_tokens = []
         # Sort by frequency
         counter = count_corpus(tokens)
+        # Sorted by frequency in descending order, type: list of tuples [(token, frequency)]
         self._token_freqs = sorted(counter.items(), key=lambda x: x[1],
                                    reverse=True)
-        # The index of the unknown token is 0
+        # The index of the unknown token is 0, and the reserved tokens are prepended
+        # 1D list [token], the index is the position of the token in the list
         self.idx_to_token = ['<unk>'] + reserved_tokens
+        # 2D dictionary {token: index}
         self.token_to_idx = {token: idx
                              for idx, token in enumerate(self.idx_to_token)}
         for token, freq in self._token_freqs:
@@ -61,21 +64,24 @@ class Vocab:  #@save
         return len(self.idx_to_token)
 
     def __getitem__(self, tokens):
-        if not isinstance(tokens, (list, tuple)):  # If tokens is not a list or tuple, view it as a single token
-            return self.token_to_idx.get(tokens, self.unk)  # return the index of the token
-        return [self.__getitem__(token) for token in tokens]  # return the indices of the tokens
+        if not isinstance(tokens, (list, tuple)):  # if tokens is a single token
+            # return the index of the token if it exists, otherwise return the index of the unknown token (0)
+            return self.token_to_idx.get(tokens, self.unk)
+        return [self.__getitem__(token) for token in tokens]
 
     def to_tokens(self, indices):
-        if not isinstance(indices, (list, tuple)):  # If indices is not a list or tuple, view it as a single index
-            return self.idx_to_token[indices]  # return the token of the index
-        return [self.idx_to_token[index] for index in indices]  # return the tokens of the indices
+        if not isinstance(indices, (list, tuple)):  # if indices is a single index
+            return self.idx_to_token[indices]
+        return [self.idx_to_token[index] for index in indices]
 
-    @property  # The unk property can be accessed as an attribute (call vocab.unk instead of vocab.unk())
-    def unk(self):  # The index of the unknown token is 0
+    @property
+    def unk(self):
+        '''The index of the unknown token is 0'''
         return 0
 
-    @property  # Can be accessed as an attribute (call vocab.token_freqs instead of vocab.token_freqs())
+    @property
     def token_freqs(self):
+        '''Return a list of tuples sorted by token frequencies: [(token, frequency)]'''
         return self._token_freqs
 
 def count_corpus(tokens):  #@save
@@ -100,7 +106,7 @@ def load_corpus_time_machine(max_tokens=-1):  #@save
     vocab = Vocab(tokens)
     # Because each line in the Time Machine dataset is not necessarily a sentence or a paragraph,
     # we flatten all text lines into a single list
-    corpus = [vocab[token] for line in tokens for token in line]
+    corpus = [vocab[token] for line in tokens for token in line]  # hidden flatten: 1D list [index]
     if max_tokens > 0:
         corpus = corpus[:max_tokens]
     return corpus, vocab

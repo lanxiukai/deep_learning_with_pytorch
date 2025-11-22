@@ -183,7 +183,7 @@ def squared_loss(y_hat, y):
     return (y_hat - y.reshape(y_hat.shape)) ** 2 / 2
 
 def sgd(params, lr):
-    """Minibatch stochastic gradient descent.
+    """Batch stochastic gradient descent.
     
     Args:
         params: the parameters
@@ -663,9 +663,9 @@ def read_time_machine():
 def tokenize(lines, token='word'):
     """Split text lines into word or character tokens"""
     if token == 'word':
-        return [line.split() for line in lines]
+        return [line.split() for line in lines]     # 2D list [([word])]
     elif token == 'char':
-        return [list(line) for line in lines]
+        return [list(line) for line in lines]  # 2D list [([char])]
     else:
         print('Error: unknown token type: ' + token)
 
@@ -678,10 +678,13 @@ class Vocab:
             reserved_tokens = []
         # Sort by frequency
         counter = count_corpus(tokens)
+        # Sorted by frequency in descending order, type: list of tuples [(token, frequency)]
         self._token_freqs = sorted(counter.items(), key=lambda x: x[1],
                                    reverse=True)
-        # The index of the unknown token is 0
+        # The index of the unknown token is 0, and the reserved tokens are prepended
+        # 1D list [token], the index is the position of the token in the list
         self.idx_to_token = ['<unk>'] + reserved_tokens
+        # 2D dictionary {token: index}
         self.token_to_idx = {token: idx
                              for idx, token in enumerate(self.idx_to_token)}
         for token, freq in self._token_freqs:
@@ -695,21 +698,24 @@ class Vocab:
         return len(self.idx_to_token)
 
     def __getitem__(self, tokens):
-        if not isinstance(tokens, (list, tuple)):
+        if not isinstance(tokens, (list, tuple)):  # if tokens is a single token
+            # return the index of the token if it exists, otherwise return the index of the unknown token (0)
             return self.token_to_idx.get(tokens, self.unk)
         return [self.__getitem__(token) for token in tokens]
 
     def to_tokens(self, indices):
-        if not isinstance(indices, (list, tuple)):
+        if not isinstance(indices, (list, tuple)):  # if indices is a single index
             return self.idx_to_token[indices]
         return [self.idx_to_token[index] for index in indices]
 
     @property
-    def unk(self):  # The index of the unknown token is 0
+    def unk(self):
+        '''The index of the unknown token is 0'''
         return 0
 
     @property
     def token_freqs(self):
+        '''Return a list of tuples sorted by token frequencies: [(token, frequency)]'''
         return self._token_freqs
 
 def count_corpus(tokens):
@@ -727,37 +733,38 @@ def load_corpus_time_machine(max_tokens=-1):
     vocab = Vocab(tokens)
     # Because each line in the Time Machine dataset is not necessarily a sentence or a paragraph,
     # we flatten all text lines into a single list
-    corpus = [vocab[token] for line in tokens for token in line]
+    corpus = [vocab[token] for line in tokens for token in line]  # hidden flatten: 1D list [index]
     if max_tokens > 0:
         corpus = corpus[:max_tokens]
     return corpus, vocab
 
 def seq_data_iter_random(corpus, batch_size, num_steps):
-    """Generate a minibatch of subsequences using random sampling"""
+    """Generate a batch of subsequences using random sampling"""
     # Partition the sequence starting from a random offset, whose range includes num_steps - 1
     corpus = corpus[random.randint(0, num_steps - 1):]
     # Subtract 1 because we need to account for the labels
     num_subseqs = (len(corpus) - 1) // num_steps
-    # Starting indices of subsequences with length num_steps
+    # Initial indices of subsequences with length num_steps
     initial_indices = list(range(0, num_subseqs * num_steps, num_steps))
-    # During iteration with random sampling,
-    # subsequences from two adjacent random minibatches are not necessarily adjacent in the original sequence
+    # During iteration with random sampling, subsequences from two adjacent random batches 
+    # are not necessarily adjacent in the original sequence
     random.shuffle(initial_indices)
 
     def data(pos):
-        # Return the subsequence of length num_steps starting from position pos
+        # Return the subsequence of length num_steps starting from index pos
         return corpus[pos: pos + num_steps]
 
     num_batches = num_subseqs // batch_size
     for i in range(0, batch_size * num_batches, batch_size):
-        # Here, initial_indices contains the random starting indices of subsequences
+        # Here, initial_indices contains the random initial indices of subsequences
         initial_indices_per_batch = initial_indices[i: i + batch_size]
         X = [data(j) for j in initial_indices_per_batch]
         Y = [data(j + 1) for j in initial_indices_per_batch]
+        # Yield the subsequences as tensors: (batch_size, num_steps)
         yield torch.tensor(X), torch.tensor(Y)
 
 def seq_data_iter_sequential(corpus, batch_size, num_steps):
-    """Generate a minibatch of subsequences using sequential partitioning"""
+    """Generate a batch of subsequences using sequential partitioning"""
     # Split the sequence starting from a random offset
     offset = random.randint(0, num_steps)
     num_tokens = ((len(corpus) - offset - 1) // batch_size) * batch_size
@@ -768,6 +775,7 @@ def seq_data_iter_sequential(corpus, batch_size, num_steps):
     for i in range(0, num_steps * num_batches, num_steps):
         X = Xs[:, i: i + num_steps]
         Y = Ys[:, i: i + num_steps]
+        # Yield the subsequences as tensors: (batch_size, num_steps)
         yield X, Y
 
 class SeqDataLoader:
@@ -780,7 +788,7 @@ class SeqDataLoader:
         self.corpus, self.vocab = load_corpus_time_machine(max_tokens)
         self.batch_size, self.num_steps = batch_size, num_steps
 
-    def __iter__(self):
+    def __iter__(self):  # return the iterator of the data
         return self.data_iter_fn(self.corpus, self.batch_size, self.num_steps)
 
 def load_data_time_machine(batch_size, num_steps,
@@ -798,8 +806,9 @@ class RNNModelScratch:
         self.params = get_params(vocab_size, num_hiddens, device)
         self.init_state, self.forward_fn = init_state, forward_fn
 
-    def __call__(self, X, state):
-        X = F.one_hot(X.T, self.vocab_size).type(torch.float32)
+    def __call__(self, X, state):  # allow the object to be called like a function
+        # X: (batch_size, num_steps), state: (batch_size, num_hiddens)
+        X = F.one_hot(X.T, self.vocab_size).type(torch.float32)  # X: (num_steps, batch_size, vocab_size)
         return self.forward_fn(X, state, self.params)
 
     def begin_state(self, batch_size, device):
@@ -807,19 +816,20 @@ class RNNModelScratch:
 
 def predict_ch8(prefix, num_preds, net, vocab, device):
     """Generate new characters following the given prefix"""
-    state = net.begin_state(batch_size=1, device=device)
-    outputs = [vocab[prefix[0]]]  # save the indices of the prefix and generated characters
-    get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))  # (batch_size, time_step)
+    state = net.begin_state(batch_size=1, device=device)  # (1, num_hiddens)
+    outputs = [vocab[prefix[0]]]  # [index] of the prefix and generated characters
+    get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
+    # [last index] -> (1, 1): (num_steps, batch_size)
     for y in prefix[1:]:  # Warm-up period
-        _, state = net(get_input(), state)
+        _, state = net(get_input(), state)  # warm-up state only
         outputs.append(vocab[y])
     for _ in range(num_preds):  # Predict for num_preds steps
-        y, state = net(get_input(), state)
+        y, state = net(get_input(), state)  # (1 * 1, vocab_size), (1, num_hiddens)
         outputs.append(int(y.argmax(dim=1).reshape(1)))
     return ''.join([vocab.idx_to_token[i] for i in outputs])
 
 def grad_clipping(net, theta):
-    """Clip gradients"""
+    """Clip gradients (global norm clipping)"""
     if isinstance(net, nn.Module):
         params = [p for p in net.parameters() if p.requires_grad]
     else:
@@ -832,12 +842,13 @@ def grad_clipping(net, theta):
 def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
     """Train the network for one epoch (see Chapter 8 for the definition)"""
     state, timer = None, Timer()
-    metric = Accumulator(2)  # Sum of training loss, number of tokens
+    metric = Accumulator(2)  # Sum of training loss, number of tokens (num_steps * batch_size)
     for X, Y in train_iter:
         if state is None or use_random_iter:
             # Initialize state during the first iteration or when using random sampling
             state = net.begin_state(batch_size=X.shape[0], device=device)
         else:
+            # detach the state from the computation graph, avoid gradient explosion
             if isinstance(net, nn.Module) and not isinstance(state, tuple):
                 # For nn.GRU, state is a tensor
                 state.detach_()
@@ -845,9 +856,9 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
                 # For nn.LSTM or for our scratch implementation, state is a tuple of tensors
                 for s in state:
                     s.detach_()
-        y = Y.T.reshape(-1)  # Flatten over time steps
+        y = Y.T.reshape(-1)  # Flatten over num_steps (num_steps * batch_size)
         X, y = X.to(device), y.to(device)
-        y_hat, state = net(X, state)
+        y_hat, state = net(X, state)  # (num_steps * batch_size, vocab_size), (batch_size, num_hiddens)
         l = loss(y_hat, y.long()).mean()
         if isinstance(updater, torch.optim.Optimizer):
             updater.zero_grad()
@@ -861,14 +872,14 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
         metric.add(l * y.numel(), y.numel())
     epoch_time = timer.stop()
     speed = metric[1] / epoch_time
-    return math.exp(metric[0] / metric[1]), speed, epoch_time  # perplexity, speed, time
+    return math.exp(metric[0] / metric[1]), speed, epoch_time  # perplexity, speed, epoch time
 
 def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
               use_random_iter=False, net_name=None):
     """Train the model (see Chapter 8 for the definition)"""
     loss = nn.CrossEntropyLoss()
     animator = Animator(xlabel='epoch', ylabel='perplexity',
-                        legend=['train'], xlim=[10, num_epochs])
+                            legend=['train'], xlim=[10, num_epochs])
     # Initialization
     if isinstance(net, nn.Module):
         updater = torch.optim.SGD(net.parameters(), lr)
@@ -888,10 +899,54 @@ def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
         total_speed += speed
         total_time += epoch_time
         if (epoch + 1) % 10 == 0:
-            # print(predict('time traveller'))
             animator.add(epoch + 1, [ppl])
     avg_speed = total_speed / num_epochs if num_epochs else 0.0
     total_time_str = Timer().format_time(total_time)
     print(f'Perplexity {ppl:.1f}, {avg_speed:.1f} tokens/sec, total time: {total_time_str}')
     print(predict('time traveller'))
     print(predict('traveller'))
+
+class RNNModel(nn.Module):
+    """Recurrent neural network model"""
+    def __init__(self, rnn_layer, vocab_size, **kwargs):
+        super(RNNModel, self).__init__(**kwargs)
+        self.rnn = rnn_layer
+        self.vocab_size = vocab_size
+        self.num_hiddens = self.rnn.hidden_size
+        # If the RNN is bidirectional (introduced later), 
+        # num_directions should be 2; otherwise it should be 1
+        if not self.rnn.bidirectional:
+            self.num_directions = 1
+            self.linear = nn.Linear(self.num_hiddens, self.vocab_size)
+        else:
+            self.num_directions = 2
+            self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
+
+    def forward(self, inputs, state):
+        # inputs: (batch_size, num_steps)
+        # state: (num_directions * num_layers, batch_size, num_hiddens)
+        X = F.one_hot(inputs.T.long(), self.vocab_size)  # (num_steps, batch_size, vocab_size)
+        X = X.to(torch.float32)
+        Y, state = self.rnn(X, state)  # (num_steps, batch_size, num_hiddens * num_directions)
+        # First reshape Y to (num_steps * batch_size, num_hiddens * num_directions), then
+        # the output shape is (num_steps * batch_size, vocab_size).
+        output = self.linear(Y.reshape((-1, Y.shape[-1])))
+        return output, state
+
+    def begin_state(self, device, batch_size=1):
+        if not isinstance(self.rnn, nn.LSTM):
+            # nn.GRU uses a tensor (H) as its hidden state
+            # H: (num_directions * num_layers, batch_size, num_hiddens)
+            return torch.zeros((self.num_directions * self.rnn.num_layers,
+                                 batch_size, self.num_hiddens),
+                                device=device)
+        else:
+            # nn.LSTM uses a tuple of tensors (H, C) as its hidden state
+            # H: (num_directions * num_layers, batch_size, num_hiddens)
+            # C: (num_directions * num_layers, batch_size, num_hiddens)
+            return (torch.zeros((
+                        self.num_directions * self.rnn.num_layers,
+                        batch_size, self.num_hiddens), device=device),
+                    torch.zeros((
+                        self.num_directions * self.rnn.num_layers,
+                        batch_size, self.num_hiddens), device=device))
