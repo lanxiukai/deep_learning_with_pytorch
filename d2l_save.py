@@ -1222,7 +1222,7 @@ def read_data_nmt():  # neural machine translation dataset
     Returns:
         text (str): the raw text of the dataset
     """
-    data_dir = d2l_save.download_extract('fra-eng')
+    data_dir = download_extract('fra-eng')
     with open(os.path.join(data_dir, 'fra.txt'), 'r',
              encoding='utf-8') as f:
         return f.read()
@@ -1263,14 +1263,14 @@ def tokenize_nmt(text, num_examples=None):
 
 def show_list_len_pair_hist(legend, xlabel, ylabel, xlist, ylist):
     """Plot a histogram of list length pairs"""
-    d2l_save.set_figsize()
-    _, _, patches = d2l_save.plt.hist(
+    set_figsize()
+    _, _, patches = plt.hist(
         [[len(l) for l in xlist], [len(l) for l in ylist]])
-    d2l_save.plt.xlabel(xlabel)
-    d2l_save.plt.ylabel(ylabel)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
     for patch in patches[1].patches:
         patch.set_hatch('/')
-    d2l_save.plt.legend(legend)
+    plt.legend(legend)
 
 def truncate_pad(line, num_steps, padding_token):
     """
@@ -1325,12 +1325,60 @@ def load_data_nmt(batch_size, num_steps, num_examples=600):
     source, target = tokenize_nmt(text, num_examples)
     reserved_tokens=['<pad>', '<bos>', '<eos>']
     # Build source and target vocabularies
-    src_vocab = d2l_save.Vocab(source, min_freq=2, reserved_tokens=reserved_tokens)  # source vocabulary
-    tgt_vocab = d2l_save.Vocab(target, min_freq=2, reserved_tokens=reserved_tokens)  # target vocabulary
+    src_vocab = Vocab(source, min_freq=2, reserved_tokens=reserved_tokens)  # source vocabulary
+    tgt_vocab = Vocab(target, min_freq=2, reserved_tokens=reserved_tokens)  # target vocabulary
     # Build source and target arrays by truncating or padding
     src_array, src_valid_len = build_array_nmt(source, src_vocab, num_steps)
     tgt_array, tgt_valid_len = build_array_nmt(target, tgt_vocab, num_steps)
     # Load data into data loader
     data_arrays = (src_array, src_valid_len, tgt_array, tgt_valid_len)
-    data_iter = d2l_save.load_array(data_arrays, batch_size)
+    data_iter = load_array(data_arrays, batch_size)
     return data_iter, src_vocab, tgt_vocab
+
+class Encoder(nn.Module):
+    """Basic encoder interface for the encoder-decoder architecture"""
+    def __init__(self, **kwargs):
+        super(Encoder, self).__init__(**kwargs)
+
+    def forward(self, X, *args):  # encode the input X
+        raise NotImplementedError  # to be implemented by subclass
+
+class Decoder(nn.Module):
+    """Basic decoder interface for the encoder-decoder architecture"""
+    def __init__(self, **kwargs):
+        super(Decoder, self).__init__(**kwargs)
+
+    def init_state(self, enc_outputs, *args):  # initialize the decoder state based on the encoder outputs
+        raise NotImplementedError  # to be implemented by subclass
+
+    def forward(self, X, state):  # decode the decoder input X based on the decoder state
+        raise NotImplementedError  # to be implemented by subclass
+
+class EncoderDecoder(nn.Module):
+    """
+    Base class for the encoder-decoder architecture.
+    
+    Args:
+        encoder: a encoder instance (Encoder)
+        decoder: a decoder instance (Decoder)
+        **kwargs: additional arguments
+    """
+    def __init__(self, encoder, decoder, **kwargs):
+        super(EncoderDecoder, self).__init__(**kwargs)
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, enc_X, dec_X, *args):
+        """
+        Forward pass for the encoder-decoder architecture.
+        
+        Args:
+            enc_X: the encoder input
+            dec_X: the decoder input
+            *args: additional arguments
+        Returns:
+            The decoder output
+        """
+        enc_outputs = self.encoder(enc_X, *args)
+        dec_state = self.decoder.init_state(enc_outputs, *args)
+        return self.decoder(dec_X, dec_state)
