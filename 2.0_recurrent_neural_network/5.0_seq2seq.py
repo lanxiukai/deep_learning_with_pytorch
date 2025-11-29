@@ -10,7 +10,7 @@ from d2l_importer import d2l_save
 
 #@save
 class Seq2SeqEncoder(d2l_save.Encoder):
-    """Recurrent neural network encoder for sequence-to-sequence learning"""
+    """Recurrent neural network encoder for sequence-to-sequence learning."""
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
                  dropout=0, **kwargs):
         super(Seq2SeqEncoder, self).__init__(**kwargs)
@@ -20,18 +20,18 @@ class Seq2SeqEncoder(d2l_save.Encoder):
                           dropout=dropout)
 
     def forward(self, X, *args):
-        # Output 'X' shape: (batch_size, num_steps, embed_size)
-        X = self.embedding(X)
+        # Input 'X' shape: (batch_size, num_steps)
+        X = self.embedding(X)   # Output 'X' shape: (batch_size, num_steps, embed_size)
         # In recurrent neural network models, the first axis corresponds to time steps
-        X = X.permute(1, 0, 2)
-        # If state is not specified, it defaults to zeros
+        X = X.permute(1, 0, 2)  # Permute the dimensions of 'X' to (num_steps, batch_size, embed_size)
         output, state = self.rnn(X)
+        # if state is not specified, it defaults to zeros
         # Shape of output: (num_steps, batch_size, num_hiddens)
         # Shape of state: (num_layers, batch_size, num_hiddens)
         return output, state
 
 class Seq2SeqDecoder(d2l_save.Decoder):
-    """Recurrent neural network decoder for sequence-to-sequence learning"""
+    """Recurrent neural network decoder for sequence-to-sequence learning."""
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
                  dropout=0, **kwargs):
         super(Seq2SeqDecoder, self).__init__(**kwargs)
@@ -44,11 +44,12 @@ class Seq2SeqDecoder(d2l_save.Decoder):
         return enc_outputs[1]
 
     def forward(self, X, state):
-        # Output 'X' shape: (batch_size, num_steps, embed_size)
-        X = self.embedding(X).permute(1, 0, 2)
-        # Broadcast context so that it has the same num_steps as X
-        context = state[-1].repeat(X.shape[0], 1, 1)
+        X = self.embedding(X).permute(1, 0, 2)  # Permute the dimensions of 'X' to (num_steps, batch_size, embed_size)
+        # Broadcast context so that it has the same num_steps as X,
+        # Repeating the state of the last layer (state[-1], shape: (batch_size, num_hiddens)) for each time step
+        context = state[-1].repeat(X.shape[0], 1, 1)  # Shape of context: (num_steps, batch_size, num_hiddens)
         X_and_context = torch.cat((X, context), 2)
+        # Shape of X_and_context: (num_steps, batch_size, embed_size + num_hiddens)
         output, state = self.rnn(X_and_context, state)
         output = self.dense(output).permute(1, 0, 2)
         # Shape of output: (batch_size, num_steps, vocab_size)
@@ -57,31 +58,44 @@ class Seq2SeqDecoder(d2l_save.Decoder):
 
 #@save
 def sequence_mask(X, valid_len, value=0):
-    """Mask irrelevant items in sequences"""
+    """
+    Mask irrelevant items in sequences.
+
+    Args:
+        X: the input sequence (batch_size, num_steps)
+        valid_len: the valid length of the input sequence (batch_size,)
+        value: the value to fill the irrelevant items with (Default: 0)
+    Returns:
+        The masked input sequence (batch_size, num_steps),
+        where the irrelevant items are filled with the value.
+    """
     maxlen = X.size(1)
     mask = torch.arange((maxlen), dtype=torch.float32,
-                        device=X.device)[None, :] < valid_len[:, None]
-    X[~mask] = value
+                        device=X.device)[None, :] < valid_len[:, None]  # Shape of mask: (batch_size, num_steps)
+    X[~mask] = value  # Fill the irrelevant items with the value
     return X
 
 #@save
 class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
-    """Softmax cross-entropy loss with masking"""
+    """Softmax cross-entropy loss with masking."""
     # Shape of pred: (batch_size, num_steps, vocab_size)
     # Shape of label: (batch_size, num_steps)
     # Shape of valid_len: (batch_size,)
-    def forward(self, pred, label, valid_len):
+    def forward(self, pred, label, valid_len):  # Rewrite the forward method of the base class nn.CrossEntropyLoss
         weights = torch.ones_like(label)
         weights = sequence_mask(weights, valid_len)
-        self.reduction='none'
+        self.reduction='none'  # Set the reduction method to 'none' to return the loss for each item
+        # Permute the dimensions of 'pred' to (batch_size, vocab_size, num_steps) 
+        # to meet the needs of the base class nn.CrossEntropyLoss (input shape: (N, C, ...))
         unweighted_loss = super(MaskedSoftmaxCELoss, self).forward(
-            pred.permute(0, 2, 1), label)
-        weighted_loss = (unweighted_loss * weights).mean(dim=1)
+            pred.permute(0, 2, 1), label)  # Call the forward method of the base class nn.CrossEntropyLoss
+        # Shape of unweighted_loss: (batch_size, num_steps)
+        weighted_loss = (unweighted_loss * weights).mean(dim=1)  # Shape of weighted_loss: (batch_size,)
         return weighted_loss
 
 #@save
-def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
-    """Train a sequence-to-sequence model"""
+def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device, net_name=None):
+    """Train a sequence-to-sequence model."""
     def xavier_init_weights(m):
         if type(m) == nn.Linear:
             nn.init.xavier_uniform_(m.weight)
@@ -91,21 +105,27 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
                     nn.init.xavier_uniform_(m._parameters[param])
 
     net.apply(xavier_init_weights)
+    if net_name is not None:
+        print(f'\n{net_name} is training on {device} ...')
+    else:
+        print(f'\nTraining on {device} ...')
+    
     net.to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     loss = MaskedSoftmaxCELoss()
     net.train()
     animator = d2l_save.Animator(xlabel='epoch', ylabel='loss',
                      xlim=[10, num_epochs])
+    timer = d2l_save.Timer()
+    total_tokens = 0.0
     for epoch in range(num_epochs):
-        timer = d2l_save.Timer()
-        metric = d2l_save.Accumulator(2)  # Sum of training loss, number of tokens
+        metric = d2l_save.Accumulator(2)  # Sum of training loss, num_tokens
         for batch in data_iter:
             optimizer.zero_grad()
             X, X_valid_len, Y, Y_valid_len = [x.to(device) for x in batch]
             bos = torch.tensor([tgt_vocab['<bos>']] * Y.shape[0],
-                          device=device).reshape(-1, 1)
-            dec_input = torch.cat([bos, Y[:, :-1]], 1)  # Teacher forcing
+                          device=device).reshape(-1, 1)  # Shape of bos: (batch_size, 1)
+            dec_input = torch.cat([bos, Y[:, :-1]], 1)  # Teacher forcing (Shape of dec_input: (batch_size, num_steps + 1))
             Y_hat, _ = net(X, dec_input, X_valid_len)
             l = loss(Y_hat, Y, Y_valid_len)
             l.sum().backward()      # Perform backpropagation using the scalar loss
@@ -114,15 +134,19 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
             optimizer.step()
             with torch.no_grad():
                 metric.add(l.sum(), num_tokens)
+                total_tokens += float(num_tokens)
         if (epoch + 1) % 10 == 0:
             animator.add(epoch + 1, (metric[0] / metric[1],))
-    print(f'loss {metric[0] / metric[1]:.3f}, {metric[1] / timer.stop():.1f} '
-        f'tokens/sec on {str(device)}')
+    total_time = timer.stop()
+    tokens_per_sec = total_tokens / total_time if total_time > 0 else float('inf')
+    total_time_str = timer.format_time(total_time)
+    print(f'loss {metric[0] / metric[1]:.3f}, {tokens_per_sec:.1f} '
+          f'tokens/sec, total time: {total_time_str}')
 
 #@save
 def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
                     device, save_attention_weights=False):
-    """Prediction for sequence-to-sequence model"""
+    """Prediction for sequence-to-sequence model."""
     # Set net to evaluation mode during prediction
     net.eval()
     src_tokens = src_vocab[src_sentence.lower().split(' ')] + [
@@ -153,7 +177,7 @@ def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
     return ' '.join(tgt_vocab.to_tokens(output_seq)), attention_weight_seq
 
 def bleu(pred_seq, label_seq, k):  #@save
-    """Compute BLEU"""
+    """Compute BLEU."""
     pred_tokens, label_tokens = pred_seq.split(' '), label_seq.split(' ')
     len_pred, len_label = len(pred_tokens), len(label_tokens)
     score = math.exp(min(0, 1 - len_label / len_pred))
@@ -169,31 +193,28 @@ def bleu(pred_seq, label_seq, k):  #@save
     return score
 
 def main():
-    encoder = Seq2SeqEncoder(vocab_size=10, embed_size=8, num_hiddens=16,
-                             num_layers=2)
-    encoder.eval()
-    X = torch.zeros((4, 7), dtype=torch.long)
-    output, state = encoder(X)
-    print(output.shape)
+    # encoder = Seq2SeqEncoder(vocab_size=10, embed_size=8, num_hiddens=16, num_layers=2)
+    # encoder.eval()
+    # X = torch.zeros((4, 7), dtype=torch.long)
+    # output, state = encoder(X)
+    # print(output.shape)
+    # print(state.shape)
 
-    print(state.shape)
+    # decoder = Seq2SeqDecoder(vocab_size=10, embed_size=8, num_hiddens=16, num_layers=2)
+    # decoder.eval()
+    # state = decoder.init_state(encoder(X))
+    # output, state = decoder(X, state)
+    # print(output.shape, state.shape)
 
-    decoder = Seq2SeqDecoder(vocab_size=10, embed_size=8, num_hiddens=16,
-                             num_layers=2)
-    decoder.eval()
-    state = decoder.init_state(encoder(X))
-    output, state = decoder(X, state)
-    print(output.shape, state.shape)
+    # X = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    # print(sequence_mask(X, torch.tensor([1, 2])))
 
-    X = torch.tensor([[1, 2, 3], [4, 5, 6]])
-    print(sequence_mask(X, torch.tensor([1, 2])))
+    # X = torch.ones(2, 3, 4)
+    # print(sequence_mask(X, torch.tensor([1, 2]), value=-1))
 
-    X = torch.ones(2, 3, 4)
-    print(sequence_mask(X, torch.tensor([1, 2]), value=-1))
-
-    loss = MaskedSoftmaxCELoss()
-    print(loss(torch.ones(3, 4, 10), torch.ones((3, 4), dtype=torch.long),
-         torch.tensor([4, 2, 0])))
+    # loss = MaskedSoftmaxCELoss()
+    # print(loss(torch.ones(3, 4, 10), torch.ones((3, 4), dtype=torch.long),
+    #      torch.tensor([4, 2, 0])))
 
     embed_size, num_hiddens, num_layers, dropout = 32, 32, 2, 0.1
     batch_size, num_steps = 64, 10
@@ -206,13 +227,14 @@ def main():
                             dropout)
     net = d2l_save.EncoderDecoder(encoder, decoder)
     train_seq2seq(net, train_iter, lr, num_epochs, tgt_vocab, device)
-
+    """
     engs = ['go .', "i lost .", 'he\'s calm .', 'i\'m home .']
     fras = ['va !', 'j\'ai perdu .', 'il est calme .', 'je suis chez moi .']
     for eng, fra in zip(engs, fras):
         translation, attention_weight_seq = predict_seq2seq(
             net, eng, src_vocab, tgt_vocab, num_steps, device)
         print(f'{eng} => {translation}, bleu {bleu(translation, fra, k=2):.3f}')
+    """
 
 if __name__ == '__main__':
     main()

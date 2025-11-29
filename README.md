@@ -7,7 +7,7 @@ A python code repository based on the Chinese edition of “Dive into Deep Learn
 October 2025
 
 #### Currently Completed Update:
-Chapter 8 of the book
+Chapter 9 of the book
 
 #### Operating System/Architecture:
 Linux/amd64

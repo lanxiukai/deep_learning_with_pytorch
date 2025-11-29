@@ -1382,3 +1382,108 @@ class EncoderDecoder(nn.Module):
         enc_outputs = self.encoder(enc_X, *args)
         dec_state = self.decoder.init_state(enc_outputs, *args)
         return self.decoder(dec_X, dec_state)
+
+class Seq2SeqEncoder(d2l_save.Encoder):
+    """Recurrent neural network encoder for sequence-to-sequence learning."""
+    def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
+                 dropout=0, **kwargs):
+        super(Seq2SeqEncoder, self).__init__(**kwargs)
+        # Embedding layer
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.rnn = nn.GRU(embed_size, num_hiddens, num_layers,
+                          dropout=dropout)
+
+    def forward(self, X, *args):
+        # Input 'X' shape: (batch_size, num_steps)
+        X = self.embedding(X)   # Output 'X' shape: (batch_size, num_steps, embed_size)
+        # In recurrent neural network models, the first axis corresponds to time steps
+        X = X.permute(1, 0, 2)  # Permute the dimensions of 'X' to (num_steps, batch_size, embed_size)
+        output, state = self.rnn(X)
+        # if state is not specified, it defaults to zeros
+        # Shape of output: (num_steps, batch_size, num_hiddens)
+        # Shape of state: (num_layers, batch_size, num_hiddens)
+        return output, state
+
+def sequence_mask(X, valid_len, value=0):
+    """
+    Mask irrelevant items in sequences.
+
+    Args:
+        X: the input sequence (batch_size, num_steps)
+        valid_len: the valid length of the input sequence (batch_size,)
+        value: the value to fill the irrelevant items with (Default: 0)
+    Returns:
+        The masked input sequence (batch_size, num_steps),
+        where the irrelevant items are filled with the value.
+    """
+    maxlen = X.size(1)
+    mask = torch.arange((maxlen), dtype=torch.float32,
+                        device=X.device)[None, :] < valid_len[:, None]  # Shape of mask: (batch_size, num_steps)
+    X[~mask] = value  # Fill the irrelevant items with the value
+    return X
+
+class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
+    """Softmax cross-entropy loss with masking."""
+    # Shape of pred: (batch_size, num_steps, vocab_size)
+    # Shape of label: (batch_size, num_steps)
+    # Shape of valid_len: (batch_size,)
+    def forward(self, pred, label, valid_len):  # Rewrite the forward method of the base class nn.CrossEntropyLoss
+        weights = torch.ones_like(label)
+        weights = sequence_mask(weights, valid_len)
+        self.reduction='none'  # Set the reduction method to 'none' to return the loss for each item
+        # Permute the dimensions of 'pred' to (batch_size, vocab_size, num_steps) 
+        # to meet the needs of the base class nn.CrossEntropyLoss (input shape: (N, C, ...))
+        unweighted_loss = super(MaskedSoftmaxCELoss, self).forward(
+            pred.permute(0, 2, 1), label)  # Call the forward method of the base class nn.CrossEntropyLoss
+        # Shape of unweighted_loss: (batch_size, num_steps)
+        weighted_loss = (unweighted_loss * weights).mean(dim=1)  # Shape of weighted_loss: (batch_size,)
+        return weighted_loss
+
+def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device, net_name=None):
+    """Train a sequence-to-sequence model."""
+    def xavier_init_weights(m):
+        if type(m) == nn.Linear:
+            nn.init.xavier_uniform_(m.weight)
+        if type(m) == nn.GRU:
+            for param in m._flat_weights_names:
+                if "weight" in param:
+                    nn.init.xavier_uniform_(m._parameters[param])
+
+    net.apply(xavier_init_weights)
+    if net_name is not None:
+        print(f'\n{net_name} is training on {device} ...')
+    else:
+        print(f'\nTraining on {device} ...')
+    
+    net.to(device)
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    loss = MaskedSoftmaxCELoss()
+    net.train()
+    animator = d2l_save.Animator(xlabel='epoch', ylabel='loss',
+                     xlim=[10, num_epochs])
+    timer = d2l_save.Timer()
+    total_tokens = 0.0
+    for epoch in range(num_epochs):
+        metric = d2l_save.Accumulator(2)  # Sum of training loss, num_tokens
+        for batch in data_iter:
+            optimizer.zero_grad()
+            X, X_valid_len, Y, Y_valid_len = [x.to(device) for x in batch]
+            bos = torch.tensor([tgt_vocab['<bos>']] * Y.shape[0],
+                          device=device).reshape(-1, 1)  # Shape of bos: (batch_size, 1)
+            dec_input = torch.cat([bos, Y[:, :-1]], 1)  # Teacher forcing (Shape of dec_input: (batch_size, num_steps + 1))
+            Y_hat, _ = net(X, dec_input, X_valid_len)
+            l = loss(Y_hat, Y, Y_valid_len)
+            l.sum().backward()      # Perform backpropagation using the scalar loss
+            d2l_save.grad_clipping(net, 1)
+            num_tokens = Y_valid_len.sum()
+            optimizer.step()
+            with torch.no_grad():
+                metric.add(l.sum(), num_tokens)
+                total_tokens += float(num_tokens)
+        if (epoch + 1) % 10 == 0:
+            animator.add(epoch + 1, (metric[0] / metric[1],))
+    total_time = timer.stop()
+    tokens_per_sec = total_tokens / total_time if total_time > 0 else float('inf')
+    total_time_str = timer.format_time(total_time)
+    print(f'loss {metric[0] / metric[1]:.3f}, {tokens_per_sec:.1f} '
+          f'tokens/sec, total time: {total_time_str}')
