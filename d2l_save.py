@@ -101,6 +101,44 @@ def plot(X, Y=None, xlabel=None, ylabel=None, legend=None, xlim=None,
             axes.plot(y, fmt)
     set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
 
+def time_str(seconds, precision=1):
+    """Return a formatted string given seconds in non-zero units format (d, h, min and sec)."""
+    total = seconds
+
+    # Decompose total seconds into days, hours, minutes and seconds
+    remainder = total
+    days = int(remainder // 86400)
+    remainder -= days * 86400
+    hours = int(remainder // 3600)
+    remainder -= hours * 3600
+    minutes = int(remainder // 60)
+    secs = remainder - minutes * 60
+
+    def _fmt_secs(value):
+        if precision is None:
+            return str(int(round(value)))
+        return f'{value:.{precision}f}'
+
+    # Build parts starting from the highest non-zero unit
+    parts = []
+    if days > 0:
+        parts.append(f'{days} d')
+        parts.append(f'{hours} h')
+        parts.append(f'{minutes} min')
+        parts.append(f'{_fmt_secs(secs)} sec')
+    elif hours > 0:
+        parts.append(f'{hours} h')
+        parts.append(f'{minutes} min')
+        parts.append(f'{_fmt_secs(secs)} sec')
+    elif minutes > 0:
+        parts.append(f'{minutes} min')
+        parts.append(f'{_fmt_secs(secs)} sec')
+    else:
+        # All higher units are zero, only show seconds
+        parts.append(f'{_fmt_secs(secs)} sec')
+
+    return ' '.join(parts)
+
 class Timer:
     """Record multiple running times."""
     def __init__(self):
@@ -125,22 +163,9 @@ class Timer:
         return sum(self.times)
 
     def format_time(self, seconds=None, precision=1):
-        """Return a formatted string given seconds in format (h, min and sec)."""
+        """Format given seconds or the accumulated time using ``time_str``."""
         total = self.sum() if seconds is None else seconds
-        hours = int(total // 3600)
-        minutes = int((total % 3600) // 60)
-        secs = total % 60
-        if precision is None:
-            return f'{hours} h {minutes} min {int(round(secs))} sec'
-        return f'{hours} h {minutes} min {secs:.{precision}f} sec'
-
-    def cumsum(self):
-        """Return the accumulated time."""
-        return np.array(self.times).cumsum().tolist()
-    
-    def __str__(self):
-        """Return the string representation of the timer."""
-        return f'Time taken: {self.format_time()}'
+        return time_str(total, precision=precision)
 
 def synthetic_data(w, b, num_examples):
     """
@@ -365,7 +390,7 @@ def train_epoch_ch3(net, train_iter, loss, updater):
     """
     if isinstance(net, torch.nn.Module): # Determine whether net is an instance of torch.nn.Module
         net.train()  # set the model to training mode
-    metric = Accumulator(3)  # total loss, total accuracy, total number of samples
+    metric = Accumulator(3)  # l.sum(), correct predictions, num_samples
     for X, y in train_iter:
         # compute the gradient and update the parameters
         y_hat = net(X)      # y_hat: the predicted value (batch_size, num_outputs) or (batch_size,)
@@ -379,7 +404,7 @@ def train_epoch_ch3(net, train_iter, loss, updater):
             # use the custom optimizer and loss function
             l.mean().backward()  # compute the gradient
             updater()  # update the parameters
-        metric.add(l.detach().sum().item(), accuracy(y_hat, y), y.numel())  # total loss, total accuracy, total number of samples
+        metric.add(l.detach().sum().item(), accuracy(y_hat, y), y.numel())
     return metric[0] / metric[2], metric[1] / metric[2]
 
 class Animator:
@@ -649,9 +674,9 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None)
     timer, num_batches = Timer(), len(train_iter)
 
     if net_name is not None:
-        print(f'\n{net_name} is training on {str(device)} ...')
+        print(f'\n{net_name} is training on {device} ...')
     else:
-        print(f'\nTraining on {str(device)} ...')
+        print(f'\nTraining on {device} ...')
 
     for epoch in range(num_epochs):
         # (training) loss_sum, total number of correct predictions, total number of samples
@@ -676,8 +701,8 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None)
         animator.add(epoch + 1, (None, None, test_acc))
     print(f'loss {train_l:.3f}, train acc {train_acc:.3f}, '
           f'test acc {test_acc:.3f}')
-    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec on {str(device)}')
-    print(timer)
+    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec, '
+          f'total time: {timer.format_time()}')
 
 class Residual(nn.Module):
     """
@@ -1047,7 +1072,7 @@ def grad_clipping(net, theta):
         for param in params:
             param.grad[:] *= theta / norm
 
-def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
+def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter, timer):
     """
     Train the network for one epoch (see Chapter 8 for the definition).
     
@@ -1058,15 +1083,16 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
         updater: the optimizer
         device: the device to use
         use_random_iter: whether to use random sampling
+        timer: the timer instance (Timer)
     Returns:
-        A tuple of perplexity, speed, and epoch time: (ppl, speed, epoch_time)
+        A tuple of perplexity and the number of tokens: (ppl, num_tokens)
         - ppl: the perplexity
-        - speed: the speed (tokens/sec)
-        - epoch_time: the time for one epoch
+        - num_tokens: the number of tokens (num_steps * batch_size)
     """
-    state, timer = None, Timer()
-    metric = Accumulator(2)  # Sum of training loss, number of tokens (num_steps * batch_size)
+    state = None
+    metric = Accumulator(2)  # l.sum(), num_tokens (num_steps * batch_size)
     for X, Y in train_iter:
+        timer.start()
         if state is None or use_random_iter:
             # Initialize state during the first iteration or when using random sampling
             state = net.begin_state(batch_size=X.shape[0], device=device)
@@ -1093,9 +1119,8 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
             grad_clipping(net, 1)
             updater()
         metric.add(l * y.numel(), y.numel())
-    epoch_time = timer.stop()
-    speed = metric[1] / epoch_time
-    return math.exp(metric[0] / metric[1]), speed, epoch_time  # perplexity, speed, epoch time
+        timer.stop()
+    return math.exp(metric[0] / metric[1]), metric[1]  # perplexity, num_tokens
 
 def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=False, net_name=None):
     """
@@ -1127,18 +1152,16 @@ def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=Fa
         print(f'\n{net_name} is training on {str(device)} ...')
     else:
         print(f'\nTraining on {str(device)} ...')
-    total_time, total_speed = 0.0, 0.0
+    
+    timer, total_tokens = Timer(), 0.0
     # Training and prediction
     for epoch in range(num_epochs):
-        ppl, speed, epoch_time = train_epoch_ch8(
-            net, train_iter, loss, updater, device, use_random_iter)
-        total_speed += speed
-        total_time += epoch_time
+        ppl, num_tokens = train_epoch_ch8(
+            net, train_iter, loss, updater, device, use_random_iter, timer)
         if (epoch + 1) % 10 == 0:
             animator.add(epoch + 1, [ppl])
-    avg_speed = total_speed / num_epochs if num_epochs else 0.0
-    total_time_str = Timer().format_time(total_time)
-    print(f'Perplexity {ppl:.1f}, {avg_speed:.1f} tokens/sec, total time: {total_time_str}')
+        total_tokens += num_tokens
+    print(f'Perplexity {ppl:.1f}, {total_tokens / timer.sum():.1f} tokens/sec, total time: {timer.format_time()}')
     print(predict('time traveller'))
     print(predict('traveller'))
 
@@ -1383,7 +1406,7 @@ class EncoderDecoder(nn.Module):
         dec_state = self.decoder.init_state(enc_outputs, *args)
         return self.decoder(dec_X, dec_state)
 
-class Seq2SeqEncoder(d2l_save.Encoder):
+class Seq2SeqEncoder(Encoder):
     """Recurrent neural network encoder for sequence-to-sequence learning."""
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
                  dropout=0, **kwargs):
@@ -1459,13 +1482,14 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device, net_name=No
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     loss = MaskedSoftmaxCELoss()
     net.train()
-    animator = d2l_save.Animator(xlabel='epoch', ylabel='loss',
+    animator = Animator(xlabel='epoch', ylabel='loss',
                      xlim=[10, num_epochs])
-    timer = d2l_save.Timer()
+    timer = Timer()
     total_tokens = 0.0
     for epoch in range(num_epochs):
-        metric = d2l_save.Accumulator(2)  # Sum of training loss, num_tokens
+        metric = Accumulator(2)  # l.sum(), num_tokens
         for batch in data_iter:
+            timer.start()
             optimizer.zero_grad()
             X, X_valid_len, Y, Y_valid_len = [x.to(device) for x in batch]
             bos = torch.tensor([tgt_vocab['<bos>']] * Y.shape[0],
@@ -1474,16 +1498,15 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device, net_name=No
             Y_hat, _ = net(X, dec_input, X_valid_len)
             l = loss(Y_hat, Y, Y_valid_len)
             l.sum().backward()      # Perform backpropagation using the scalar loss
-            d2l_save.grad_clipping(net, 1)
+            grad_clipping(net, 1)
             num_tokens = Y_valid_len.sum()
             optimizer.step()
             with torch.no_grad():
                 metric.add(l.sum(), num_tokens)
-                total_tokens += float(num_tokens)
+            timer.stop()
         if (epoch + 1) % 10 == 0:
             animator.add(epoch + 1, (metric[0] / metric[1],))
-    total_time = timer.stop()
-    tokens_per_sec = total_tokens / total_time if total_time > 0 else float('inf')
-    total_time_str = timer.format_time(total_time)
+        total_tokens += metric[1]
+    tokens_per_sec = total_tokens / timer.sum()
     print(f'loss {metric[0] / metric[1]:.3f}, {tokens_per_sec:.1f} '
-          f'tokens/sec, total time: {total_time_str}')
+          f'tokens/sec, total time: {timer.format_time()}')

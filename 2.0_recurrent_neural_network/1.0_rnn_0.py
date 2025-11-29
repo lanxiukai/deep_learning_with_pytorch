@@ -86,11 +86,27 @@ def grad_clipping(net, theta):  #@save
             param.grad[:] *= theta / norm
 
 #@save
-def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
-    """Train the network for one epoch (see Chapter 8 for the definition)"""
-    state, timer = None, d2l_save.Timer()
-    metric = d2l_save.Accumulator(2)  # Sum of training loss, number of tokens (num_steps * batch_size)
+def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter, timer):
+    """
+    Train the network for one epoch (see Chapter 8 for the definition).
+    
+    Args:
+        net: the network
+        train_iter: the training data iterator
+        loss: the loss function
+        updater: the optimizer
+        device: the device to use
+        use_random_iter: whether to use random sampling
+        timer: the timer instance (Timer)
+    Returns:
+        A tuple of perplexity and the number of tokens: (ppl, num_tokens)
+        - ppl: the perplexity
+        - num_tokens: the number of tokens (num_steps * batch_size)
+    """
+    state = None
+    metric = d2l_save.Accumulator(2)  # l.sum(), num_tokens (num_steps * batch_size)
     for X, Y in train_iter:
+        timer.start()
         if state is None or use_random_iter:
             # Initialize state during the first iteration or when using random sampling
             state = net.begin_state(batch_size=X.shape[0], device=device)
@@ -117,14 +133,26 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
             grad_clipping(net, 1)
             updater()
         metric.add(l * y.numel(), y.numel())
-    epoch_time = timer.stop()
-    speed = metric[1] / epoch_time
-    return math.exp(metric[0] / metric[1]), speed, epoch_time  # perplexity, speed, epoch time
+        timer.stop()
+    return math.exp(metric[0] / metric[1]), metric[1]  # perplexity, num_tokens
 
 #@save
-def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
-              use_random_iter=False, net_name=None):
-    """Train the model (see Chapter 8 for the definition)"""
+def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=False, net_name=None):
+    """
+    Train the model (see Chapter 8 for the definition).
+    
+    Args:
+        net: the network
+        train_iter: the training data iterator
+        vocab: a vocabulary object
+        lr: the learning rate
+        num_epochs: the number of epochs
+        device: the device to use
+        use_random_iter: whether to use random sampling (Default: False)
+        net_name: the name of the network (Default: None)
+    Returns:
+        None: prints the perplexity, speed, and total time, and the generated characters
+    """
     loss = nn.CrossEntropyLoss()
     animator = d2l_save.Animator(xlabel='epoch', ylabel='perplexity',
                             legend=['train'], xlim=[10, num_epochs])
@@ -139,18 +167,16 @@ def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
         print(f'\n{net_name} is training on {str(device)} ...')
     else:
         print(f'\nTraining on {str(device)} ...')
-    total_time, total_speed = 0.0, 0.0
+    
+    timer, total_tokens = d2l_save.Timer(), 0.0
     # Training and prediction
     for epoch in range(num_epochs):
-        ppl, speed, epoch_time = train_epoch_ch8(
-            net, train_iter, loss, updater, device, use_random_iter)
-        total_speed += speed
-        total_time += epoch_time
+        ppl, num_tokens = train_epoch_ch8(
+            net, train_iter, loss, updater, device, use_random_iter, timer)
         if (epoch + 1) % 10 == 0:
             animator.add(epoch + 1, [ppl])
-    avg_speed = total_speed / num_epochs if num_epochs else 0.0
-    total_time_str = d2l_save.Timer().format_time(total_time)
-    print(f'Perplexity {ppl:.1f}, {avg_speed:.1f} tokens/sec, total time: {total_time_str}')
+        total_tokens += num_tokens
+    print(f'Perplexity {ppl:.1f}, {total_tokens / timer.sum():.1f} tokens/sec, total time: {timer.format_time()}')
     print(predict('time traveller'))
     print(predict('traveller'))
 

@@ -119,8 +119,9 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device, net_name=No
     timer = d2l_save.Timer()
     total_tokens = 0.0
     for epoch in range(num_epochs):
-        metric = d2l_save.Accumulator(2)  # Sum of training loss, num_tokens
+        metric = d2l_save.Accumulator(2)  # l.sum(), num_tokens
         for batch in data_iter:
+            timer.start()
             optimizer.zero_grad()
             X, X_valid_len, Y, Y_valid_len = [x.to(device) for x in batch]
             bos = torch.tensor([tgt_vocab['<bos>']] * Y.shape[0],
@@ -134,14 +135,13 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device, net_name=No
             optimizer.step()
             with torch.no_grad():
                 metric.add(l.sum(), num_tokens)
-                total_tokens += float(num_tokens)
+            timer.stop()
         if (epoch + 1) % 10 == 0:
             animator.add(epoch + 1, (metric[0] / metric[1],))
-    total_time = timer.stop()
-    tokens_per_sec = total_tokens / total_time if total_time > 0 else float('inf')
-    total_time_str = timer.format_time(total_time)
+        total_tokens += metric[1]
+    tokens_per_sec = total_tokens / timer.sum()
     print(f'loss {metric[0] / metric[1]:.3f}, {tokens_per_sec:.1f} '
-          f'tokens/sec, total time: {total_time_str}')
+          f'tokens/sec, total time: {timer.format_time()}')
 
 #@save
 def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
@@ -226,7 +226,7 @@ def main():
     decoder = Seq2SeqDecoder(len(tgt_vocab), embed_size, num_hiddens, num_layers,
                             dropout)
     net = d2l_save.EncoderDecoder(encoder, decoder)
-    train_seq2seq(net, train_iter, lr, num_epochs, tgt_vocab, device)
+    train_seq2seq(net, train_iter, lr, num_epochs, tgt_vocab, device, net_name='Seq2Seq-GRU')
     """
     engs = ['go .', "i lost .", 'he\'s calm .', 'i\'m home .']
     fras = ['va !', 'j\'ai perdu .', 'il est calme .', 'je suis chez moi .']
