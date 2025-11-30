@@ -153,20 +153,20 @@ def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
         src_vocab['<eos>']]
     enc_valid_len = torch.tensor([len(src_tokens)], device=device)
     src_tokens = d2l_save.truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
-    # Add batch dimension
+    # Add a batch dimension (dim=0) using unsqueeze to make the shape of enc_X: (1, num_steps)
     enc_X = torch.unsqueeze(
         torch.tensor(src_tokens, dtype=torch.long, device=device), dim=0)
     enc_outputs = net.encoder(enc_X, enc_valid_len)
     dec_state = net.decoder.init_state(enc_outputs, enc_valid_len)
-    # Add batch dimension
+    # Add a batch dimension (dim=0) using unsqueeze to make the shape of dec_X: (1, 1)
     dec_X = torch.unsqueeze(torch.tensor(
         [tgt_vocab['<bos>']], dtype=torch.long, device=device), dim=0)
     output_seq, attention_weight_seq = [], []
     for _ in range(num_steps):
-        Y, dec_state = net.decoder(dec_X, dec_state)
+        Y, dec_state = net.decoder(dec_X, dec_state)  # Shape of Y: (1, 1, vocab_size)
         # Use the token with the highest predicted probability as the decoder input at the next time step
-        dec_X = Y.argmax(dim=2)
-        pred = dec_X.squeeze(dim=0).type(torch.int32).item()
+        dec_X = Y.argmax(dim=2)  # Shape of dec_X: (1, 1) (greedy search)
+        pred = dec_X.squeeze(dim=0).type(torch.int32).item()  # .item() to get the scalar value
         # Save attention weights (to be discussed later)
         if save_attention_weights:
             attention_weight_seq.append(net.decoder.attention_weights)
@@ -177,7 +177,7 @@ def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
     return ' '.join(tgt_vocab.to_tokens(output_seq)), attention_weight_seq
 
 def bleu(pred_seq, label_seq, k):  #@save
-    """Compute BLEU."""
+    """Compute BLEU (Bilingual Evaluation Understudy)."""
     pred_tokens, label_tokens = pred_seq.split(' '), label_seq.split(' ')
     len_pred, len_label = len(pred_tokens), len(label_tokens)
     score = math.exp(min(0, 1 - len_label / len_pred))
@@ -188,6 +188,7 @@ def bleu(pred_seq, label_seq, k):  #@save
         for i in range(len_pred - n + 1):
             if label_subs[' '.join(pred_tokens[i: i + n])] > 0:
                 num_matches += 1
+                # Prevent the same label n-gram sub-sequence from being matched multiple times
                 label_subs[' '.join(pred_tokens[i: i + n])] -= 1
         score *= math.pow(num_matches / (len_pred - n + 1), math.pow(0.5, n))
     return score
@@ -226,15 +227,15 @@ def main():
     decoder = Seq2SeqDecoder(len(tgt_vocab), embed_size, num_hiddens, num_layers,
                             dropout)
     net = d2l_save.EncoderDecoder(encoder, decoder)
-    train_seq2seq(net, train_iter, lr, num_epochs, tgt_vocab, device, net_name='Seq2Seq-GRU')
-    """
+    train_seq2seq(net, train_iter, lr, num_epochs, tgt_vocab, device, 
+                  net_name='Seq2Seq-GRU')
+
     engs = ['go .', "i lost .", 'he\'s calm .', 'i\'m home .']
     fras = ['va !', 'j\'ai perdu .', 'il est calme .', 'je suis chez moi .']
     for eng, fra in zip(engs, fras):
         translation, attention_weight_seq = predict_seq2seq(
             net, eng, src_vocab, tgt_vocab, num_steps, device)
         print(f'{eng} => {translation}, bleu {bleu(translation, fra, k=2):.3f}')
-    """
 
 if __name__ == '__main__':
     main()
