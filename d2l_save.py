@@ -101,6 +101,44 @@ def plot(X, Y=None, xlabel=None, ylabel=None, legend=None, xlim=None,
             axes.plot(y, fmt)
     set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
 
+def time_str(seconds, precision=1):
+    """Return a formatted string given seconds in non-zero units format (d, h, min and sec)."""
+    total = seconds
+
+    # Decompose total seconds into days, hours, minutes and seconds
+    remainder = total
+    days = int(remainder // 86400)
+    remainder -= days * 86400
+    hours = int(remainder // 3600)
+    remainder -= hours * 3600
+    minutes = int(remainder // 60)
+    secs = remainder - minutes * 60
+
+    def _fmt_secs(value):
+        if precision is None:
+            return str(int(round(value)))
+        return f'{value:.{precision}f}'
+
+    # Build parts starting from the highest non-zero unit
+    parts = []
+    if days > 0:
+        parts.append(f'{days} d')
+        parts.append(f'{hours} h')
+        parts.append(f'{minutes} min')
+        parts.append(f'{_fmt_secs(secs)} sec')
+    elif hours > 0:
+        parts.append(f'{hours} h')
+        parts.append(f'{minutes} min')
+        parts.append(f'{_fmt_secs(secs)} sec')
+    elif minutes > 0:
+        parts.append(f'{minutes} min')
+        parts.append(f'{_fmt_secs(secs)} sec')
+    else:
+        # All higher units are zero, only show seconds
+        parts.append(f'{_fmt_secs(secs)} sec')
+
+    return ' '.join(parts)
+
 class Timer:
     """Record multiple running times."""
     def __init__(self):
@@ -125,22 +163,9 @@ class Timer:
         return sum(self.times)
 
     def format_time(self, seconds=None, precision=1):
-        """Return a formatted string given seconds in format (h, min and sec)."""
+        """Format given seconds or the accumulated time using ``time_str``."""
         total = self.sum() if seconds is None else seconds
-        hours = int(total // 3600)
-        minutes = int((total % 3600) // 60)
-        secs = total % 60
-        if precision is None:
-            return f'{hours} h {minutes} min {int(round(secs))} sec'
-        return f'{hours} h {minutes} min {secs:.{precision}f} sec'
-
-    def cumsum(self):
-        """Return the accumulated time."""
-        return np.array(self.times).cumsum().tolist()
-    
-    def __str__(self):
-        """Return the string representation of the timer."""
-        return f'Time taken: {self.format_time()}'
+        return time_str(total, precision=precision)
 
 def synthetic_data(w, b, num_examples):
     """
@@ -365,7 +390,7 @@ def train_epoch_ch3(net, train_iter, loss, updater):
     """
     if isinstance(net, torch.nn.Module): # Determine whether net is an instance of torch.nn.Module
         net.train()  # set the model to training mode
-    metric = Accumulator(3)  # total loss, total accuracy, total number of samples
+    metric = Accumulator(3)  # l.sum(), correct predictions, num_samples
     for X, y in train_iter:
         # compute the gradient and update the parameters
         y_hat = net(X)      # y_hat: the predicted value (batch_size, num_outputs) or (batch_size,)
@@ -379,7 +404,7 @@ def train_epoch_ch3(net, train_iter, loss, updater):
             # use the custom optimizer and loss function
             l.mean().backward()  # compute the gradient
             updater()  # update the parameters
-        metric.add(l.detach().sum().item(), accuracy(y_hat, y), y.numel())  # total loss, total accuracy, total number of samples
+        metric.add(l.detach().sum().item(), accuracy(y_hat, y), y.numel())
     return metric[0] / metric[2], metric[1] / metric[2]
 
 class Animator:
@@ -649,9 +674,9 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None)
     timer, num_batches = Timer(), len(train_iter)
 
     if net_name is not None:
-        print(f'\n{net_name} is training on {str(device)} ...')
+        print(f'\n{net_name} is training on {device} ...')
     else:
-        print(f'\nTraining on {str(device)} ...')
+        print(f'\nTraining on {device} ...')
 
     for epoch in range(num_epochs):
         # (training) loss_sum, total number of correct predictions, total number of samples
@@ -676,8 +701,8 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None)
         animator.add(epoch + 1, (None, None, test_acc))
     print(f'loss {train_l:.3f}, train acc {train_acc:.3f}, '
           f'test acc {test_acc:.3f}')
-    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec on {str(device)}')
-    print(timer)
+    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec, '
+          f'total time: {timer.format_time()}')
 
 class Residual(nn.Module):
     """
@@ -1047,7 +1072,7 @@ def grad_clipping(net, theta):
         for param in params:
             param.grad[:] *= theta / norm
 
-def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
+def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter, timer):
     """
     Train the network for one epoch (see Chapter 8 for the definition).
     
@@ -1058,15 +1083,16 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
         updater: the optimizer
         device: the device to use
         use_random_iter: whether to use random sampling
+        timer: the timer instance (Timer)
     Returns:
-        A tuple of perplexity, speed, and epoch time: (ppl, speed, epoch_time)
+        A tuple of perplexity and the number of tokens: (ppl, num_tokens)
         - ppl: the perplexity
-        - speed: the speed (tokens/sec)
-        - epoch_time: the time for one epoch
+        - num_tokens: the number of tokens (num_steps * batch_size)
     """
-    state, timer = None, Timer()
-    metric = Accumulator(2)  # Sum of training loss, number of tokens (num_steps * batch_size)
+    state = None
+    metric = Accumulator(2)  # l.sum(), num_tokens (num_steps * batch_size)
     for X, Y in train_iter:
+        timer.start()
         if state is None or use_random_iter:
             # Initialize state during the first iteration or when using random sampling
             state = net.begin_state(batch_size=X.shape[0], device=device)
@@ -1093,9 +1119,8 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
             grad_clipping(net, 1)
             updater()
         metric.add(l * y.numel(), y.numel())
-    epoch_time = timer.stop()
-    speed = metric[1] / epoch_time
-    return math.exp(metric[0] / metric[1]), speed, epoch_time  # perplexity, speed, epoch time
+        timer.stop()
+    return math.exp(metric[0] / metric[1]), metric[1]  # perplexity, num_tokens
 
 def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=False, net_name=None):
     """
@@ -1127,18 +1152,16 @@ def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=Fa
         print(f'\n{net_name} is training on {str(device)} ...')
     else:
         print(f'\nTraining on {str(device)} ...')
-    total_time, total_speed = 0.0, 0.0
+    
+    timer, total_tokens = Timer(), 0.0
     # Training and prediction
     for epoch in range(num_epochs):
-        ppl, speed, epoch_time = train_epoch_ch8(
-            net, train_iter, loss, updater, device, use_random_iter)
-        total_speed += speed
-        total_time += epoch_time
+        ppl, num_tokens = train_epoch_ch8(
+            net, train_iter, loss, updater, device, use_random_iter, timer)
         if (epoch + 1) % 10 == 0:
             animator.add(epoch + 1, [ppl])
-    avg_speed = total_speed / num_epochs if num_epochs else 0.0
-    total_time_str = Timer().format_time(total_time)
-    print(f'Perplexity {ppl:.1f}, {avg_speed:.1f} tokens/sec, total time: {total_time_str}')
+        total_tokens += num_tokens
+    print(f'Perplexity {ppl:.1f}, {total_tokens / timer.sum():.1f} tokens/sec, total time: {timer.format_time()}')
     print(predict('time traveller'))
     print(predict('traveller'))
 
@@ -1222,7 +1245,7 @@ def read_data_nmt():  # neural machine translation dataset
     Returns:
         text (str): the raw text of the dataset
     """
-    data_dir = d2l_save.download_extract('fra-eng')
+    data_dir = download_extract('fra-eng')
     with open(os.path.join(data_dir, 'fra.txt'), 'r',
              encoding='utf-8') as f:
         return f.read()
@@ -1263,14 +1286,14 @@ def tokenize_nmt(text, num_examples=None):
 
 def show_list_len_pair_hist(legend, xlabel, ylabel, xlist, ylist):
     """Plot a histogram of list length pairs"""
-    d2l_save.set_figsize()
-    _, _, patches = d2l_save.plt.hist(
+    set_figsize()
+    _, _, patches = plt.hist(
         [[len(l) for l in xlist], [len(l) for l in ylist]])
-    d2l_save.plt.xlabel(xlabel)
-    d2l_save.plt.ylabel(ylabel)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
     for patch in patches[1].patches:
         patch.set_hatch('/')
-    d2l_save.plt.legend(legend)
+    plt.legend(legend)
 
 def truncate_pad(line, num_steps, padding_token):
     """
@@ -1325,12 +1348,214 @@ def load_data_nmt(batch_size, num_steps, num_examples=600):
     source, target = tokenize_nmt(text, num_examples)
     reserved_tokens=['<pad>', '<bos>', '<eos>']
     # Build source and target vocabularies
-    src_vocab = d2l_save.Vocab(source, min_freq=2, reserved_tokens=reserved_tokens)  # source vocabulary
-    tgt_vocab = d2l_save.Vocab(target, min_freq=2, reserved_tokens=reserved_tokens)  # target vocabulary
+    src_vocab = Vocab(source, min_freq=2, reserved_tokens=reserved_tokens)  # source vocabulary
+    tgt_vocab = Vocab(target, min_freq=2, reserved_tokens=reserved_tokens)  # target vocabulary
     # Build source and target arrays by truncating or padding
     src_array, src_valid_len = build_array_nmt(source, src_vocab, num_steps)
     tgt_array, tgt_valid_len = build_array_nmt(target, tgt_vocab, num_steps)
     # Load data into data loader
     data_arrays = (src_array, src_valid_len, tgt_array, tgt_valid_len)
-    data_iter = d2l_save.load_array(data_arrays, batch_size)
+    data_iter = load_array(data_arrays, batch_size)
     return data_iter, src_vocab, tgt_vocab
+
+class Encoder(nn.Module):
+    """Basic encoder interface for the encoder-decoder architecture"""
+    def __init__(self, **kwargs):
+        super(Encoder, self).__init__(**kwargs)
+
+    def forward(self, X, *args):  # encode the input X
+        raise NotImplementedError  # to be implemented by subclass
+
+class Decoder(nn.Module):
+    """Basic decoder interface for the encoder-decoder architecture"""
+    def __init__(self, **kwargs):
+        super(Decoder, self).__init__(**kwargs)
+
+    def init_state(self, enc_outputs, *args):  # initialize the decoder state based on the encoder outputs
+        raise NotImplementedError  # to be implemented by subclass
+
+    def forward(self, X, state):  # decode the decoder input X based on the decoder state
+        raise NotImplementedError  # to be implemented by subclass
+
+class EncoderDecoder(nn.Module):
+    """
+    Base class for the encoder-decoder architecture.
+    
+    Args:
+        encoder: a encoder instance (Encoder)
+        decoder: a decoder instance (Decoder)
+        **kwargs: additional arguments
+    """
+    def __init__(self, encoder, decoder, **kwargs):
+        super(EncoderDecoder, self).__init__(**kwargs)
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, enc_X, dec_X, *args):
+        """
+        Forward pass for the encoder-decoder architecture.
+        
+        Args:
+            enc_X: the encoder input
+            dec_X: the decoder input
+            *args: additional arguments
+        Returns:
+            The decoder output
+        """
+        enc_outputs = self.encoder(enc_X, *args)
+        dec_state = self.decoder.init_state(enc_outputs, *args)
+        return self.decoder(dec_X, dec_state)
+
+class Seq2SeqEncoder(Encoder):
+    """Recurrent neural network encoder for sequence-to-sequence learning."""
+    def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
+                 dropout=0, **kwargs):
+        super(Seq2SeqEncoder, self).__init__(**kwargs)
+        # Embedding layer
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.rnn = nn.GRU(embed_size, num_hiddens, num_layers,
+                          dropout=dropout)
+
+    def forward(self, X, *args):
+        # Input 'X' shape: (batch_size, num_steps)
+        X = self.embedding(X)   # Output 'X' shape: (batch_size, num_steps, embed_size)
+        # In recurrent neural network models, the first axis corresponds to time steps
+        X = X.permute(1, 0, 2)  # Permute the dimensions of 'X' to (num_steps, batch_size, embed_size)
+        output, state = self.rnn(X)
+        # if state is not specified, it defaults to zeros
+        # Shape of output: (num_steps, batch_size, num_hiddens)
+        # Shape of state: (num_layers, batch_size, num_hiddens)
+        return output, state
+
+def sequence_mask(X, valid_len, value=0):
+    """
+    Mask irrelevant items in sequences.
+
+    Args:
+        X: the input sequence (batch_size, num_steps)
+        valid_len: the valid length of the input sequence (batch_size,)
+        value: the value to fill the irrelevant items with (Default: 0)
+    Returns:
+        The masked input sequence (batch_size, num_steps),
+        where the irrelevant items are filled with the value.
+    """
+    maxlen = X.size(1)
+    mask = torch.arange((maxlen), dtype=torch.float32,
+                        device=X.device)[None, :] < valid_len[:, None]  # Shape of mask: (batch_size, num_steps)
+    X[~mask] = value  # Fill the irrelevant items with the value
+    return X
+
+class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
+    """Softmax cross-entropy loss with masking."""
+    # Shape of pred: (batch_size, num_steps, vocab_size)
+    # Shape of label: (batch_size, num_steps)
+    # Shape of valid_len: (batch_size,)
+    def forward(self, pred, label, valid_len):  # Rewrite the forward method of the base class nn.CrossEntropyLoss
+        weights = torch.ones_like(label)
+        weights = sequence_mask(weights, valid_len)
+        self.reduction='none'  # Set the reduction method to 'none' to return the loss for each item
+        # Permute the dimensions of 'pred' to (batch_size, vocab_size, num_steps) 
+        # to meet the needs of the base class nn.CrossEntropyLoss (input shape: (N, C, ...))
+        unweighted_loss = super(MaskedSoftmaxCELoss, self).forward(
+            pred.permute(0, 2, 1), label)  # Call the forward method of the base class nn.CrossEntropyLoss
+        # Shape of unweighted_loss: (batch_size, num_steps)
+        weighted_loss = (unweighted_loss * weights).mean(dim=1)  # Shape of weighted_loss: (batch_size,)
+        return weighted_loss
+
+def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device, net_name=None):
+    """Train a sequence-to-sequence model."""
+    def xavier_init_weights(m):
+        if type(m) == nn.Linear:
+            nn.init.xavier_uniform_(m.weight)
+        if type(m) == nn.GRU:
+            for param in m._flat_weights_names:
+                if "weight" in param:
+                    nn.init.xavier_uniform_(m._parameters[param])
+
+    net.apply(xavier_init_weights)
+    if net_name is not None:
+        print(f'\n{net_name} is training on {device} ...')
+    else:
+        print(f'\nTraining on {device} ...')
+    
+    net.to(device)
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    loss = MaskedSoftmaxCELoss()
+    net.train()
+    animator = Animator(xlabel='epoch', ylabel='loss',
+                     xlim=[10, num_epochs])
+    timer = Timer()
+    total_tokens = 0.0
+    for epoch in range(num_epochs):
+        metric = Accumulator(2)  # l.sum(), num_tokens
+        for batch in data_iter:
+            timer.start()
+            optimizer.zero_grad()
+            X, X_valid_len, Y, Y_valid_len = [x.to(device) for x in batch]
+            bos = torch.tensor([tgt_vocab['<bos>']] * Y.shape[0],
+                          device=device).reshape(-1, 1)  # Shape of bos: (batch_size, 1)
+            dec_input = torch.cat([bos, Y[:, :-1]], 1)  # Teacher forcing (Shape of dec_input: (batch_size, num_steps + 1))
+            Y_hat, _ = net(X, dec_input, X_valid_len)
+            l = loss(Y_hat, Y, Y_valid_len)
+            l.sum().backward()      # Perform backpropagation using the scalar loss
+            grad_clipping(net, 1)
+            num_tokens = Y_valid_len.sum()
+            optimizer.step()
+            with torch.no_grad():
+                metric.add(l.sum(), num_tokens)
+            timer.stop()
+        if (epoch + 1) % 10 == 0:
+            animator.add(epoch + 1, (metric[0] / metric[1],))
+        total_tokens += metric[1]
+    tokens_per_sec = total_tokens / timer.sum()
+    print(f'loss {metric[0] / metric[1]:.3f}, {tokens_per_sec:.1f} '
+          f'tokens/sec, total time: {timer.format_time()}')
+
+def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
+                    device, save_attention_weights=False):
+    """Prediction for sequence-to-sequence model."""
+    # Set net to evaluation mode during prediction
+    net.eval()
+    src_tokens = src_vocab[src_sentence.lower().split(' ')] + [
+        src_vocab['<eos>']]
+    enc_valid_len = torch.tensor([len(src_tokens)], device=device)
+    src_tokens = truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
+    # Add a batch dimension (dim=0) using unsqueeze to make the shape of enc_X: (1, num_steps)
+    enc_X = torch.unsqueeze(
+        torch.tensor(src_tokens, dtype=torch.long, device=device), dim=0)
+    enc_outputs = net.encoder(enc_X, enc_valid_len)
+    dec_state = net.decoder.init_state(enc_outputs, enc_valid_len)
+    # Add a batch dimension (dim=0) using unsqueeze to make the shape of dec_X: (1, 1)
+    dec_X = torch.unsqueeze(torch.tensor(
+        [tgt_vocab['<bos>']], dtype=torch.long, device=device), dim=0)
+    output_seq, attention_weight_seq = [], []
+    for _ in range(num_steps):
+        Y, dec_state = net.decoder(dec_X, dec_state)  # Shape of Y: (1, 1, vocab_size)
+        # Use the token with the highest predicted probability as the decoder input at the next time step
+        dec_X = Y.argmax(dim=2)  # Shape of dec_X: (1, 1) (greedy search)
+        pred = dec_X.squeeze(dim=0).type(torch.int32).item()  # .item() to get the scalar value
+        # Save attention weights (to be discussed later)
+        if save_attention_weights:
+            attention_weight_seq.append(net.decoder.attention_weights)
+        # Once the end-of-sequence token is predicted, stop generating the output sequence
+        if pred == tgt_vocab['<eos>']:
+            break
+        output_seq.append(pred)
+    return ' '.join(tgt_vocab.to_tokens(output_seq)), attention_weight_seq
+
+def bleu(pred_seq, label_seq, k):
+    """Compute BLEU (Bilingual Evaluation Understudy)."""
+    pred_tokens, label_tokens = pred_seq.split(' '), label_seq.split(' ')
+    len_pred, len_label = len(pred_tokens), len(label_tokens)
+    score = math.exp(min(0, 1 - len_label / len_pred))
+    for n in range(1, k + 1):
+        num_matches, label_subs = 0, collections.defaultdict(int)
+        for i in range(len_label - n + 1):
+            label_subs[' '.join(label_tokens[i: i + n])] += 1
+        for i in range(len_pred - n + 1):
+            if label_subs[' '.join(pred_tokens[i: i + n])] > 0:
+                num_matches += 1
+                # Prevent the same label n-gram sub-sequence from being matched multiple times
+                label_subs[' '.join(pred_tokens[i: i + n])] -= 1
+        score *= math.pow(num_matches / (len_pred - n + 1), math.pow(0.5, n))
+    return score

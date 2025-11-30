@@ -26,18 +26,35 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
     return metric[0] / metric[1]  # Return the accuracy
 
 def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None):
-    '''Train the model using GPU.'''
+    """
+    Train the model using GPU.
+    
+    Args:
+        net: the network
+        train_iter: the training data iterator
+        test_iter: the testing data iterator
+        num_epochs: the number of epochs
+        lr: the learning rate
+        device: the device to use
+        net_name: the name of the network (Default: None)
+    """
     def init_weights(m):
         if type(m) == nn.Linear or type(m) == nn.Conv2d:
             nn.init.xavier_uniform_(m.weight)
     net.apply(init_weights)
-    print(f'{net_name} training on {device}')
+
     net.to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=lr)
     loss = nn.CrossEntropyLoss()
     animator = d2l_save.Animator(xlabel='epoch', xlim=[1, num_epochs], 
                                  legend=['train loss', 'train acc', 'test acc'])
     timer, num_batches = d2l_save.Timer(), len(train_iter)
+
+    if net_name is not None:
+        print(f'\n{net_name} is training on {device} ...')
+    else:
+        print(f'\nTraining on {device} ...')
+
     for epoch in range(num_epochs):
         # (training) loss_sum, total number of correct predictions, total number of samples
         metric = d2l_save.Accumulator(3)
@@ -61,8 +78,8 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device, net_name=None)
         animator.add(epoch + 1, (None, None, test_acc))
     print(f'loss {train_l:.3f}, train acc {train_acc:.3f}, '
           f'test acc {test_acc:.3f}')
-    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec on {str(device)}')
-    print(timer)
+    print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec, '
+          f'total time: {timer.format_time()}')
 
 def print_net(net):
     X = torch.rand(size=(1, 1, 28, 28), dtype=torch.float32)
