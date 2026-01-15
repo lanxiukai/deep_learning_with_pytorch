@@ -1,9 +1,15 @@
 # ignore all files in these folders
-**/Data/
-**/data/
 **/.conda/
 **/__pycache__
 mlp.params
 mydict
 x-file
 submission.csv
+
+**/Data/
+**/data/
+**/Outputs/
+**/outputs/
+**/Output/
+**/output/
+*.pdf
