@@ -8,15 +8,6 @@ import zipfile
 import requests
 import os, sys
 import time
-import numpy as np
-import torch
-from torch import nn
-from torch.utils import data
-import torchvision
-from torchvision import transforms
-from torch.nn import functional as F
-from matplotlib import pyplot as plt
-import matplotlib
 from pathlib import Path
 import shutil
 import atexit
@@ -24,7 +15,23 @@ import re
 import collections
 import random
 import math
+from typing import Callable, Tuple, Optional, Union, Sequence
+from dataclasses import dataclass, replace, fields, is_dataclass
+
+import torch
+from torch import nn
+from torch.utils import data
+import torchvision
+from torchvision import transforms
+from torch.nn import functional as F
+
+from matplotlib import pyplot as plt
+import matplotlib
 from matplotlib_inline import backend_inline
+
+from tqdm.auto import tqdm
+
+
 try:
     matplotlib.use('TkAgg')
     import tkinter  # TkAgg depends on Tkinter
@@ -48,7 +55,136 @@ def clean_pycache():
 
 atexit.register(clean_pycache)  # clean the __pycache__ folder when the program exits
 
-bash_path = _infer_project_root()
+base_path = _infer_project_root()
+
+def reset_dir(path: str) -> None:
+    """
+    Remove a file/dir at `path` if it exists, then (re)create it as a directory.
+
+    This is useful for experiment output folders (ensure a clean run).
+    """
+    if not path:
+        raise ValueError("reset_dir: path is empty.")
+
+    abs_path = os.path.abspath(path)
+    if abs_path == os.path.abspath(os.path.sep):
+        raise ValueError(f"reset_dir: refuse to delete root directory: {path!r}")
+
+    if os.path.exists(path):
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+    os.makedirs(path, exist_ok=True)
+
+def vision_loaders(
+    dataset: str,
+    data_dir: str,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+    resize: int | tuple[int, int] | None = None,
+) -> Tuple[data.DataLoader, data.DataLoader]:
+    """
+    A unified torchvision vision dataset loader (train/test).
+
+    Supported datasets:
+      - "mnist"
+      - "fashion_mnist" (also accepts "fashionmnist", "fmnist")
+      - "cifar10"
+
+    Notes:
+      - We normalize to [0,1] via ToTensor(), then binarize (if needed) in the training loop.
+      - Resize (if provided) is applied BEFORE ToTensor() (i.e. on PIL images).
+    """
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Basic image transform: optional resize (on PIL) -> ToTensor (float32 in [0,1])
+    transform_list = [transforms.ToTensor()]
+    if resize is not None:
+        transform_list.insert(0, transforms.Resize(resize))
+    transform = transforms.Compose(transform_list)
+
+    key = dataset.strip().lower().replace("-", "").replace("_", "")
+    if key == "mnist":
+        ds_cls = torchvision.datasets.MNIST
+    elif key in {"fashionmnist", "fmnist"}:
+        ds_cls = torchvision.datasets.FashionMNIST
+    elif key == "cifar10":
+        ds_cls = torchvision.datasets.CIFAR10
+    else:
+        raise ValueError(
+            f"Unknown dataset={dataset!r}. Supported: 'mnist', 'fashion_mnist' (or 'fmnist'), 'cifar10'."
+        )
+
+    train_ds = ds_cls(root=data_dir, train=True, transform=transform, download=True)
+    test_ds = ds_cls(root=data_dir, train=False, transform=transform, download=True)
+
+    pin = pin_memory and torch.cuda.is_available()
+    persistent = num_workers > 0
+    train_iter = data.DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin,
+        drop_last=True,
+        persistent_workers=persistent,
+    )
+    test_iter = data.DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin,
+        drop_last=False,
+        persistent_workers=persistent,
+    )
+    return train_iter, test_iter
+
+
+# -----------------------------------------
+# Device
+# -----------------------------------------
+def set_seed(seed: int | None = None) -> None:
+    # Use a high-entropy / high-resolution seed when not provided.
+    # NOTE: int(time.time()) has only 1s resolution and can collide easily.
+    if seed is None:
+        seed = int(torch.seed())
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # Determinism is not strictly required; RBM uses randomness anyway.
+    # If you want more determinism, uncomment:
+    # torch.use_deterministic_algorithms(True)
+
+
+def get_device(device: Optional[Union[str, torch.device]] = None) -> torch.device:
+    """
+    Get the device to use. By default, automatically selects CUDA or CPU based on
+    the current environment, or you can explicitly specify it via the argument.
+
+    Args:
+        device: Optional device specifier (e.g., "cuda", "cpu", or torch.device).
+
+    Returns:
+        torch.device: The selected device.
+    """
+    resolved = torch.device(device) if device is not None else torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    print(f"Device: {resolved} (CUDA available: {torch.cuda.is_available()})")
+    # Speedups for modern NVIDIA GPUs (Ampere+ / Ada like RTX 4070 Ti):
+    # Enable TF32 (keeps float32 API, uses TF32 internally for matmul/conv where appropriate).
+    if resolved.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        # Let PyTorch choose higher-performance matmul kernels (often TF32 on CUDA).
+        torch.set_float32_matmul_precision("high")
+    return resolved
+
+
 
 def use_svg_display():
     """Use SVG display in Jupyter."""
@@ -101,7 +237,11 @@ def plot(X, Y=None, xlabel=None, ylabel=None, legend=None, xlim=None,
             axes.plot(y, fmt)
     set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
 
-def time_str(seconds, precision=1):
+
+# -----------------------------------------
+# Timer
+# -----------------------------------------
+def _time_str(seconds: float, precision: int = 1) -> str:
     """Return a formatted string given seconds in non-zero units format (d, h, min and sec)."""
     total = seconds
 
@@ -114,30 +254,28 @@ def time_str(seconds, precision=1):
     minutes = int(remainder // 60)
     secs = remainder - minutes * 60
 
-    def _fmt_secs(value):
-        if precision is None:
-            return str(int(round(value)))
-        return f'{value:.{precision}f}'
+    def _fmt_secs(value: float) -> str:
+        return f"{value:.{precision}f}"
 
     # Build parts starting from the highest non-zero unit
-    parts = []
+    parts: list[str] = []
     if days > 0:
-        parts.append(f'{days} d')
-        parts.append(f'{hours} h')
-        parts.append(f'{minutes} min')
-        parts.append(f'{_fmt_secs(secs)} sec')
+        parts.append(f"{days} d")
+        parts.append(f"{hours} h")
+        parts.append(f"{minutes} min")
+        parts.append(f"{_fmt_secs(secs)} sec")
     elif hours > 0:
-        parts.append(f'{hours} h')
-        parts.append(f'{minutes} min')
-        parts.append(f'{_fmt_secs(secs)} sec')
+        parts.append(f"{hours} h")
+        parts.append(f"{minutes} min")
+        parts.append(f"{_fmt_secs(secs)} sec")
     elif minutes > 0:
-        parts.append(f'{minutes} min')
-        parts.append(f'{_fmt_secs(secs)} sec')
+        parts.append(f"{minutes} min")
+        parts.append(f"{_fmt_secs(secs)} sec")
     else:
         # All higher units are zero, only show seconds
-        parts.append(f'{_fmt_secs(secs)} sec')
+        parts.append(f"{_fmt_secs(secs)} sec")
 
-    return ' '.join(parts)
+    return " ".join(parts)
 
 class Timer:
     """Record multiple running times."""
@@ -145,27 +283,27 @@ class Timer:
         self.times = []
         self.start()
 
-    def start(self):
+    def start(self) -> None:
         """Start the timer."""
         self.start_time = time.time()
 
-    def stop(self):
+    def stop(self) -> float:
         """Stop the timer and record the time in a list."""
         self.times.append(time.time() - self.start_time)
         return self.times[-1]
 
-    def avg(self):
+    def avg(self) -> float:
         """Return the average time."""
         return sum(self.times) / len(self.times)
 
-    def sum(self):
+    def sum(self) -> float:
         """Return the sum of time."""
         return sum(self.times)
 
-    def format_time(self, seconds=None, precision=1):
-        """Format given seconds or the accumulated time using ``time_str``."""
+    def format_time(self, seconds: float | None = None, precision: int = 1) -> str:
+        """Format given seconds or the accumulated time using ``_time_str``."""
         total = self.sum() if seconds is None else seconds
-        return time_str(total, precision=precision)
+        return _time_str(total, precision=precision)
 
 def synthetic_data(w, b, num_examples):
     """
@@ -301,9 +439,9 @@ def load_data_fashion_mnist(batch_size, resize=None, process_count=16):
     trans = transforms.Compose(trans)
     # 'transform' takes PIL images and returns the processed sample (transforms.Compose([transforms.ToTensor()]))
     mnist_train = torchvision.datasets.FashionMNIST(
-        root=f"{bash_path}/data", train=True, transform=trans, download=True)
+        root=f"{base_path}/data", train=True, transform=trans, download=True)
     mnist_test = torchvision.datasets.FashionMNIST(
-        root=f"{bash_path}/data", train=False, transform=trans, download=True)
+        root=f"{base_path}/data", train=False, transform=trans, download=True)
     return (data.DataLoader(mnist_train, batch_size, shuffle=True,
                             num_workers=get_dataloader_workers(process_count)),
             data.DataLoader(mnist_test, batch_size, shuffle=False,
