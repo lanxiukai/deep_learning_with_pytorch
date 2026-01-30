@@ -159,7 +159,6 @@ def set_seed(seed: int | None = None) -> None:
     # If you want more determinism, uncomment:
     # torch.use_deterministic_algorithms(True)
 
-
 def get_device(device: Optional[Union[str, torch.device]] = None) -> torch.device:
     """
     Get the device to use. By default, automatically selects CUDA or CPU based on
@@ -185,7 +184,9 @@ def get_device(device: Optional[Union[str, torch.device]] = None) -> torch.devic
     return resolved
 
 
-
+# -----------------------------------------
+# Visualization
+# -----------------------------------------
 def use_svg_display():
     """Use SVG display in Jupyter."""
     backend_inline.set_matplotlib_formats('svg')
@@ -241,6 +242,34 @@ def plot(X, Y=None, xlabel=None, ylabel=None, legend=None, xlim=None,
 # -----------------------------------------
 # Timer
 # -----------------------------------------
+class Timer:
+    """Record multiple running times."""
+    def __init__(self):
+        self.times = []
+        self.start()
+
+    def start(self) -> None:
+        """Start the timer."""
+        self.start_time = time.time()
+
+    def stop(self) -> float:
+        """Stop the timer and record the time in a list."""
+        self.times.append(time.time() - self.start_time)
+        return self.times[-1]
+
+    def avg(self) -> float:
+        """Return the average time."""
+        return sum(self.times) / len(self.times)
+
+    def sum(self) -> float:
+        """Return the sum of time."""
+        return sum(self.times)
+
+    def format_time(self, seconds: float | None = None, precision: int = 1) -> str:
+        """Format given seconds or the accumulated time using ``_time_str``."""
+        total = self.sum() if seconds is None else seconds
+        return _time_str(total, precision=precision)
+
 def _time_str(seconds: float, precision: int = 1) -> str:
     """Return a formatted string given seconds in non-zero units format (d, h, min and sec)."""
     total = seconds
@@ -277,34 +306,10 @@ def _time_str(seconds: float, precision: int = 1) -> str:
 
     return " ".join(parts)
 
-class Timer:
-    """Record multiple running times."""
-    def __init__(self):
-        self.times = []
-        self.start()
 
-    def start(self) -> None:
-        """Start the timer."""
-        self.start_time = time.time()
-
-    def stop(self) -> float:
-        """Stop the timer and record the time in a list."""
-        self.times.append(time.time() - self.start_time)
-        return self.times[-1]
-
-    def avg(self) -> float:
-        """Return the average time."""
-        return sum(self.times) / len(self.times)
-
-    def sum(self) -> float:
-        """Return the sum of time."""
-        return sum(self.times)
-
-    def format_time(self, seconds: float | None = None, precision: int = 1) -> str:
-        """Format given seconds or the accumulated time using ``_time_str``."""
-        total = self.sum() if seconds is None else seconds
-        return _time_str(total, precision=precision)
-
+# -----------------------------------------
+# Machine Learning Basics
+# -----------------------------------------
 def synthetic_data(w, b, num_examples):
     """
     Generate y = Xw + b + noise (gaussian noise, N(0, 0.01)).
@@ -361,6 +366,10 @@ def sgd(params, lr):
             param -= lr * param.grad  # update the parameter
             param.grad.zero_()        # reset the gradient
 
+
+# -----------------------------------------
+# Data Loading and Preprocessing
+# -----------------------------------------
 def load_array(data_arrays, batch_size, is_train=True):
     """
     Construct a PyTorch data iterator.
@@ -447,6 +456,10 @@ def load_data_fashion_mnist(batch_size, resize=None, process_count=16):
             data.DataLoader(mnist_test, batch_size, shuffle=False,
                             num_workers=get_dataloader_workers(process_count)))
 
+
+# -----------------------------------------
+# Model Evaluation
+# -----------------------------------------
 def accuracy(y_hat, y):
     """
     Compute the number of correct predictions.
@@ -514,37 +527,6 @@ class Accumulator:
         """Get the data at the index."""
         return self.data[idx]  # return the data at the index
 
-def train_epoch_ch3(net, train_iter, loss, updater): 
-    """
-    Train the model for one epoch.
-
-    Args:
-        net: the network
-        train_iter: the training data iterator
-        loss: the loss function
-        updater: the optimizer
-    Returns:
-        A tuple: (average_loss, average_accuracy)
-    """
-    if isinstance(net, torch.nn.Module): # Determine whether net is an instance of torch.nn.Module
-        net.train()  # set the model to training mode
-    metric = Accumulator(3)  # l.sum(), correct predictions, num_samples
-    for X, y in train_iter:
-        # compute the gradient and update the parameters
-        y_hat = net(X)      # y_hat: the predicted value (batch_size, num_outputs) or (batch_size,)
-        l = loss(y_hat, y)  # l: the loss (batch_size,); y: the true value (batch_size,)
-        if isinstance(updater, torch.optim.Optimizer):  # Determine whether updater is an instance of torch.optim.Optimizer
-            # use the built-in optimizer and loss function in PyTorch
-            updater.zero_grad()  # reset the gradient
-            l.mean().backward()  # compute the gradient
-            updater.step()       # update the parameters
-        else:
-            # use the custom optimizer and loss function
-            l.mean().backward()  # compute the gradient
-            updater()  # update the parameters
-        metric.add(l.detach().sum().item(), accuracy(y_hat, y), y.numel())
-    return metric[0] / metric[2], metric[1] / metric[2]
-
 class Animator:
     """Animate data curves using Matplotlib interactive mode."""
     def __init__(self, xlabel=None, ylabel=None, legend=None, xlim=None,
@@ -586,6 +568,41 @@ class Animator:
         if hasattr(self.fig.canvas, "flush_events"):
             self.fig.canvas.flush_events()
         plt.pause(0.001)
+
+
+# -----------------------------------------
+# Model Training and Prediction
+# -----------------------------------------
+def train_epoch_ch3(net, train_iter, loss, updater): 
+    """
+    Train the model for one epoch.
+
+    Args:
+        net: the network
+        train_iter: the training data iterator
+        loss: the loss function
+        updater: the optimizer
+    Returns:
+        A tuple: (average_loss, average_accuracy)
+    """
+    if isinstance(net, torch.nn.Module): # Determine whether net is an instance of torch.nn.Module
+        net.train()  # set the model to training mode
+    metric = Accumulator(3)  # l.sum(), correct predictions, num_samples
+    for X, y in train_iter:
+        # compute the gradient and update the parameters
+        y_hat = net(X)      # y_hat: the predicted value (batch_size, num_outputs) or (batch_size,)
+        l = loss(y_hat, y)  # l: the loss (batch_size,); y: the true value (batch_size,)
+        if isinstance(updater, torch.optim.Optimizer):  # Determine whether updater is an instance of torch.optim.Optimizer
+            # use the built-in optimizer and loss function in PyTorch
+            updater.zero_grad()  # reset the gradient
+            l.mean().backward()  # compute the gradient
+            updater.step()       # update the parameters
+        else:
+            # use the custom optimizer and loss function
+            l.mean().backward()  # compute the gradient
+            updater()  # update the parameters
+        metric.add(l.detach().sum().item(), accuracy(y_hat, y), y.numel())
+    return metric[0] / metric[2], metric[1] / metric[2]
 
 def train_ch3(net, train_iter, test_iter, loss, num_epochs, updater):
     """
@@ -646,6 +663,10 @@ def evaluate_loss(net, data_iter, loss):
         metric.add(l.sum(), l.numel())
     return metric[0] / metric[1]
 
+
+# -----------------------------------------
+# Data Download and Extraction
+# -----------------------------------------
 DATA_HUB = dict()
 DATA_URL = 'http://d2l-data.s3-accelerate.amazonaws.com/'
 
@@ -741,6 +762,10 @@ def try_all_gpus():
     devices = [torch.device(f'cuda:{i}') for i in range(torch.cuda.device_count())]
     return devices if devices else [torch.device('cpu')]
 
+
+# -----------------------------------------
+# Convolutional Neural Network
+# -----------------------------------------
 def corr2d(X, K):
     """
     Calculate 2D cross-correlation.
@@ -883,6 +908,10 @@ class Residual(nn.Module):
         Y += X
         return F.relu(Y)
 
+
+# -----------------------------------------
+# Text Preprocessing
+# -----------------------------------------
 DATA_HUB['time_machine'] = (
     DATA_URL + 'timemachine.txt',
     '090b5e7e70c295757f55df93cb0a180b9691891a')
@@ -1089,6 +1118,10 @@ def seq_data_iter_sequential(corpus, batch_size, num_steps):
         # Yield the subsequences as tensors: (batch_size, num_steps)
         yield X, Y
 
+
+# -----------------------------------------
+# Language Models and Dataset
+# -----------------------------------------
 class SeqDataLoader:
     """
     Iterator for loading sequence data.
@@ -1129,6 +1162,10 @@ def load_data_time_machine(batch_size, num_steps, use_random_iter=False, max_tok
         batch_size, num_steps, use_random_iter, max_tokens)
     return data_iter, data_iter.vocab
 
+
+# -----------------------------------------
+# Recurrent Neural Network
+# -----------------------------------------
 class RNNModelScratch:
     """
     Recurrent neural network model implemented from scratch (for Chapter 8).
@@ -1371,6 +1408,10 @@ class RNNModel(nn.Module):
                         self.num_directions * self.rnn.num_layers,
                         batch_size, self.num_hiddens), device=device))
 
+
+# -----------------------------------------
+# Language Models and Dataset
+# -----------------------------------------
 DATA_HUB['fra-eng'] = (DATA_URL + 'fra-eng.zip',
                            '94646ad1522d915e7b0f9296181140edcf86a4f5')
 
@@ -1496,6 +1537,10 @@ def load_data_nmt(batch_size, num_steps, num_examples=600):
     data_iter = load_array(data_arrays, batch_size)
     return data_iter, src_vocab, tgt_vocab
 
+
+# -----------------------------------------
+# Encoder-Decoder Architecture
+# -----------------------------------------
 class Encoder(nn.Module):
     """Basic encoder interface for the encoder-decoder architecture"""
     def __init__(self, **kwargs):
@@ -1544,6 +1589,9 @@ class EncoderDecoder(nn.Module):
         dec_state = self.decoder.init_state(enc_outputs, *args)
         return self.decoder(dec_X, dec_state)
 
+# -----------------------------------------
+# Sequence-to-Sequence Learning
+# -----------------------------------------
 class Seq2SeqEncoder(Encoder):
     """Recurrent neural network encoder for sequence-to-sequence learning."""
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
@@ -1697,3 +1745,40 @@ def bleu(pred_seq, label_seq, k):
                 label_subs[' '.join(pred_tokens[i: i + n])] -= 1
         score *= math.pow(num_matches / (len_pred - n + 1), math.pow(0.5, n))
     return score
+
+
+# -----------------------------------------
+# Attention Weights Visualization
+# -----------------------------------------
+def show_heatmaps(matrices, xlabel, ylabel, titles=None, figsize=(2.5, 2.5),
+                  cmap='Reds'):
+    """
+    Show heatmaps of matrices.
+    Args:
+        matrices: (number of rows for display, number of columns for display, number of queries, number of keys)
+        xlabel: x-axis label
+        ylabel: y-axis label
+        titles: titles for each subplot
+        figsize: figure size
+        cmap: color map
+    """
+    use_svg_display()
+    num_rows, num_cols, _, _ = matrices.shape
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=figsize,
+                                 sharex=True, sharey=True, squeeze=False)
+    for i, (row_axes, row_matrices) in enumerate(zip(axes, matrices)):
+        for j, (ax, matrix) in enumerate(zip(row_axes, row_matrices)):
+            pcm = ax.imshow(matrix.detach().numpy(), cmap=cmap)
+            if i == num_rows - 1:
+                ax.set_xlabel(xlabel)
+            if j == 0:
+                ax.set_ylabel(ylabel)
+            if titles:
+                ax.set_title(titles[j])
+    fig.colorbar(pcm, ax=axes, shrink=0.6)
+
+# -----------------------------------------
+# Attention Mechanisms
+# -----------------------------------------
+
+
