@@ -14,6 +14,7 @@ class MultiHeadAttention(nn.Module):
         super(MultiHeadAttention, self).__init__(**kwargs)
         self.num_heads = num_heads
         self.attention = d2l_save.DotProductAttention(dropout)
+        # p_q = p_k = p_v = num_hiddens/num_heads in one head
         self.W_q = nn.Linear(query_size, num_hiddens, bias=bias)
         self.W_k = nn.Linear(key_size, num_hiddens, bias=bias)
         self.W_v = nn.Linear(value_size, num_hiddens, bias=bias)
@@ -61,7 +62,6 @@ def transpose_qkv(X, num_heads):
     # num_hiddens/num_heads)
     return X.reshape(-1, X.shape[2], X.shape[3])
 
-
 #@save
 def transpose_output(X, num_heads):
     """Reverse the transpose_qkv operation."""
@@ -72,10 +72,10 @@ def transpose_output(X, num_heads):
 num_hiddens, num_heads = 100, 5
 attention = MultiHeadAttention(num_hiddens, num_hiddens, num_hiddens,
                                num_hiddens, num_heads, 0.5)
-attention.eval()
+print(attention.eval())
 
 batch_size, num_queries = 2, 4
 num_kvpairs, valid_lens =  6, torch.tensor([3, 2])
 X = torch.ones((batch_size, num_queries, num_hiddens))
 Y = torch.ones((batch_size, num_kvpairs, num_hiddens))
-attention(X, Y, Y, valid_lens).shape
+print(attention(X, Y, Y, valid_lens).shape)

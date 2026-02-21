@@ -9,11 +9,11 @@ from d2l_importer import d2l_save
 num_hiddens, num_heads = 100, 5
 attention = d2l_save.MultiHeadAttention(num_hiddens, num_hiddens, num_hiddens,
                                    num_hiddens, num_heads, 0.5)
-attention.eval()
+print(attention.eval())
 
 batch_size, num_queries, valid_lens = 2, 4, torch.tensor([3, 2])
 X = torch.ones((batch_size, num_queries, num_hiddens))
-attention(X, X, X, valid_lens).shape
+print(attention(X, X, X, valid_lens).shape)
 
 #@save
 class PositionalEncoding(nn.Module):
@@ -23,9 +23,13 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(dropout)
         # Create a long enough P.
         self.P = torch.zeros((1, max_len, num_hiddens))
+        # X = position / 10000^(2j/d)
         X = torch.arange(max_len, dtype=torch.float32).reshape(
             -1, 1) / torch.pow(10000, torch.arange(
             0, num_hiddens, 2, dtype=torch.float32) / num_hiddens)
+        # sin(X) and cos(X) are alternating
+        # '0::2' is the even indices, i.e., start from 0 and increment by 2
+        # '1::2' is the odd indices, i.e., start from 1 and increment by 2
         self.P[:, :, 0::2] = torch.sin(X)
         self.P[:, :, 1::2] = torch.cos(X)
 
@@ -47,3 +51,6 @@ for i in range(8):
 P = P[0, :, :].unsqueeze(0).unsqueeze(0)
 d2l_save.show_heatmaps(P, xlabel='Column (encoding dimension)',
                   ylabel='Row (position)', figsize=(3.5, 4), cmap='Blues')
+
+d2l_save.plt.ioff()
+d2l_save.plt.show()
