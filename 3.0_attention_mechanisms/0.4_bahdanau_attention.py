@@ -63,16 +63,18 @@ class Seq2SeqAttentionDecoder(AttentionDecoder):
     def attention_weights(self):
         return self._attention_weights
 
-encoder = d2l_save.Seq2SeqEncoder(vocab_size=10, embed_size=8, num_hiddens=16,
-                             num_layers=2)
-encoder.eval()
-decoder = Seq2SeqAttentionDecoder(vocab_size=10, embed_size=8, num_hiddens=16,
-                                  num_layers=2)
-decoder.eval()
-X = torch.zeros((4, 7), dtype=torch.long)  # (batch_size, num_steps)
-state = decoder.init_state(encoder(X), None)
-output, state = decoder(X, state)
-output.shape, len(state), state[0].shape, len(state[1]), state[1][0].shape
+# encoder = d2l_save.Seq2SeqEncoder(vocab_size=10, embed_size=8, num_hiddens=16,
+#                                   num_layers=2)
+# encoder.eval()
+# decoder = Seq2SeqAttentionDecoder(vocab_size=10, embed_size=8, num_hiddens=16,
+#                                   num_layers=2)
+# decoder.eval()
+# X = torch.zeros((4, 7), dtype=torch.long)  # (batch_size, num_steps)
+# state = decoder.init_state(encoder(X), None)
+# output, state = decoder(X, state)
+# print(f"output.shape: {output.shape}, len(state): {len(state)}, \
+#        \nstate[0].shape: {state[0].shape}, len(state[1]): {len(state[1])}, \
+#        \nstate[1][0].shape: {state[1][0].shape}")
 
 embed_size, num_hiddens, num_layers, dropout = 32, 32, 2, 0.1
 batch_size, num_steps = 64, 10
@@ -101,3 +103,6 @@ attention_weights = torch.cat([step[0][0][0] for step in dec_attention_weight_se
 d2l_save.show_heatmaps(
     attention_weights[:, :, :, :len(engs[-1].split()) + 1].cpu(),
     xlabel='Key positions', ylabel='Query positions')
+
+d2l_save.plt.ioff()
+d2l_save.plt.show()
