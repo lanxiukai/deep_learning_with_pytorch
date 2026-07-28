@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dl-utils"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "einops",
+    "imageio",
+    "ipython",
+    "matplotlib",
+    "matplotlib-inline",
+    "numpy",
+    "pillow",
+    "requests",
+    "torch",
+    "torchvision",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+examples = [
+    "aiohttp",
+    "albumentations>=2.0",
+    "datasets",
+    "diffusers",
+    "kagglehub",
+    "openai",
+    "pandas>=2.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dl_utils*"]

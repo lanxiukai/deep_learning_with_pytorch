@@ -1,0 +1,26 @@
+name: d2l
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - matplotlib
+  - matplotlib-inline
+  - ipython
+  - pandas>=2.3
+  - pillow
+  - requests
+  - pip:
+    - --extra-index-url https://download.pytorch.org/whl/cu130
+    - torch
+    - torchvision
+    - imageio
+    - kagglehub
+    - tqdm
+    - einops
+    - albumentations>=2.0
+    - datasets
+    - diffusers
+    - openai
+    - aiohttp
