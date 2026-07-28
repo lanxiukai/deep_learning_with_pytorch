@@ -66,5 +66,6 @@ htmlcov/
 
 # Local documentation, tests, and reference attachments
 /docs/
-/tests/
+/tests/*
+!/tests/batch_verify_glasses.py
 *.pdf

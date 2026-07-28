@@ -1,6 +1,12 @@
 """
 Deep Convolutional Generative Adversarial Networks
 
+Training data:
+Pokémon:          40,597 images across 721 class folders
+Samples per epoch: 40,597
+Note: This count assumes a clean, flattened dataset archive. Class labels are
+ignored by the GAN; the folders only provide the layout required by ImageFolder.
+
 Generator:       3.6 M params
 Discriminator:   2.8 M params
 Total:           6.4 M params

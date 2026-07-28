@@ -34,3 +34,6 @@ examples = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["dl_utils*"]
+
+[tool.setuptools.package-data]
+"dl_utils.data" = ["*.json"]

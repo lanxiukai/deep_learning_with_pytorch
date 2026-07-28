@@ -5,10 +5,8 @@ Encoder:  31.7 M params
 Decoder:  31.6 M params
 Total:    63.3 M params
 
-Note on the glasses dataset: ~11.5% (517/4500) of labels are wrong (415 in G/
-without glasses, 102 in NoG/ with glasses). Before training, manually or via a
-vision model identify mislabeled images in G/ NoG/ and move them to the correct
-folder. See tool_scripts/batch_verify_glasses.py for automated verification.
+The glasses download workflow automatically applies the repository's reviewed
+label corrections (415 G→NoG and 102 NoG→G) before training.
 """
 
 import torch

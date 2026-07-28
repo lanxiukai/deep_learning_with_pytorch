@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Batch verify glasses dataset using OpenRouter vision API (qwen3.7-plus)."""
+"""One-off Vision-LLM audit used to derive the glasses label corrections.
+
+This utility is not part of dataset preparation and is not collected by pytest.
+"""
 
 import asyncio
 import aiohttp

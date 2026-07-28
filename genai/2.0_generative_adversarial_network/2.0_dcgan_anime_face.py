@@ -1,6 +1,11 @@
 """
 Deep Convolutional Generative Adversarial Networks
 
+Training data:
+Anime faces:      63,565 images
+Samples per epoch: 63,565
+Note: The dataset has one class folder; its label is ignored by the GAN.
+
 Generator:       3.6 M params
 Discriminator:   2.8 M params
 Total:           6.4 M params

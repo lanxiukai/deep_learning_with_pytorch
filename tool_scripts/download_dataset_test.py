@@ -1,89 +1,26 @@
 '''
 Download Dataset Test
 
-Downloads datasets referenced in book_repos/DGAI ch1-7 (and extras) into data/.
+Downloads and prepares datasets used by the project examples under data/.
 '''
 
 import os
-import shutil
 from pathlib import Path
 
 import pandas as pd
+from dl_utils.data.dataset_preparation import (
+    apply_glasses_label_corrections,
+    build_image_folder_cache,
+    download_kaggle_dataset,
+    ensure_glasses_classification,
+    prepare_celeba_cyclegan_splits,
+)
 from dl_utils.data.downloads import download, download_extract
 from dl_utils.data.vision import vision_loaders
 from dl_utils.d2l.time_machine import read_time_machine
 
 
-# ------------------------------------------------------------
-# Helper for kagglehub downloads
-# ------------------------------------------------------------
-def _download_kaggle(owner_dataset: str, dest_subdir: str):
-    """Download a Kaggle dataset via kagglehub, move to data/<dest_subdir>."""
-    dest = os.path.join(DATA_DIR, dest_subdir)
-    if os.path.exists(dest) and os.listdir(dest):
-        print(f"  Already exists: {dest}")
-        return True
-
-    try:
-        import kagglehub
-    except ImportError:
-        print(f"  SKIP: kagglehub not installed. Install via: pip install kagglehub")
-        return False
-
-    cache_path = kagglehub.dataset_download(owner_dataset)
-    if os.path.exists(dest):
-        shutil.rmtree(dest)
-    shutil.copytree(cache_path, dest)
-    print(f"  Downloaded to: {dest}")
-    return True
-
-
 DATA_DIR = "./data"
-
-
-def _prepare_celeba_cyclegan_splits(celeba_dir: Path):
-    """Create local black- and blond-hair image folders for the CycleGAN example.
-
-    The source images remain untouched.  Hard links avoid duplicating the
-    downloaded images; filesystems without hard-link support fall back to
-    copying the individual image.
-    """
-    attributes_file = celeba_dir / "list_attr_celeba.csv"
-    image_dir_candidates = (
-        celeba_dir / "img_align_celeba" / "img_align_celeba",
-        celeba_dir / "img_align_celeba",
-    )
-    image_dir = next((path for path in image_dir_candidates if path.is_dir()), None)
-    if not attributes_file.is_file() or image_dir is None:
-        print("  SKIP: CelebA files are incomplete; cannot prepare CycleGAN splits.")
-        return False
-
-    black_dir = celeba_dir / "black"
-    blond_dir = celeba_dir / "blond"
-    black_dir.mkdir(exist_ok=True)
-    blond_dir.mkdir(exist_ok=True)
-    attributes = pd.read_csv(attributes_file)
-    linked = 0
-    for row in attributes.itertuples(index=False):
-        image_id = row.image_id
-        target_dir = black_dir if row.Black_Hair == 1 else blond_dir if row.Blond_Hair == 1 else None
-        if target_dir is None:
-            continue
-        source = image_dir / image_id
-        target = target_dir / image_id
-        if target.exists() or not source.is_file():
-            continue
-        try:
-            os.link(source, target)
-        except OSError:
-            shutil.copy2(source, target)
-        linked += 1
-
-    print(
-        f"  CycleGAN local splits ready: {black_dir} ({len(list(black_dir.iterdir()))} images), "
-        f"{blond_dir} ({len(list(blond_dir.iterdir()))} images); added {linked}."
-    )
-    return True
 
 
 # ============================================================
@@ -168,9 +105,12 @@ except Exception as e:
 #    Download: https://www.kaggle.com/datasets/jessicali9530/celeba-dataset
 # ============================================================
 try:
-    ok = _download_kaggle("jessicali9530/celeba-dataset", "celeba")
+    ok = download_kaggle_dataset(
+        "jessicali9530/celeba-dataset",
+        Path(DATA_DIR) / "celeba",
+    )
     if ok:
-        _prepare_celeba_cyclegan_splits(Path(DATA_DIR) / "celeba")
+        prepare_celeba_cyclegan_splits(Path(DATA_DIR) / "celeba")
         print("The CelebA Dataset for CycleGAN has been downloaded.")
 except Exception as e:
     print(f"Failed to download the CelebA Dataset: {e}")
@@ -183,7 +123,10 @@ except Exception as e:
 #    Download: https://www.kaggle.com/datasets/splcher/animefacedataset
 # ============================================================
 try:
-    ok = _download_kaggle("splcher/animefacedataset", "anime_face")
+    ok = download_kaggle_dataset(
+        "splcher/animefacedataset",
+        Path(DATA_DIR) / "anime_face",
+    )
     if ok:
         print("The Anime Face Dataset has been downloaded.")
 except Exception as e:
@@ -195,30 +138,44 @@ except Exception as e:
 #    Source: Kaggle (kagglehub) — jeffheaton/glasses-or-no-glasses
 #    Format: 5000 RGB (3ch) face images, 1024×1024 px, uint8, binary label
 #    Contains: train.csv (labels), test.csv (labels), faces-spring-2020/ (images)
-#    Note: ~11.5% (517/4500) of labels are wrong (415 in G/ without glasses,
-#    102 in NoG/ with glasses). Before training, manually or via a vision model
-#    identify mislabeled images in G/ NoG/ and move them to the correct folder.
-#    See batch_verify_glasses.py for automated verification via OpenRouter (qwen3.7-plus).
+#    Label corrections: a repository-tracked Vision-LLM review moves 415 images
+#    from G/ to NoG/ and 102 from NoG/ to G/ after the initial CSV split.
 #    Download: https://www.kaggle.com/datasets/jeffheaton/glasses-or-no-glasses
 # ============================================================
 try:
-    ok = _download_kaggle("jeffheaton/glasses-or-no-glasses", "glasses")
+    ok = download_kaggle_dataset(
+        "jeffheaton/glasses-or-no-glasses",
+        Path(DATA_DIR) / "glasses",
+    )
     if ok:
         print("The Glasses or No Glasses Dataset has been downloaded.")
-        img_dir   = Path(DATA_DIR) / "glasses" / "faces-spring-2020" / "faces-spring-2020"
-        train_csv = Path(DATA_DIR) / "glasses" / "train.csv"
-        out_root  = Path(DATA_DIR) / "glasses"
-        if img_dir.exists():
-            train = pd.read_csv(train_csv).set_index("id")
-            for dirname in ("G", "NoG"):
-                (out_root / dirname).mkdir(parents=True, exist_ok=True)
-            for img_id in train.index:
-                src = img_dir / f"face-{img_id}.png"
-                dst = (out_root / "G" if train.loc[img_id, "glasses"] == 1 else out_root / "NoG") / f"face-{img_id}.png"
-                shutil.copy2(src, dst)
-            print(f"  Reorganized {len(train)} images → {out_root} (G/ NoG/)")
-        else:
-            print(f"  Already reorganized: {out_root}")
+        out_root = Path(DATA_DIR) / "glasses"
+        ensure_glasses_classification(out_root)
+        apply_glasses_label_corrections(out_root)
+        resized_root = Path(DATA_DIR) / "glasses-256"
+        resized_root.mkdir(parents=True, exist_ok=True)
+        unexpected_classes = sorted(
+            path.name
+            for path in resized_root.iterdir()
+            if path.is_dir() and path.name not in {"G", "NoG"}
+        )
+        if unexpected_classes:
+            raise RuntimeError(
+                f"Unexpected class directories in {resized_root}: "
+                f"{unexpected_classes}"
+            )
+        workers = min(16, os.cpu_count() or 1)
+        for class_name in ("G", "NoG"):
+            build_image_folder_cache(
+                out_root / class_name,
+                resized_root / class_name,
+                size=256,
+                workers=workers,
+            )
+        # Also normalize an existing cache that may have been created before
+        # the reviewed label corrections were integrated into this workflow.
+        apply_glasses_label_corrections(resized_root)
+        print(f"  Glasses training dataset ready: {resized_root}")
 except Exception as e:
     print(f"Failed to download the Glasses or No Glasses Dataset: {e}")
 

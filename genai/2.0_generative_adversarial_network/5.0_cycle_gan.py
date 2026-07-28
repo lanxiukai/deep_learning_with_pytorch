@@ -9,6 +9,26 @@ Models and training helpers live in dl_utils/genai/cyclegan.py.
 Data: local data/celeba/{black,blond} prepared by
 tool_scripts/download_dataset_test.py; data/glasses.
 Outputs: output/cyclegan/.
+
+Training data — hair-color task:
+Black hair:              48,472 images
+Blond hair:              29,980 images
+Available total:         78,452 unique images
+Samples per epoch:       48,472 unpaired image pairs
+Note: LoadData uses the larger domain as its length, so the smaller blond-hair
+domain cycles and 18,492 of its images are reused once per epoch.
+
+Training data — glasses task:
+With glasses (G):         2,543 images
+Without glasses (NoG):    1,957 images
+Available total:          4,500 unique images
+Samples per epoch:        2,543 unpaired image pairs
+Note: Counts include 517 repository-tracked label corrections. The smaller NoG
+domain cycles, so 586 of its images are reused once per epoch.
+
+Generator (each):      11.4 M params
+Discriminator (each):   2.8 M params
+Total (2 of each):     28.3 M params
 """
 
 import random
@@ -184,9 +204,7 @@ opt_disc = torch.optim.Adam(list(disc_A.parameters()) +
 opt_gen = torch.optim.Adam(list(gen_A.parameters()) + 
   list(gen_B.parameters()),lr=lr,betas=(0.5, 0.999))
 
-# make sure all images with glasses are placed in 'data/glasses/G/'
-# all images without glasses are placed in 'data/glasses/NoG/'
-# Manually move images to the correct folder if they are mislabelled
+# The download workflow applies the reviewed G/NoG label corrections.
 dataset = LoadData(root_A=[f"{DATA_DIR}/glasses/G/"],
     root_B=[f"{DATA_DIR}/glasses/NoG/"],
     transform=transforms)

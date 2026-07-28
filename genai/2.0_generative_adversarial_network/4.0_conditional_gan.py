@@ -1,14 +1,19 @@
 """
-Conditional GAN (cGAN) with WGAN-GP critic — faces with/without glasses.
+Conditional GAN (cGAN) with a WGAN-GP critic for generating faces with or
+without glasses.
 
-Adapted from the companion code of "Generative Deep Learning", 2nd ed.
-(book_repos/DGAI/ch05Conditional_GAN.ipynb); notebook code cells kept in
-original order, markdown narrative removed.
-Data: data/glasses (Kaggle eyeglasses dataset; assumes it has already been
-downloaded and split into G/ and NoG/ — this script starts from data loading).
+Adapted from "Generative Deep Learning", 2nd ed.
+Data: data/glasses-256, prepared by tool_scripts/download_dataset_test.py.
 Outputs: output/cgan/.
+Checkpoint analysis: 4.1_conditional_gan_analysis.py.
 
-Checkpoint evaluation moved to 4.1_conditional_gan_analysis.py.
+Training data:
+With glasses (G):       2,543 images
+Without glasses (NoG):  1,957 images
+Available total:         4,500 images
+Samples per epoch:       4,480
+Note: Counts include 517 repository-tracked label corrections. drop_last=True
+omits 20 shuffled images per epoch.
 
 Generator:  12.9 M params
 Critic:      2.8 M params
@@ -220,8 +225,7 @@ def main():
         raise FileNotFoundError(
             f"Resized dataset cache not found: {CACHED_DATA_DIR}\n"
             "Create it with:\n"
-            "python tool_scripts/resize_image_folder.py "
-            "data/glasses data/glasses-256 --size 256")
+            "python tool_scripts/download_dataset_test.py")
     data_set = image_folder_dataset(
         CACHED_DATA_DIR, normalize=(0.5, 0.5))  # (x - mean) / std
 

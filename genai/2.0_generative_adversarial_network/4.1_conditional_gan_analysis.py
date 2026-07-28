@@ -2,8 +2,6 @@
 Analyze a previously trained Conditional GAN (cGAN) checkpoint — sample
 faces with/without glasses, then interpolate in latent (z) and label space.
 
-Evaluation half of book_repos/DGAI/ch05Conditional_GAN.ipynb; notebook code
-cells kept in original order (Generator imported from dl_utils.genai.gan).
 Requires output/cgan/cgan.pth — run 4.0_conditional_gan.py first.
 """
 

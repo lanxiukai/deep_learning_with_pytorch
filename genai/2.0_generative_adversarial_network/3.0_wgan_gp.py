@@ -1,35 +1,16 @@
 """
-Wasserstein GAN (WGAN) & WGAN with Gradient Penalty (WGAN-GP)
+Wasserstein GAN (WGAN) and WGAN with Gradient Penalty (WGAN-GP) on anime faces.
 
-Shared framework — differences vs. DCGAN (2.0_dcgan_anime_face.py):
-1. The discriminator becomes a *critic*: it outputs an unbounded real-valued
-   score (no sigmoid, no BCE loss) that estimates the Wasserstein distance
-   between the real and generated distributions.
-2. Critic loss: maximize E[D(real)] - E[D(fake)]  =>  minimize its negation.
-   Generator loss: maximize E[D(fake)].
-3. The critic is updated n_critic times per generator update, so the
-   Wasserstein estimate stays accurate.
+Uses the DCGAN generator with a BatchNorm-free critic and Wasserstein loss.
+Select `lipschitz='clip'` for WGAN weight clipping with RMSProp, or `'gp'`
+(default) for WGAN-GP with gradient penalty and Adam. The critic is updated
+`n_critic` times per generator update.
 
-The Wasserstein interpretation requires the critic to be Lipschitz continuous.
-Two ways to enforce it (switch with `lipschitz='clip' | 'gp'` in train()):
-
-A. Weight clipping (WGAN; Arjovsky et al., 2017):
-   - After every critic update, clamp its parameters to [-clip_value, clip_value].
-   - Simple, but caps the critic's capacity and can cause vanishing/exploding
-     gradients when clip_value is mistuned.
-   - Optimizer: RMSProp (no momentum) — momentum interacts badly with the
-     freshly clipped weights.
-
-B. Gradient penalty (WGAN-GP; Gulrajani et al., 2017):
-   - Penalize the deviation of ‖∇_x̂ D(x̂)‖₂ from 1 on random interpolations
-     x̂ = ε·real + (1−ε)·fake. A 1-Lipschitz function has gradient norm ≤ 1.
-   - The critic must NOT use BatchNorm: the penalty applies to each sample's
-     gradient independently, but BatchNorm couples samples within a batch.
-   - Optimizer: Adam works again, since the constraint no longer fights it.
-
-The critic below has no BatchNorm (required for 'gp'; harmless for 'clip'),
-so both modes share one architecture. Architecture and dataset mirror the
-anime-face DCGAN.
+Training data:
+Anime faces:      63,565 images
+Samples per epoch: 63,488
+Note: drop_last=True discards the final incomplete batch of 77 images each
+epoch; shuffling means the omitted images may differ between epochs.
 
 Generator:   3.6 M params
 Critic:      2.8 M params

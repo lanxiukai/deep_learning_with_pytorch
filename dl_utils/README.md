@@ -44,7 +44,9 @@ dl_utils/
 │
 ├── data/
 │   ├── __init__.py
+│   ├── dataset_preparation.py
 │   ├── downloads.py
+│   ├── glasses_label_corrections.json
 │   └── vision.py
 │
 ├── devices/
@@ -172,6 +174,16 @@ Public entries: none (docstring-only package marker).
 
 Dependencies: hashlib, os, shutil, tarfile, zipfile, requests, dl_utils.filesystem.project_root (infer_project_root).
 Public entries: DATA_HUB, DATA_URL, download, download_extract, download_all.
+
+### dl_utils/data/dataset_preparation.py
+
+Dependencies: csv, filecmp, json, os, shutil, concurrent.futures
+(ThreadPoolExecutor, as_completed), pathlib (Path), PIL (Image), and optional
+kagglehub inside `download_kaggle_dataset`.
+Public entries: download_kaggle_dataset, prepare_celeba_cyclegan_splits,
+resize_image, build_image_folder_cache, load_corrections,
+ensure_glasses_classification, validate_glasses_classification,
+apply_glasses_label_corrections.
 
 ### dl_utils/data/vision.py
 

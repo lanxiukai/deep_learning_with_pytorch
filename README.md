@@ -34,13 +34,14 @@ the PyTorch framework.
 │   └── 3.0_diffusion_model/
 │
 ├── tool_scripts/
-│   ├── batch_verify_glasses.py
 │   ├── download_dataset_test.py
 │   ├── plot_fashion_mnist.py
 │   ├── pytorch_test.py
-│   ├── resize_image_folder.py
 │   ├── sgd_animation.py
 │   └── word_frequency.py
+│
+├── tests/                           # Test suite and one-off verification tools
+│   └── batch_verify_glasses.py      # Historical Vision-LLM label audit
 │
 ├── pyproject.toml
 ├── environment.yml
@@ -89,3 +90,5 @@ python tool_scripts/download_dataset_test.py
 ```
 
 Some datasets are large, and Kaggle-hosted datasets may require authentication.
+For the glasses dataset, the command resumes incomplete G/NoG classification,
+applies the reviewed label corrections, and builds `data/glasses-256/`.
