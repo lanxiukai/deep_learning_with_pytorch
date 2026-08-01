@@ -58,9 +58,12 @@ numbers do not correspond to book chapter numbers.
 | Item | Version |
 |---|---|
 | OS | Ubuntu 24.04, x86_64 |
-| CUDA | 13.0 |
-| PyTorch | 2.9.1+cu130 |
-| Python | 3.12 |
+| GPU | NVIDIA GeForce RTX 4070 Ti |
+| NVIDIA driver | 610.88 |
+| PyTorch CUDA runtime | 13.0 |
+| PyTorch | 2.13.0+cu130 |
+| torchvision | 0.28.0+cu130 |
+| Python | 3.14.6 |
 
 ---
 
@@ -75,11 +78,23 @@ numbers do not correspond to book chapter numbers.
 ```bash
 conda env create -f environment.yml
 conda activate d2l
-python -m pip install --no-deps -e .
+python -m pip install --no-deps --no-build-isolation -e .
 ```
 
-`environment.yml` uses the CUDA 13.0 PyTorch wheels. For a CPU-only
-environment, change `cu130` in the wheel index to `cpu` before creating it.
+`environment.yml` installs PyTorch and all source-derived Python dependencies
+with pip inside the Conda environment. The PyTorch and torchvision wheels come
+from the official CUDA 13.0 (`cu130`) index and carry their environment-local
+CUDA runtime dependencies; a system CUDA Toolkit is not required and the setup
+does not modify the NVIDIA driver.
+
+The dependency set covers imports in the active project source. Generated
+`build/` copies and the ignored nested reference repositories under
+`book_repos/` do not add packages to the environment. The repository uses the
+local `dl_utils.d2l` package rather than the external PyPI `d2l` distribution.
+
+For a CPU-only environment, change the wheel index suffix from `cu130` to `cpu`
+and change the `torch` and `torchvision` version suffixes from `+cu130` to
+`+cpu` before creating the environment. GPU lesson results will then differ.
 
 #### Dataset Preparation
 
