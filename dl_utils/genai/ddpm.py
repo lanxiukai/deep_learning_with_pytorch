@@ -22,6 +22,8 @@ from torchvision.transforms import (
 )
 from tqdm import tqdm
 
+from dl_utils.data.images import flatten_to_rgb
+
 __all__ = ["transforms", "DDIMScheduler", "UNet"]
 
 
@@ -38,7 +40,9 @@ augmentations = Compose(
 
 
 def transforms(examples):
-    images = [augmentations(image.convert("RGB")) for image in examples["image"]]
+    images = [
+        augmentations(flatten_to_rgb(image)) for image in examples["image"]
+    ]
     return {"input": images}
 
 

@@ -10,6 +10,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from dl_utils.data.images import flatten_to_rgb
+
 
 CORRECTIONS_PATH = Path(__file__).with_name("glasses_label_corrections.json")
 EXPECTED_TRAINING_IMAGES = 4500
@@ -111,7 +113,7 @@ def prepare_celeba_cyclegan_splits(celeba_dir: Path) -> bool:
 
 
 def resize_image(source: Path, target: Path, size: int) -> bool:
-    """Resize one image atomically; return False when it is already cached."""
+    """Resize one image atomically, flattening transparency onto white."""
     if target.exists():
         with Image.open(target) as cached:
             if cached.size != (size, size):
@@ -128,7 +130,7 @@ def resize_image(source: Path, target: Path, size: int) -> bool:
             image_format = (
                 image.format or source.suffix.removeprefix(".").upper()
             )
-            resized = image.convert("RGB").resize(
+            resized = flatten_to_rgb(image).resize(
                 (size, size),
                 Image.Resampling.BILINEAR,
             )

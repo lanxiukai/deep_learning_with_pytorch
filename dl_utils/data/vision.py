@@ -7,6 +7,8 @@ from torch.utils import data
 import torchvision
 import torchvision.transforms as transforms
 
+from dl_utils.data.images import load_rgb_image
+
 
 TensorBatch: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 TensorDataLoader: TypeAlias = data.DataLoader[TensorBatch]
@@ -96,6 +98,9 @@ def image_folder_dataset(
     Returns:
         The dataset; ``ds[i]`` yields ``(tensor, label)`` with tensor float32
         (C×H×W) in [0, 1] (or normalized), label an int class index.
+
+    Images with transparency are composited onto white before conversion to
+    RGB so palette alpha tables are preserved without Pillow warnings.
     """
     # Transform chain: optional Resize (on PIL) → ToTensor (→float32 [0,1])
     # → optional Normalize
@@ -105,7 +110,11 @@ def image_folder_dataset(
     if normalize is not None:
         transform_list.append(transforms.Normalize(*normalize))
     transform = transforms.Compose(transform_list)
-    return torchvision.datasets.ImageFolder(root=root, transform=transform)
+    return torchvision.datasets.ImageFolder(
+        root=root,
+        transform=transform,
+        loader=load_rgb_image,
+    )
 
 
 def image_folder_loader(

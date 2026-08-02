@@ -11,10 +11,11 @@ import os
 import torch
 import numpy as np
 import torch.nn as nn
-from PIL import Image
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from torchvision.utils import save_image
+
+from dl_utils.data.images import load_rgb_image
 
 
 def test(i, A, B, fake_A, fake_B, out_dir):
@@ -206,8 +207,8 @@ class LoadData(Dataset):
     def __getitem__(self, index):
         A_img = self.A_images[index % self.A_len]
         B_img = self.B_images[index % self.B_len]
-        A_img = np.array(Image.open(A_img).convert("RGB"))
-        B_img = np.array(Image.open(B_img).convert("RGB"))
+        A_img = np.array(load_rgb_image(A_img))
+        B_img = np.array(load_rgb_image(B_img))
         if self.transform:
             augmentations = self.transform(image=B_img,
                                            image0=A_img)
