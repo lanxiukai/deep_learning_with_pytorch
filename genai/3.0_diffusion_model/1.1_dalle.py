@@ -5,8 +5,8 @@
 from openai import OpenAI
 
 # https://platform.openai.com/docs/models for a list of models
-openai_api_key = "your actual OpenAI API key here, in quotes"
-client = OpenAI(api_key=openai_api_key)
+# Read OPENAI_API_KEY from the process environment; never put it in source.
+client = OpenAI()
 
 # generte image
 response = client.images.generate(
