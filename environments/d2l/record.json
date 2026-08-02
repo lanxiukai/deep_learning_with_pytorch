@@ -1,5 +1,5 @@
 {
-  "captured_at_utc": "2026-08-02T06:31:13Z",
+  "captured_at_utc": "2026-08-02T07:15:57Z",
   "conda_version": "26.3.2",
   "editable_install": {
     "package": "dl-utils",
@@ -7,7 +7,7 @@
   },
   "environment": "d2l",
   "owner_repository": "deep-learning-with-pytorch",
-  "owner_repository_commit": "2461e9bec18404d1159a43e0c40980e5c578660b",
+  "owner_repository_commit": "a52b94e76e23c4ad99b9d0b78b5d7c294b9a9fb9",
   "pip_package_counts": {
     "paddle": 0,
     "pypi": 110,
