@@ -81,6 +81,19 @@ conda activate d2l
 python -m pip install --no-deps --no-build-isolation -e .
 ```
 
+The human-maintained `environment.yml` is complemented by an exact,
+checksummed runtime record under [`environments/d2l/`](environments/d2l/).
+The record preserves the tested Conda artifacts and pip package set while
+restoring this repository's `dl-utils` package separately as an editable
+install.
+
+These files have separate recovery roles and should be kept together:
+
+- `environment.yml` is the readable dependency source for rebuilding forward;
+- `environments/d2l/` is the exact, checksummed snapshot of the tested runtime;
+- `pyproject.toml` defines the local `dl-utils` package and is required by the
+  editable-install step above.
+
 `environment.yml` installs PyTorch and all source-derived Python dependencies
 with pip inside the Conda environment. The PyTorch and torchvision wheels come
 from the official CUDA 13.0 (`cu130`) index and carry their environment-local
