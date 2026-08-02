@@ -12,11 +12,11 @@ Discriminator:   2.8 M params
 Total:           6.4 M params
 """
 
-import warnings
 import matplotlib.pyplot as plt
 import torch
 import torchvision
 from torch import nn
+from dl_utils.data.images import load_rgb_image
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.devices.selection import try_gpu
@@ -113,22 +113,20 @@ def main():
     out_dir = infer_project_root() / 'output' / 'dcgan' / 'pokemon'
     reset_dir(str(out_dir))
 
-    pokemon = torchvision.datasets.ImageFolder(
-        infer_project_root() / 'data' / 'pokemon')
-
     batch_size = 128
     transformer = torchvision.transforms.Compose([
         torchvision.transforms.Resize((64, 64)),
         torchvision.transforms.ToTensor(),          # int [0, 255] -> Pytorch Tensor FP32 [0.0, 1.0]
         torchvision.transforms.Normalize(0.5, 0.5)  # (x - 0.5)/0.5, [0, 1] -> [-1, 1]
     ])
-    pokemon.transform = transformer
+    pokemon = torchvision.datasets.ImageFolder(
+        infer_project_root() / 'data' / 'pokemon',
+        transform=transformer,
+        loader=load_rgb_image)
     data_iter = torch.utils.data.DataLoader(
         pokemon, batch_size=batch_size,
         shuffle=True, num_workers=4)
 
-    # Close the matplotlib / torch warning output
-    warnings.filterwarnings('ignore')
     for X, y in data_iter:
         # [20, C, H, W] -> [20, H, W, C]; [-1, 1] -> [0, 1]
         imgs = X[:20,:,:,:].permute(0, 2, 3, 1)/2+0.5

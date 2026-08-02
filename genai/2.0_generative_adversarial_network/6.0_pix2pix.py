@@ -25,13 +25,13 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TF
 from torchvision.utils import save_image
 
+from dl_utils.data.images import load_rgb_image
 from dl_utils.filesystem.project_root import infer_project_root
 
 PROJECT_ROOT = infer_project_root()
@@ -63,8 +63,8 @@ class PairedImageDataset(Dataset[tuple[Tensor, Tensor]]):
 
     def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
         name = self.names[index]
-        source = Image.open(self.input_dir / name).convert("RGB")
-        target = Image.open(self.target_dir / name).convert("RGB")
+        source = load_rgb_image(self.input_dir / name)
+        target = load_rgb_image(self.target_dir / name)
         size = [self.image_size, self.image_size]
         source = TF.resize(source, size, InterpolationMode.BICUBIC)
         target = TF.resize(target, size, InterpolationMode.BICUBIC)

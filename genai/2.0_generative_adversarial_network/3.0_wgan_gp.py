@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 import torch
 import torchvision
 from torch import nn
+from dl_utils.data.images import load_rgb_image
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.devices.selection import try_gpu
@@ -219,16 +220,16 @@ def main():
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
 
-    anime_face = torchvision.datasets.ImageFolder(
-        DATA_DIR / 'anime_face')
-
     batch_size = 128
     transformer = torchvision.transforms.Compose([
         torchvision.transforms.Resize((64, 64)),
         torchvision.transforms.ToTensor(),          # int [0, 255] -> Pytorch Tensor FP32 [0.0, 1.0]
         torchvision.transforms.Normalize(0.5, 0.5)  # (x - 0.5)/0.5, [0, 1] -> [-1, 1]
     ])
-    anime_face.transform = transformer
+    anime_face = torchvision.datasets.ImageFolder(
+        DATA_DIR / 'anime_face',
+        transform=transformer,
+        loader=load_rgb_image)
     num_workers = min(8, os.cpu_count() or 1)
     data_iter = torch.utils.data.DataLoader(
         anime_face,

@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import torch
 import torchvision
 from torch import nn
+from dl_utils.data.images import load_rgb_image
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.devices.selection import try_gpu
@@ -85,7 +86,7 @@ def train(net_D, net_G, data_iter, num_epochs, lr_D, lr_G, latent_dim, out_dir,
             [torch.cat([   # → (H, 7×W, C)
                 fake_x[i * 7 + j].cpu().detach() for j in range(7)], dim=1)
              for i in range(len(fake_x)//7)], dim=0)
-        if epoch == 1 or epoch % 10 == 0:
+        if epoch == 1 or epoch % 2 == 0:
             plt.imsave(out_dir / f'epoch_{epoch:03d}.png', imgs.numpy())
         animator.axes[1].cla()
         animator.axes[1].imshow(imgs)
@@ -112,16 +113,16 @@ def main():
     out_dir = infer_project_root() / 'output' / 'dcgan' / 'anime_face'
     reset_dir(str(out_dir))
 
-    anime_face = torchvision.datasets.ImageFolder(
-        infer_project_root() / 'data' / 'anime_face')
-
     batch_size = 128
     transformer = torchvision.transforms.Compose([
         torchvision.transforms.Resize((64, 64)),
         torchvision.transforms.ToTensor(),          # int [0, 255] -> Pytorch Tensor FP32 [0.0, 1.0]
         torchvision.transforms.Normalize(0.5, 0.5)  # (x - 0.5)/0.5, [0, 1] -> [-1, 1]
     ])
-    anime_face.transform = transformer
+    anime_face = torchvision.datasets.ImageFolder(
+        infer_project_root() / 'data' / 'anime_face',
+        transform=transformer,
+        loader=load_rgb_image)
     data_iter = torch.utils.data.DataLoader(
         anime_face, batch_size=batch_size,
         shuffle=True, num_workers=4)
@@ -188,7 +189,7 @@ def main():
     x = torch.zeros((1, 3, 64, 64))
     print(net_D(x).shape)  # torch.Size([1, 1, 1, 1])
 
-    latent_dim, num_epochs = 100, 100
+    latent_dim, num_epochs = 100, 20
     lr_D, lr_G = 1e-4, 2e-4
     train(net_D, net_G, data_iter, num_epochs, lr_D, lr_G, latent_dim, out_dir)
 
