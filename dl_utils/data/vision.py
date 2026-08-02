@@ -14,7 +14,7 @@ TensorDataLoader: TypeAlias = data.DataLoader[TensorBatch]
 
 def vision_loaders(
     dataset: str,
-    data_dir: str,
+    data_dir: str | Path,
     batch_size: int,
     resize: int | tuple[int, int] | None = None,
     num_workers: int = 0,

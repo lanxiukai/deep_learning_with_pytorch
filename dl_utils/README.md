@@ -172,8 +172,9 @@ Public entries: none (docstring-only package marker).
 
 ### dl_utils/data/downloads.py
 
-Dependencies: hashlib, os, shutil, tarfile, zipfile, requests, dl_utils.filesystem.project_root (infer_project_root).
-Public entries: DATA_HUB, DATA_URL, download, download_extract, download_all.
+Dependencies: hashlib, hmac, os, shutil, tarfile, tempfile, zipfile, urllib.parse (urlsplit), requests, dl_utils.filesystem.project_root (infer_project_root).
+Public entries: DATA_HUB, DATA_URL, DOWNLOAD_TIMEOUT, DOWNLOAD_CHUNK_SIZE, download, download_extract, download_all.
+Downloads require HTTPS, verify the upstream D2L SHA-1 after transfer, and atomically replace cache files only after validation succeeds.
 
 ### dl_utils/data/dataset_preparation.py
 
@@ -304,6 +305,7 @@ Public entries: clean_pycache, reset_dir.
 
 Dependencies: pathlib (Path).
 Public entries: infer_project_root.
+Runnable project scripts use this helper to anchor `data/` and `output/` paths independently of the caller's working directory.
 
 ### dl_utils/genai/__init__.py
 

@@ -7,7 +7,8 @@ from dl_utils.plot.images import show_images
 from dl_utils.training.metrics import Accumulator, accuracy, evaluate_accuracy
 
 
-base_path = infer_project_root()
+PROJECT_ROOT = infer_project_root()
+
 
 def get_fashion_mnist_labels(labels):
     """
@@ -39,7 +40,7 @@ def load_data_fashion_mnist(batch_size, resize=None, process_count=4):
     """
     return vision_loaders(
         'fashion_mnist',
-        data_dir=f"{base_path}/data/fashion_mnist",
+        data_dir=PROJECT_ROOT / 'data' / 'fashion_mnist',
         batch_size=batch_size,
         resize=resize,
         num_workers=process_count,

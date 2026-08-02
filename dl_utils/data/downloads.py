@@ -1,18 +1,48 @@
 """Dataset download and archive extraction primitives."""
 
 import hashlib
+import hmac
 import os
 import shutil
 import tarfile
+import tempfile
 import zipfile
+from urllib.parse import urlsplit
 
 import requests
 
 from dl_utils.filesystem.project_root import infer_project_root
 
 
-DATA_HUB = dict()
-DATA_URL = 'http://d2l-data.s3-accelerate.amazonaws.com/'
+DATA_URL = 'https://d2l-data.s3-accelerate.amazonaws.com/'
+DOWNLOAD_TIMEOUT = (10, 60)
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+DATA_HUB = {
+    'kaggle_house_train': (
+        DATA_URL + 'kaggle_house_pred_train.csv',
+        '585e9cc93e70b39160e7921475f9bcd7d31219ce',
+    ),
+    'kaggle_house_test': (
+        DATA_URL + 'kaggle_house_pred_test.csv',
+        'fa19780a7b011d9b009e8bff8e99922a8ee2eb90',
+    ),
+    'time_machine': (
+        DATA_URL + 'timemachine.txt',
+        '090b5e7e70c295757f55df93cb0a180b9691891a',
+    ),
+    'fra-eng': (
+        DATA_URL + 'fra-eng.zip',
+        '94646ad1522d915e7b0f9296181140edcf86a4f5',
+    ),
+    'pokemon': (
+        DATA_URL + 'pokemon.zip',
+        'c065c0e2593b8b161a2d7873e42418bf6a21106c',
+    ),
+    'airfoil': (
+        DATA_URL + 'airfoil_self_noise.dat',
+        '76e5be1548fd8222e5074cf0faae75edff8cf93f',
+    ),
+}
 
 # map DATA_HUB keys to subdirectories under data/ (avoids scattering files at root)
 _DOWNLOAD_SUBDIR = {
@@ -23,6 +53,15 @@ _DOWNLOAD_SUBDIR = {
     'fra-eng':             'fra_eng',
     'pokemon':             'pokemon',
 }
+
+
+def _sha1sum(path: str) -> str:
+    """Return the SHA-1 digest used by the upstream D2L data registry."""
+    digest = hashlib.sha1()
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def download(name, cache_dir=None):
@@ -37,28 +76,59 @@ def download(name, cache_dir=None):
     """
     assert name in DATA_HUB, f"{name} does not exist in {DATA_HUB}"
     url, sha1_hash = DATA_HUB[name]
+    parsed_url = urlsplit(url)
+    if parsed_url.scheme.lower() != 'https':
+        raise ValueError(f"Refusing non-HTTPS dataset URL for {name!r}")
     if cache_dir is None:
         repo_root = infer_project_root()
         cache_dir = os.path.join(str(repo_root), 'data')
         subdir = _DOWNLOAD_SUBDIR.get(name)
         if subdir:
             cache_dir = os.path.join(cache_dir, subdir)
+    cache_dir = os.fspath(cache_dir)
     os.makedirs(cache_dir, exist_ok=True)
-    fname = os.path.join(cache_dir, url.split('/')[-1])
-    if os.path.exists(fname):
-        sha1 = hashlib.sha1()
-        with open(fname, 'rb') as f:
-            while True:
-                data = f.read(1048576)
-                if not data:
-                    break
-                sha1.update(data)
-        if sha1.hexdigest() == sha1_hash:
-            return fname  # cache hit
+    filename = os.path.basename(parsed_url.path)
+    if not filename:
+        raise ValueError(f"Dataset URL has no filename for {name!r}")
+    fname = os.path.join(cache_dir, filename)
+    if os.path.exists(fname) and hmac.compare_digest(
+            _sha1sum(fname), sha1_hash):
+        return fname  # cache hit
+
     print(f"Downloading {fname} from {url}...")
-    r = requests.get(url, stream=True, verify=True)
-    with open(fname, 'wb') as f:
-        f.write(r.content)
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f'.{filename}.',
+        suffix='.part',
+        dir=cache_dir,
+    )
+    os.close(file_descriptor)
+    try:
+        digest = hashlib.sha1()
+        with (
+            requests.get(
+                url,
+                stream=True,
+                timeout=DOWNLOAD_TIMEOUT,
+                verify=True,
+            ) as response,
+            open(temporary_path, 'wb') as stream,
+        ):
+            response.raise_for_status()
+            for chunk in response.iter_content(DOWNLOAD_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                stream.write(chunk)
+                digest.update(chunk)
+
+        actual_sha1 = digest.hexdigest()
+        if not hmac.compare_digest(actual_sha1, sha1_hash):
+            raise RuntimeError(
+                f"Checksum mismatch for downloaded dataset {name!r}"
+            )
+        os.replace(temporary_path, fname)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
     return fname
 
 
@@ -142,25 +212,3 @@ def download_all():
     """Download all files in DATA_HUB"""
     for name in DATA_HUB:
         download(name)
-
-
-DATA_HUB['kaggle_house_train'] = (
-    DATA_URL + 'kaggle_house_pred_train.csv',
-    '585e9cc93e70b39160e7921475f9bcd7d31219ce')
-
-DATA_HUB['kaggle_house_test'] = (
-    DATA_URL + 'kaggle_house_pred_test.csv',
-    'fa19780a7b011d9b009e8bff8e99922a8ee2eb90')
-
-DATA_HUB['time_machine'] = (
-    DATA_URL + 'timemachine.txt',
-    '090b5e7e70c295757f55df93cb0a180b9691891a')
-
-DATA_HUB['fra-eng'] = (DATA_URL + 'fra-eng.zip',
-                        '94646ad1522d915e7b0f9296181140edcf86a4f5')
-
-DATA_HUB['pokemon'] = (DATA_URL + 'pokemon.zip',
-                       'c065c0e2593b8b161a2d7873e42418bf6a21106c')
-
-DATA_HUB['airfoil'] = (DATA_URL + 'airfoil_self_noise.dat',
-                       '76e5be1548fd8222e5074cf0faae75edff8cf93f')
