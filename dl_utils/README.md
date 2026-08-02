@@ -175,6 +175,9 @@ Public entries: none (docstring-only package marker).
 Dependencies: hashlib, hmac, os, shutil, tarfile, tempfile, zipfile, urllib.parse (urlsplit), requests, dl_utils.filesystem.project_root (infer_project_root).
 Public entries: DATA_HUB, DATA_URL, DOWNLOAD_TIMEOUT, DOWNLOAD_CHUNK_SIZE, download, download_extract, download_all.
 Downloads require HTTPS, verify the upstream D2L SHA-1 after transfer, and atomically replace cache files only after validation succeeds.
+`download`, `download_extract`, and `download_all` accept `data_root` to apply
+the registry's standard subdirectory layout below a caller-selected root;
+`cache_dir` remains available when an exact cache directory is required.
 
 ### dl_utils/data/dataset_preparation.py
 

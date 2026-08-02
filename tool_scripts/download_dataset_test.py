@@ -1,7 +1,7 @@
 '''
 Download Dataset Test
 
-Downloads and prepares datasets used by the project examples under data/.
+Downloads and prepares datasets used by the project examples under DATA_DIR.
 '''
 
 import os
@@ -77,8 +77,12 @@ except Exception as e:
 #    Download: https://www.kaggle.com/c/house-prices-advanced-regression-techniques
 # ============================================================
 try:
-    train_data = pd.read_csv(download('kaggle_house_train'))
-    test_data = pd.read_csv(download('kaggle_house_test'))
+    train_data = pd.read_csv(
+        download('kaggle_house_train', data_root=DATA_DIR)
+    )
+    test_data = pd.read_csv(
+        download('kaggle_house_test', data_root=DATA_DIR)
+    )
     print("The Kaggle House Price Prediction Dataset has been downloaded.")
 except Exception as e:
     print(f"Failed to download the Kaggle House Price Prediction Dataset: {e}")
@@ -92,7 +96,7 @@ except Exception as e:
 #    Download: bundled in D2L data hub
 # ============================================================
 try:
-    lines = read_time_machine()
+    lines = read_time_machine(data_root=DATA_DIR)
     print(f"The Time Machine Dataset has been downloaded: {lines[0]}")
 except Exception as e:
     print(f"Failed to download the Time Machine Dataset: {e}")
@@ -193,7 +197,11 @@ except Exception as e:
 # ============================================================
 try:
     import numpy as np
-    data = np.genfromtxt(download('airfoil'), dtype=np.float32, delimiter='\t')
+    data = np.genfromtxt(
+        download('airfoil', data_root=DATA_DIR),
+        dtype=np.float32,
+        delimiter='\t',
+    )
     print(f"The Airfoil Self-Noise Dataset has been downloaded: {data.shape}")
 except Exception as e:
     print(f"Failed to download the Airfoil Self-Noise Dataset: {e}")
@@ -209,7 +217,7 @@ except Exception as e:
 #     Download: https://d2l-data.s3-accelerate.amazonaws.com/fra-eng.zip
 # ============================================================
 try:
-    data_dir = download_extract('fra-eng')
+    data_dir = download_extract('fra-eng', data_root=DATA_DIR)
     print(f"The English-French Translation Dataset has been downloaded: {data_dir}")
 except Exception as e:
     print(f"Failed to download the English-French Translation Dataset: {e}")
@@ -225,5 +233,5 @@ except Exception as e:
 #     Used by: genai/2.0_generative_adversarial_network/ (DCGAN training)
 #     Download: https://d2l-data.s3-accelerate.amazonaws.com/pokemon.zip
 # ============================================================
-data_dir = download_extract('pokemon')
+data_dir = download_extract('pokemon', data_root=DATA_DIR)
 print(f"The Pokemon Dataset has been downloaded: {data_dir}")

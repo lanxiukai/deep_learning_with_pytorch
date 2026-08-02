@@ -62,6 +62,7 @@ htmlcov/
 # Project datasets, reference repositories, and experiment outputs
 # Keep the leading slash: dl_utils/data/ contains tracked source code.
 /data/
+/data-test/
 /book_repos/
 /output/
 

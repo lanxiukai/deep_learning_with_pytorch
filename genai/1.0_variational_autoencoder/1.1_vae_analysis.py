@@ -30,7 +30,7 @@ def main():
         checkpoint_path, map_location=device, weights_only=True))
     vae.eval()
     loader = image_folder_loader(
-        root / "data/glasses", batch_size=16, resize=256, shuffle=False
+        root / "data/glasses-256", batch_size=16, shuffle=False
         )
 
     # ---- compare original images with reconstructions ----

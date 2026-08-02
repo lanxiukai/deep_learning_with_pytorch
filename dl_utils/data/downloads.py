@@ -64,13 +64,15 @@ def _sha1sum(path: str) -> str:
     return digest.hexdigest()
 
 
-def download(name, cache_dir=None):
+def download(name, cache_dir=None, *, data_root=None):
     """
     Download a file inserted into DATA_HUB, and return the local filename.
     
     Args:
         name: the name of the file to download
-        cache_dir: the folder to cache the file (Default: None)
+        cache_dir: the exact folder to cache the file (Default: None)
+        data_root: the shared dataset root under which the registered
+            subdirectory is selected (Default: <project_root>/data)
     Returns:
         the path to the downloaded file
     """
@@ -79,9 +81,12 @@ def download(name, cache_dir=None):
     parsed_url = urlsplit(url)
     if parsed_url.scheme.lower() != 'https':
         raise ValueError(f"Refusing non-HTTPS dataset URL for {name!r}")
+    if cache_dir is not None and data_root is not None:
+        raise ValueError("cache_dir and data_root are mutually exclusive")
     if cache_dir is None:
-        repo_root = infer_project_root()
-        cache_dir = os.path.join(str(repo_root), 'data')
+        if data_root is None:
+            data_root = infer_project_root() / 'data'
+        cache_dir = os.fspath(data_root)
         subdir = _DOWNLOAD_SUBDIR.get(name)
         if subdir:
             cache_dir = os.path.join(cache_dir, subdir)
@@ -125,6 +130,7 @@ def download(name, cache_dir=None):
             raise RuntimeError(
                 f"Checksum mismatch for downloaded dataset {name!r}"
             )
+        os.chmod(temporary_path, 0o644)
         os.replace(temporary_path, fname)
     finally:
         if os.path.exists(temporary_path):
@@ -132,17 +138,18 @@ def download(name, cache_dir=None):
     return fname
 
 
-def download_extract(name, folder=None):
+def download_extract(name, folder=None, *, data_root=None):
     """
     Download and extract a zip/tar file.
     
     Args:
         name: the name of the file to download
         folder: the folder to extract the file to (Default: None)
+        data_root: the shared dataset root passed to ``download``
     Returns:
         the path to the extracted file
     """
-    fname = download(name)
+    fname = download(name, data_root=data_root)
     base_dir = os.path.dirname(fname)
     data_dir, ext = os.path.splitext(fname)
     if ext == '.zip':
@@ -208,7 +215,7 @@ def _is_flattened_archive_complete(base_dir, data_dir, entries, top_dirs):
     )
 
 
-def download_all():
+def download_all(*, data_root=None):
     """Download all files in DATA_HUB"""
     for name in DATA_HUB:
-        download(name)
+        download(name, data_root=data_root)

@@ -5,8 +5,9 @@ Encoder:  31.7 M params
 Decoder:  31.6 M params
 Total:    63.3 M params
 
-The glasses download workflow automatically applies the repository's reviewed
-label corrections (415 G→NoG and 102 NoG→G) before training.
+Training uses the clean two-class data/glasses-256 cache. The download
+workflow automatically applies the repository's reviewed label corrections
+(415 G→NoG and 102 NoG→G) before building that cache.
 """
 
 import torch
@@ -27,7 +28,7 @@ def main():
     (out_dir / "vae_epoch").mkdir(exist_ok=True)
 
     loader = image_folder_loader(
-        root / "data/glasses", batch_size=16, resize=256
+        root / "data/glasses-256", batch_size=16
         )
     
     data = loader.dataset

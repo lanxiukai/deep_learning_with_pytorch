@@ -42,10 +42,14 @@ def download_kaggle_dataset(
         )
         return False
 
-    cache_path = Path(kagglehub.dataset_download(owner_dataset))
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(cache_path, destination)
+    kagglehub.dataset_download(
+        owner_dataset,
+        output_dir=os.fspath(destination),
+    )
+    if not destination.is_dir() or not any(destination.iterdir()):
+        raise RuntimeError(
+            f"Kaggle download produced no files under {destination}"
+        )
     print(f"  Downloaded to: {destination}")
     return True
 

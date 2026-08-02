@@ -9,14 +9,17 @@ from dl_utils.data.downloads import download
 from .vocabulary import Vocab, tokenize
 
 
-def read_time_machine():
+def read_time_machine(*, data_root=None):
     """
     Load the Time Machine dataset into a list of text lines.
-    
+
+    Args:
+        data_root: the shared dataset root passed to the D2L downloader
+
     Returns:
         A list of text lines (1D list [text line])
     """
-    with open(download('time_machine'), 'r') as f:
+    with open(download('time_machine', data_root=data_root), 'r') as f:
         lines = f.readlines()
     return [re.sub('[^A-Za-z]+', ' ', line).strip().lower() for line in lines]
 

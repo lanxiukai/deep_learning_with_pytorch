@@ -117,6 +117,11 @@ To download the lesson datasets:
 python tool_scripts/download_dataset_test.py
 ```
 
+Every destination in this script derives from its `DATA_DIR` constant. Change
+that single constant to download and prepare the complete dataset collection
+under a different root. Kaggle downloads also use that destination directly
+instead of populating the default user-level Kaggle cache first.
+
 Some datasets are large, and Kaggle-hosted datasets may require authentication.
 For the glasses dataset, the command resumes incomplete G/NoG classification,
 applies the reviewed label corrections, and builds `data/glasses-256/`.

@@ -18,7 +18,8 @@ KL-divergence term by a scalar beta:
 
 This script is identical to 1.0_vae_train.py except for the beta weighting,
 a separate output directory, and per-component loss curves so you can watch
-how beta reshapes the balance between the two terms.
+how beta reshapes the balance between the two terms. It uses the clean
+two-class data/glasses-256 cache prepared by the download workflow.
 """
 
 import torch
@@ -41,7 +42,7 @@ def main():
     (out_dir / "beta_vae_epoch").mkdir(exist_ok=True)
 
     loader = image_folder_loader(
-        root / "data/glasses", batch_size=16, resize=256
+        root / "data/glasses-256", batch_size=16
         )
 
     data = loader.dataset

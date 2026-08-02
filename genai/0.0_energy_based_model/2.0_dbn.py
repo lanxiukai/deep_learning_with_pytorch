@@ -28,7 +28,7 @@ class Config(EBMConfig):
     seed: int | None = 42
 
     # System
-    data_dir: str = str(_PROJECT_ROOT / "data" / "mnist")
+    data_dir: str = str(_PROJECT_ROOT / "data" / "fashion_mnist")
     num_workers: int = 16
     pin_memory: bool = True
 
