@@ -27,7 +27,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -37,8 +36,9 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
 from torchvision.utils import save_image
 
+from dl_utils.filesystem.project_root import infer_project_root
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = infer_project_root()
 
 
 class ResidualBlock(nn.Module):

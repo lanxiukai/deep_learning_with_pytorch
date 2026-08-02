@@ -12,13 +12,16 @@ import os
 import sys
 from pathlib import Path
 
+from dl_utils.filesystem.project_root import infer_project_root
+
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "qwen/qwen3.7-plus"
 CONCURRENCY = 15  # parallel API calls
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "glasses"
-RESULTS_FILE = Path(__file__).parent.parent / "data" / "glasses_misclassified.json"
+PROJECT_ROOT = infer_project_root()
+DATA_DIR = PROJECT_ROOT / "data" / "glasses"
+RESULTS_FILE = PROJECT_ROOT / "data" / "glasses_misclassified.json"
 
 
 def encode_image(path: Path) -> str:
@@ -192,7 +195,7 @@ def main():
         "G_wrong": G_wrong,
         "NoG_wrong": NoG_wrong,
     }
-    report_path = Path(__file__).parent.parent / "data" / "glasses_misclassified_report.json"
+    report_path = PROJECT_ROOT / "data" / "glasses_misclassified_report.json"
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\nFull report saved to {report_path}")

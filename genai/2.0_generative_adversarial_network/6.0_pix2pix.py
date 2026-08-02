@@ -32,8 +32,9 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TF
 from torchvision.utils import save_image
 
+from dl_utils.filesystem.project_root import infer_project_root
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = infer_project_root()
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 

@@ -45,11 +45,13 @@ y = compile(prog, '', 'exec')
 # This completes the full symbolic programming pipeline: build code as a string → compile → execute.
 exec(y)
 
-from pathlib import Path
+import subprocess
+
 import torch
 from torch import nn
-import subprocess
+
 from dl_utils.d2l.benchmark import Benchmark
+from dl_utils.filesystem.project_root import infer_project_root
 
 # Factory pattern for producing networks
 def get_net():
@@ -90,6 +92,8 @@ with Benchmark('with torchscript'):
 # bundling the compiled IR (computation graph), all layer parameters (weights & biases),
 # the module hierarchy, and type annotations — everything needed to reload and run
 # the model via torch.jit.load() in Python or LibTorch in C++, with no Python class definitions required.
-Path('output/torchscript').mkdir(parents=True, exist_ok=True)
-net.save('output/torchscript/mlp')
-subprocess.run('ls -lh output/torchscript/mlp', shell=True)
+output_dir = infer_project_root() / 'output' / 'torchscript'
+output_dir.mkdir(parents=True, exist_ok=True)
+model_path = output_dir / 'mlp'
+net.save(str(model_path))
+subprocess.run(['ls', '-lh', str(model_path)], check=True)

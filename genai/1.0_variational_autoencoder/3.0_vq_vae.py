@@ -29,8 +29,9 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+from dl_utils.filesystem.project_root import infer_project_root
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = infer_project_root()
 
 
 class ResidualBlock(nn.Module):

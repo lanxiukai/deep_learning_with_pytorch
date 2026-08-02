@@ -6,6 +6,7 @@ desktop.ini
 # Editors and IDEs
 .idea/
 .vscode/
+.codegraph
 *.swp
 *.swo
 *~

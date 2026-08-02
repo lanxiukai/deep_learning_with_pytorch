@@ -2,14 +2,15 @@
 Read and Write Tensor
 '''
 
-from pathlib import Path
 import torch
 from torch import nn
 from torch.nn import functional as F
 
-_root = Path(__file__).resolve().parent.parent.parent
-_output_dir = _root / 'output' / 'read_write'
-_output_dir.mkdir(exist_ok=True)
+from dl_utils.filesystem.project_root import infer_project_root
+
+
+_output_dir = infer_project_root() / 'output' / 'read_write'
+_output_dir.mkdir(parents=True, exist_ok=True)
 
 print('0--------------------------------')
 

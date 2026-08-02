@@ -4,10 +4,13 @@ import matplotlib.pyplot as plt
 import matplotlib
 from pathlib import Path
 
+from dl_utils.filesystem.project_root import infer_project_root
+
 matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 
-DATA_PATH = Path('data') / 'time_machine' / 'timemachine.txt'
-OUTPUT_PATH = Path('output') / 'word_frequency.png'
+PROJECT_ROOT = infer_project_root()
+DATA_PATH = PROJECT_ROOT / 'data' / 'time_machine' / 'timemachine.txt'
+OUTPUT_PATH = PROJECT_ROOT / 'output' / 'word_frequency.png'
 
 def load_and_count(path: Path, top_n: int = 10):
     text = path.read_text(encoding='utf-8').lower()
@@ -15,6 +18,7 @@ def load_and_count(path: Path, top_n: int = 10):
     return Counter(words).most_common(top_n)
 
 def plot_bar(word_counts, output: Path):
+    output.parent.mkdir(parents=True, exist_ok=True)
     words, counts = zip(*word_counts)
 
     fig, ax = plt.subplots(figsize=(10, 6))

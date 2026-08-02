@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
+from dl_utils.filesystem.project_root import infer_project_root
+
 # ---- Objective (multi-modal landscape) ----------------------------------------
 # Quadratic bowl keeps the function bounded; sine terms create complex local minima terrain
 FREQ = 1.3
@@ -134,9 +136,10 @@ anim = FuncAnimation(
     blit=False
 )
 
-output = 'output/sgd_animation.gif'
+output = infer_project_root() / 'output' / 'sgd_animation.gif'
+output.parent.mkdir(parents=True, exist_ok=True)
 writer = PillowWriter(fps=12)
 print('Saving animation, please wait...')
-anim.save(output, writer=writer, dpi=110)
+anim.save(str(output), writer=writer, dpi=110)
 print(f'Animation saved to: {output}')
 plt.close()

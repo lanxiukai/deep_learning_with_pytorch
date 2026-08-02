@@ -2,7 +2,7 @@
 AutoEncoder
 """
 
-import os
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from dl_utils.data.vision import vision_loaders
 from dl_utils.devices.selection import get_device
 from dl_utils.filesystem.directories import reset_dir
+from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.plot.images import show_images
 
 
@@ -40,7 +41,14 @@ class AE(nn.Module):
         return out, mu
 
 
-def plot_digits(originals, model, device, input_dim, out_dir, epoch=None):
+def plot_digits(
+    originals,
+    model,
+    device,
+    input_dim,
+    out_dir: Path,
+    epoch=None,
+):
     reconstructed = []
     for idx in range(10):
         with torch.no_grad():
@@ -50,7 +58,7 @@ def plot_digits(originals, model, device, input_dim, out_dir, epoch=None):
     originals_2d = [o.reshape(28, 28) for o in originals]
     show_images(originals_2d + reconstructed, 2, 10, cmap="binary")
     tag = f"_epoch_{epoch}" if epoch is not None else ""
-    path = os.path.join(out_dir, f"ae_recon{tag}.png")
+    path = out_dir / f"ae_recon{tag}.png"
     plt.savefig(path, dpi=300)
     plt.close()
     print(f"Saved -> {path}")
@@ -58,15 +66,17 @@ def plot_digits(originals, model, device, input_dim, out_dir, epoch=None):
 
 def main():
     batch_size = 32
+    project_root = infer_project_root()
+    data_dir = project_root / "data" / "mnist"
 
     train_loader, test_loader = vision_loaders(
-        'mnist', data_dir='data/mnist', batch_size=batch_size, 
+        'mnist', data_dir=data_dir, batch_size=batch_size,
         num_workers=4, pin_memory=True
     )
     num_samples = len(train_loader.dataset)  # type: ignore[arg-type]
 
-    out_dir = "output/ae_mnist"
-    reset_dir(out_dir)
+    out_dir = project_root / "output" / "ae_mnist"
+    reset_dir(str(out_dir))
 
     device = get_device()
     input_dim = 784
@@ -112,13 +122,13 @@ def main():
         animator.add(epoch + 1, epoch_loss / num_samples)
         plot_digits(originals, model, device, input_dim, out_dir, epoch)
 
-    model_path = "output/ae_mnist/AEdigits.pt"
+    model_path = out_dir / "AEdigits.pt"
 
     # Export to TorchScript
     scripted = torch.jit.script(model) 
-    scripted.save(model_path) 
+    scripted.save(str(model_path))
 
-    model = torch.jit.load(model_path, map_location=device)
+    model = torch.jit.load(str(model_path), map_location=device)
     model.eval()
 
     plot_digits(originals, model, device, input_dim, out_dir, "final")
