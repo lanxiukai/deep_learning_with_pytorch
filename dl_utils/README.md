@@ -83,6 +83,9 @@ dl_utils/
 │   ├── cyclegan.py
 │   ├── ddpm.py
 │   ├── gan.py
+│   ├── pix2pix.py
+│   ├── sagan_biggan.py
+│   ├── stylegan2.py
 │   └── vae.py
 │
 ├── plot/
@@ -313,7 +316,7 @@ Runnable project scripts use this helper to anchor `data/` and `output/` paths i
 ### dl_utils/genai/__init__.py
 
 Dependencies: none.
-Public entries: none (docstring-only package marker, documents vae, gan, cyclegan, and ddpm submodules).
+Public entries: none (docstring-only package marker, documents the generative-model submodules).
 
 ### dl_utils/genai/cyclegan.py
 
@@ -324,6 +327,16 @@ Public entries: test, train_epoch, ConvBlock, ResidualBlock, Generator, Block, D
 
 Dependencies: csv, pathlib, albumentations, numpy, torch, PIL, torch.utils.data (Dataset), dl_utils.data.images (load_rgb_image).
 Public entries: build_paired_transform, CelebAColorizationDataset, DownBlock, UpBlock, UNetGenerator, ConditionalPatchDiscriminator, initialize_weights, denormalize.
+
+### dl_utils/genai/sagan_biggan.py
+
+Dependencies: torch, torch.nn.functional, torch (nn), torch.nn.utils (spectral_norm).
+Public entries: SelfAttention, ConditionalBatchNorm2d, GeneratorResidualBlock, ConditionalGenerator, DiscriminatorResidualBlock, ProjectionDiscriminator, truncated_normal, denormalize.
+
+### dl_utils/genai/stylegan2.py
+
+Dependencies: math, random, torch, torch.nn.functional, torch (nn).
+Public entries: PixelNorm, EqualizedLinear, MappingNetwork, ModulatedConv2d, NoiseInjection, StyledConv, ToRGB, SynthesisBlock, StyleGenerator, DiscriminatorResidualBlock, MinibatchStandardDeviation, StyleDiscriminator, denormalize.
 
 ### dl_utils/genai/ddpm.py
 
