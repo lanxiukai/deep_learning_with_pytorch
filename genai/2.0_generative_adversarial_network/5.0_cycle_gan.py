@@ -10,9 +10,10 @@ Data:
 
 Outputs:
     output/cyclegan/training/, reset at the start of every run. The directory
-    contains training snapshots, the live loss curve, and these checkpoints:
-    - gen_black.pth: blond -> black generator
-    - gen_blond.pth: black -> blond generator
+    contains training snapshots.
+    - output/cyclegan/loss_curves.png: discriminator and generator loss curves
+    - output/cyclegan/gen_black.pth: blond -> black generator
+    - output/cyclegan/gen_blond.pth: black -> blond generator
 
 Related scripts:
     - 5.1_cycle_gan_evaluation.py evaluates the saved hair-color generators.
@@ -63,6 +64,7 @@ from dl_utils.training.timing import Timer
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / 'data'
 OUT_DIR = PROJECT_ROOT / 'output' / 'cyclegan' / 'training'
+CYCLEGAN_OUT_DIR = OUT_DIR.parent
 
 
 CELEBA_DIR = DATA_DIR / "celeba"
@@ -213,9 +215,9 @@ def main():
         f"avg {avg_minutes} min {avg_seconds:.1f} s/epoch on {device}"
     )
 
-    torch.save(gen_A.state_dict(), OUT_DIR / "gen_black.pth")
-    torch.save(gen_B.state_dict(), OUT_DIR / "gen_blond.pth")
-    animator.fig.savefig(OUT_DIR / "loss_curves.png", dpi=300)
+    torch.save(gen_A.state_dict(), CYCLEGAN_OUT_DIR / "gen_black.pth")
+    torch.save(gen_B.state_dict(), CYCLEGAN_OUT_DIR / "gen_blond.pth")
+    animator.fig.savefig(CYCLEGAN_OUT_DIR / "loss_curves.png", dpi=300)
     plt.close(animator.fig)
 
 

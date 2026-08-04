@@ -8,8 +8,8 @@ Data:
     tool_scripts/download_dataset_test.py.
 
 Inputs:
-    - output/cyclegan/training/gen_black.pth: blond -> black generator
-    - output/cyclegan/training/gen_blond.pth: black -> blond generator
+    - output/cyclegan/gen_black.pth: blond -> black generator
+    - output/cyclegan/gen_blond.pth: black -> blond generator
     Run 5.0_cycle_gan.py first to create both checkpoints.
 
 Outputs:
@@ -33,7 +33,7 @@ from dl_utils.genai.cyclegan import Generator, LoadData
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data"
 OUT_DIR = PROJECT_ROOT / "output" / "cyclegan" / "evaluation"
-CHECKPOINT_DIR = OUT_DIR.parent / "training"
+CHECKPOINT_DIR = OUT_DIR.parent
 
 BLACK_DIR = DATA_DIR / "celeba" / "black"
 BLOND_DIR = DATA_DIR / "celeba" / "blond"
