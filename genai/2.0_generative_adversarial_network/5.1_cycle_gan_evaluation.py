@@ -1,7 +1,21 @@
-"""Exercise 6.1: evaluate trained CycleGAN hair-color checkpoints.
+"""Evaluate trained CycleGAN generators for hair-color translation.
 
-Requires output/cyclegan/gen_black.pth and gen_blond.pth; run
-5.0_cycle_gan.py first. Evaluation images are written to output/cyclegan/.
+This script performs both translation directions and cycle reconstruction on
+the first ten unpaired black/blond image pairs.
+
+Data:
+    data/celeba/{black,blond}, prepared by
+    tool_scripts/download_dataset_test.py.
+
+Inputs:
+    - output/cyclegan/training/gen_black.pth: blond -> black generator
+    - output/cyclegan/training/gen_blond.pth: black -> blond generator
+    Run 5.0_cycle_gan.py first to create both checkpoints.
+
+Outputs:
+    output/cyclegan/evaluation/, reset at the start of every run. For each
+    pair, the directory receives the two inputs, two translations, and two
+    cycle reconstructions.
 """
 
 import albumentations
@@ -11,22 +25,26 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
 from dl_utils.devices.selection import try_gpu
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.cyclegan import Generator, LoadData
 
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data"
-OUT_DIR = PROJECT_ROOT / "output" / "cyclegan"
+OUT_DIR = PROJECT_ROOT / "output" / "cyclegan" / "evaluation"
+CHECKPOINT_DIR = OUT_DIR.parent / "training"
 
 BLACK_DIR = DATA_DIR / "celeba" / "black"
 BLOND_DIR = DATA_DIR / "celeba" / "blond"
-GEN_BLACK_PATH = OUT_DIR / "gen_black.pth"
-GEN_BLOND_PATH = OUT_DIR / "gen_blond.pth"
+GEN_BLACK_PATH = CHECKPOINT_DIR / "gen_black.pth"
+GEN_BLOND_PATH = CHECKPOINT_DIR / "gen_blond.pth"
 
 
 def main():
     """Translate ten black/blond image pairs and reconstruct each input."""
+    reset_dir(str(OUT_DIR))
+
     missing_data_dirs = [
         path for path in (BLACK_DIR, BLOND_DIR) if not path.is_dir()
     ]

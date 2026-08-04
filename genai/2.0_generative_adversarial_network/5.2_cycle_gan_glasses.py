@@ -1,10 +1,17 @@
-"""Exercise 6.2: train CycleGAN to add or remove glasses.
+"""Train a CycleGAN for unpaired glasses <-> no-glasses translation.
 
-Data: local data/glasses/{G,NoG}, prepared by
-tool_scripts/download_dataset_test.py.
-Outputs: output/cyclegan/add_glasses.pth and remove_glasses.pth.
+This exercise reuses the CycleGAN models and training helpers from
+dl_utils/genai/cyclegan.py for a second image-translation task.
 
-Training data:
+Data:
+    data/glasses/{G,NoG}, prepared by
+    tool_scripts/download_dataset_test.py.
+
+Outputs:
+    - output/cyclegan/add_glasses.pth: no glasses -> glasses generator
+    - output/cyclegan/remove_glasses.pth: glasses -> no glasses generator
+
+Training data — glasses task:
 With glasses (G):         2,543 images
 Without glasses (NoG):    1,957 images
 Available total:          4,500 unique images

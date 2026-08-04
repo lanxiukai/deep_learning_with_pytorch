@@ -29,10 +29,13 @@ def test(i, A, B, fake_A, fake_B, out_dir):
 def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
         opt_gen, l1, mse, d_scaler, g_scaler, device, out_dir):
     loop = tqdm(loader, leave=True)
+    loss_sums = torch.zeros(2, device=device)
+    num_examples = 0
 
     for i, (A,B) in enumerate(loop):
         A = A.to(device)
         B = B.to(device)
+        batch_size = A.shape[0]
 
         # Train Discriminators A and B
         with torch.amp.autocast(device.type):
@@ -57,27 +60,41 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
         d_scaler.scale(D_loss).backward()
         d_scaler.step(opt_disc)
         d_scaler.update()
+
         # Train the two generators
         with torch.amp.autocast(device.type):
             D_A_fake = disc_A(fake_A)
             D_B_fake = disc_B(fake_B)
             loss_G_A = mse(D_A_fake, torch.ones_like(D_A_fake))
             loss_G_B = mse(D_B_fake, torch.ones_like(D_B_fake))
-            # NEW in Cycle GANs: cycle loss
+
+            # NEW in Cycle GANs: cycle consistency loss
             cycle_B = gen_B(fake_A)
             cycle_A = gen_A(fake_B)
             cycle_B_loss = l1(B, cycle_B)
             cycle_A_loss = l1(A, cycle_A)
+
             # Total generator loss
             G_loss = (loss_G_A + loss_G_B + cycle_A_loss * 10
                 + cycle_B_loss * 10)
+
         opt_gen.zero_grad()
         g_scaler.scale(G_loss).backward()
         g_scaler.step(opt_gen)
         g_scaler.update()
+
         if i % 100 == 0:
-            test(i,A,B,fake_A,fake_B,out_dir)
+            test(i, A, B, fake_A, fake_B, out_dir)
+
+        loss_sums[0] += D_loss.detach() * batch_size
+        loss_sums[1] += G_loss.detach() * batch_size
+        num_examples += batch_size
         loop.set_postfix(D_loss=D_loss.item(), G_loss=G_loss.item())
+
+    if num_examples == 0:
+        raise ValueError("Cannot train CycleGAN with an empty data loader.")
+    loss_D_sum, loss_G_sum = loss_sums.tolist()
+    return loss_D_sum / num_examples, loss_G_sum / num_examples
 
 
 class ConvBlock(nn.Module):
