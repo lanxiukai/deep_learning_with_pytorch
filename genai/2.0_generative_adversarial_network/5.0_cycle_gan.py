@@ -42,6 +42,7 @@ import torch.nn as nn
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
@@ -184,34 +185,47 @@ def main():
         figsize=(5, 3.5),
     )
     timer = Timer()
-    for epoch in range(1, num_epochs + 1):
-        def update_loss_curve(progress, window_loss_D, window_loss_G):
-            animator.add(
-                epoch - 1 + progress,
-                (window_loss_D, window_loss_G),
+    with tqdm(
+        total=num_epochs * len(loader),
+        desc=f"Epoch 1/{num_epochs}",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    ) as progress_bar:
+        for epoch in range(1, num_epochs + 1):
+            progress_bar.set_description(
+                f"Epoch {epoch}/{num_epochs}",
+                refresh=False,
             )
 
-        loss_D, loss_G = train_epoch(
-            disc_A,
-            disc_B,
-            gen_A,
-            gen_B,
-            loader,
-            opt_disc,
-            opt_gen,
-            l1,
-            mse,
-            d_scaler,
-            g_scaler,
-            device,
-            OUT_DIR,
-            epoch=epoch,
-            loss_callback=update_loss_curve,
-            loss_updates_per_epoch=20,
-            snapshot_updates_per_epoch=10,
-            domain_A_label="Black hair",
-            domain_B_label="Blond hair",
-        )
+            def update_loss_curve(progress, window_loss_D, window_loss_G):
+                animator.add(
+                    epoch - 1 + progress,
+                    (window_loss_D, window_loss_G),
+                )
+
+            loss_D, loss_G = train_epoch(
+                disc_A,
+                disc_B,
+                gen_A,
+                gen_B,
+                loader,
+                opt_disc,
+                opt_gen,
+                l1,
+                mse,
+                d_scaler,
+                g_scaler,
+                device,
+                OUT_DIR,
+                epoch=epoch,
+                loss_callback=update_loss_curve,
+                loss_updates_per_epoch=20,
+                snapshot_updates_per_epoch=10,
+                domain_A_label="Black hair",
+                domain_B_label="Blond hair",
+                progress_bar=progress_bar,
+            )
 
     timing = format_epoch_timing(timer.stop(), num_epochs)
     print(

@@ -56,14 +56,18 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
         opt_gen, l1, mse, d_scaler, g_scaler, device, out_dir,
         epoch=1, loss_callback=None, loss_updates_per_epoch=20,
         snapshot_updates_per_epoch=10, domain_A_label="Domain A",
-        domain_B_label="Domain B"):
-    """Train for one epoch and optionally report window-averaged losses."""
+        domain_B_label="Domain B", progress_bar=None):
+    """Train one epoch and optionally update a caller-owned progress bar."""
     if loss_updates_per_epoch <= 0:
         raise ValueError("loss_updates_per_epoch must be positive.")
     if snapshot_updates_per_epoch <= 0:
         raise ValueError("snapshot_updates_per_epoch must be positive.")
 
-    loop = tqdm(loader, leave=True)
+    loop = (
+        loader
+        if progress_bar is not None
+        else tqdm(loader, leave=True, mininterval=1.0)
+    )
     loss_sums = torch.zeros(2, device=device)
     window_loss_sums = [0.0, 0.0]
     num_examples = 0
@@ -162,7 +166,19 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
                 )
                 window_loss_sums = [0.0, 0.0]
                 window_examples = 0
-        loop.set_postfix(D_loss=D_loss_value, G_loss=G_loss_value)
+        if progress_bar is None:
+            loop.set_postfix(
+                D_loss=D_loss_value,
+                G_loss=G_loss_value,
+                refresh=False,
+            )
+        else:
+            progress_bar.set_postfix(
+                D_loss=D_loss_value,
+                G_loss=G_loss_value,
+                refresh=False,
+            )
+            progress_bar.update(1)
 
     if num_examples == 0:
         raise ValueError("Cannot train CycleGAN with an empty data loader.")
