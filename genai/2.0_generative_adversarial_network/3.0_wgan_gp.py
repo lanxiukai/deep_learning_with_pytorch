@@ -29,7 +29,7 @@ from dl_utils.filesystem.directories import reset_dir
 from dl_utils.devices.selection import try_gpu
 from dl_utils.genai.gan import gradient_penalty
 from dl_utils.plot.figures import Animator
-from dl_utils.training.timing import Timer
+from dl_utils.training.timing import Timer, format_epoch_timing
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / 'data'
@@ -196,19 +196,10 @@ def train(net_critic, net_gen, data_iter, num_epochs, latent_dim, out_dir,
         generator_axis.set_xlim([1, num_epochs])
         generator_axis.grid()
         animator.add(epoch, (wasserstein_gap, penalty))
-    total_time = timer.stop()
-    total_tenths = round(total_time * 10)
-    hours, remainder = divmod(total_tenths, 36000)
-    minutes, second_tenths = divmod(remainder, 600)
-    seconds = second_tenths / 10
-    avg_tenths = round(total_time / num_epochs * 10)
-    avg_minutes, avg_second_tenths = divmod(avg_tenths, 600)
-    avg_seconds = avg_second_tenths / 10
+    timing = format_epoch_timing(timer.stop(), num_epochs)
     print(f'lipschitz={lipschitz}: wasserstein_gap {wasserstein_gap:.3f}, '
           f'gradient_penalty {penalty:.3f}, loss_gen {loss_gen:.3f}, '
-          f'training time {int(hours)} h {int(minutes)} min {seconds:.1f} s, '
-          f'avg {avg_minutes} min {avg_seconds:.1f} s/epoch '
-          f'on {str(device)}')
+          f'{timing} on {str(device)}')
     checkpoint_name = 'wgan_gp.pth' if lipschitz == 'gp' else 'wgan.pth'
     torch.save(net_gen.state_dict(), out_dir / checkpoint_name)
     animator.fig.savefig(out_dir / 'loss_curves.png', dpi=300)

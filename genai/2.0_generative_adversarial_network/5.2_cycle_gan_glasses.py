@@ -8,6 +8,11 @@ Data:
     tool_scripts/download_dataset_test.py.
 
 Outputs:
+    output/cyclegan/glasses_training/, reset at the start of every run. The
+    directory contains titled 2x2 training grids (real with-glasses -> generated
+    without-glasses on top and the reverse direction on the bottom).
+    - output/cyclegan/glasses_loss_curves.png: discriminator and generator loss
+      curves
     - output/cyclegan/add_glasses.pth: no glasses -> glasses generator
     - output/cyclegan/remove_glasses.pth: glasses -> no glasses generator
 
@@ -18,15 +23,21 @@ Available total:          4,500 unique images
 Samples per epoch:        2,543 unpaired image pairs
 Note: Counts include 517 repository-tracked label corrections. The smaller NoG
 domain cycles, so 586 of its images are reused once per epoch.
+
+Generator (each):      11.4 M params
+Discriminator (each):   2.8 M params
+Total (2 of each):     28.3 M params
 """
 
 import albumentations
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import DataLoader
 
 from dl_utils.devices.selection import try_gpu
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.cyclegan import (
     Discriminator,
@@ -35,11 +46,14 @@ from dl_utils.genai.cyclegan import (
     train_epoch,
     weights_init,
 )
+from dl_utils.plot.figures import Animator
+from dl_utils.training.timing import Timer, format_epoch_timing
 
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data"
-OUT_DIR = PROJECT_ROOT / "output" / "cyclegan"
+OUT_DIR = PROJECT_ROOT / "output" / "cyclegan" / "glasses_training"
+CYCLEGAN_OUT_DIR = OUT_DIR.parent
 GLASSES_DIR = DATA_DIR / "glasses"
 WITH_GLASSES_DIR = GLASSES_DIR / "G"
 WITHOUT_GLASSES_DIR = GLASSES_DIR / "NoG"
@@ -47,6 +61,8 @@ WITHOUT_GLASSES_DIR = GLASSES_DIR / "NoG"
 
 def main():
     """Train both translation directions for the glasses task."""
+    reset_dir(str(OUT_DIR))
+
     missing_data_dirs = [
         path
         for path in (WITH_GLASSES_DIR, WITHOUT_GLASSES_DIR)
@@ -59,7 +75,6 @@ def main():
             "Run: python tool_scripts/download_dataset_test.py"
         )
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
     transforms = albumentations.Compose(
         [
             albumentations.Resize(width=256, height=256),
@@ -98,6 +113,8 @@ def main():
 
     l1 = nn.L1Loss()
     mse = nn.MSELoss()
+    # Mixed-precision (AMP) gradient scalers prevent FP16 gradient underflow.
+    # One scaler is used per optimizer because their update patterns differ.
     gen_scaler = torch.amp.GradScaler(device.type)
     disc_scaler = torch.amp.GradScaler(device.type)
 
@@ -115,8 +132,17 @@ def main():
         betas=(0.5, 0.999),
     )
 
-    for _ in range(1):
-        train_epoch(
+    num_epochs = 1
+    animator = Animator(
+        xlabel="epoch",
+        ylabel="loss",
+        xlim=[1, num_epochs],
+        legend=["discriminator", "generator"],
+        figsize=(5, 3.5),
+    )
+    timer = Timer()
+    for epoch in range(1, num_epochs + 1):
+        loss_D, loss_G = train_epoch(
             disc_with_glasses,
             disc_without_glasses,
             gen_add_glasses,
@@ -130,13 +156,32 @@ def main():
             gen_scaler,
             device,
             OUT_DIR,
+            epoch=epoch,
+            snapshot_updates_per_epoch=10,
+            domain_A_label="With glasses",
+            domain_B_label="Without glasses",
         )
+        animator.add(epoch, (loss_D, loss_G))
 
-    torch.save(gen_add_glasses.state_dict(), OUT_DIR / "add_glasses.pth")
+    timing = format_epoch_timing(timer.stop(), num_epochs)
+    print(
+        f"loss_D {loss_D:.3f}, loss_G {loss_G:.3f}, "
+        f"{timing} on {device}"
+    )
+
+    torch.save(
+        gen_add_glasses.state_dict(),
+        CYCLEGAN_OUT_DIR / "add_glasses.pth",
+    )
     torch.save(
         gen_remove_glasses.state_dict(),
-        OUT_DIR / "remove_glasses.pth",
+        CYCLEGAN_OUT_DIR / "remove_glasses.pth",
     )
+    animator.fig.savefig(
+        CYCLEGAN_OUT_DIR / "glasses_loss_curves.png",
+        dpi=300,
+    )
+    plt.close(animator.fig)
 
 
 if __name__ == "__main__":

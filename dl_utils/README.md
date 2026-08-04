@@ -320,6 +320,11 @@ Public entries: none (docstring-only package marker, documents vae, gan, cyclega
 Dependencies: os, torch, numpy, torch.nn, PIL.Image, torch.utils.data (Dataset), tqdm, torchvision.utils (save_image).
 Public entries: test, train_epoch, ConvBlock, ResidualBlock, Generator, Block, Discriminator, LoadData, weights_init.
 
+### dl_utils/genai/pix2pix.py
+
+Dependencies: csv, pathlib, albumentations, numpy, torch, PIL, torch.utils.data (Dataset), dl_utils.data.images (load_rgb_image).
+Public entries: build_paired_transform, CelebAColorizationDataset, DownBlock, UpBlock, UNetGenerator, ConditionalPatchDiscriminator, initialize_weights, denormalize.
+
 ### dl_utils/genai/ddpm.py
 
 Dependencies: math, typing (Union), numpy, torch, einops (rearrange), einops.layers.torch (Rearrange), torch (einsum, nn), torchvision.transforms (CenterCrop, Compose, InterpolationMode, RandomHorizontalFlip, Resize, ToTensor), tqdm.
@@ -373,4 +378,4 @@ Public entries: sgd, grad_clipping.
 ### dl_utils/training/timing.py
 
 Dependencies: time, numpy.
-Public entries: Timer.
+Public entries: Timer, format_epoch_timing.

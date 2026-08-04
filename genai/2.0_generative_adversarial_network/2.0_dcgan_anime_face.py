@@ -23,7 +23,7 @@ from dl_utils.devices.selection import try_gpu
 from dl_utils.genai.gan import update_D, update_G
 from dl_utils.plot.figures import Animator, plot, set_figsize
 from dl_utils.training.metrics import Accumulator
-from dl_utils.training.timing import Timer
+from dl_utils.training.timing import Timer, format_epoch_timing
 
 
 class G_block(nn.Module):
@@ -93,18 +93,9 @@ def train(net_D, net_G, data_iter, num_epochs, lr_D, lr_G, latent_dim, out_dir,
         # Show the losses
         loss_D, loss_G = metric[0] / metric[2], metric[1] / metric[2]
         animator.add(epoch, (loss_D, loss_G))
-    total_time = timer.stop()
-    total_tenths = round(total_time * 10)
-    hours, remainder = divmod(total_tenths, 36000)
-    minutes, second_tenths = divmod(remainder, 600)
-    seconds = second_tenths / 10
-    avg_tenths = round(total_time / num_epochs * 10)
-    avg_minutes, avg_second_tenths = divmod(avg_tenths, 600)
-    avg_seconds = avg_second_tenths / 10
+    timing = format_epoch_timing(timer.stop(), num_epochs)
     print(f'loss_D {loss_D:.3f}, loss_G {loss_G:.3f}, '
-          f'training time {int(hours)} h {int(minutes)} min {seconds:.1f} s, '
-          f'avg {avg_minutes} min {avg_seconds:.1f} s/epoch '
-          f'on {str(device)}')
+          f'{timing} on {str(device)}')
     animator.fig.savefig(out_dir / 'loss_curves.png', dpi=300)
     plt.close(animator.fig)
 

@@ -3,36 +3,85 @@
 Adapted from the companion code of "Generative Deep Learning", 2nd edition
 (book_repos/DGAI/utils/ch06util.py): unpaired image-to-image translation
 with two generators and two discriminators, trained with adversarial +
-cycle-consistency losses. Paths in test()/train_epoch() are parameterized
-so outputs land under the project's output/ directory.
+cycle-consistency losses. Snapshot and training paths are parameterized so
+outputs land under the project's output/ directory.
 """
 
 import os
+from matplotlib import pyplot as plt
 import torch
 import numpy as np
 import torch.nn as nn
 from torch.utils.data import Dataset
 from tqdm import tqdm
-from torchvision.utils import save_image
 
 from dl_utils.data.images import load_rgb_image
 
 
-def test(i, A, B, fake_A, fake_B, out_dir):
-    """Save a real/fake image pair snapshot during training."""
-    save_image(A*0.5+0.5, out_dir / f"A{i}.png")
-    save_image(B*0.5+0.5, out_dir / f"B{i}.png")
-    save_image(fake_A*0.5+0.5, out_dir / f"fakeA{i}.png")
-    save_image(fake_B*0.5+0.5, out_dir / f"fakeB{i}.png")
+def save_translation_snapshot(
+    epoch,
+    batch_idx,
+    A,
+    B,
+    fake_A,
+    fake_B,
+    out_dir,
+    domain_A_label,
+    domain_B_label,
+):
+    """Save a titled 2x2 grid for both CycleGAN translation directions."""
+    images = [A[0], fake_B[0], B[0], fake_A[0]]
+    titles = [
+        f"Real: {domain_A_label}",
+        f"Generated: {domain_B_label}",
+        f"Real: {domain_B_label}",
+        f"Generated: {domain_A_label}",
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(7, 7), dpi=150)
+    for axis, image, title in zip(axes.flat, images, titles):
+        image = image.detach().float().mul(0.5).add(0.5).clamp(0, 1)
+        axis.imshow(image.permute(1, 2, 0).cpu().numpy())
+        axis.set_title(title)
+        axis.axis("off")
+    fig.suptitle(f"CycleGAN translations — epoch {epoch}, step {batch_idx}")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(
+        out_dir / f"comparison_epoch_{epoch:02d}_step_{batch_idx:05d}.png",
+        bbox_inches="tight",
+    )
+    plt.close(fig)
 
 
 def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
-        opt_gen, l1, mse, d_scaler, g_scaler, device, out_dir):
+        opt_gen, l1, mse, d_scaler, g_scaler, device, out_dir,
+        epoch=1, loss_callback=None, loss_updates_per_epoch=20,
+        snapshot_updates_per_epoch=10, domain_A_label="Domain A",
+        domain_B_label="Domain B"):
+    """Train for one epoch and optionally report window-averaged losses."""
+    if loss_updates_per_epoch <= 0:
+        raise ValueError("loss_updates_per_epoch must be positive.")
+    if snapshot_updates_per_epoch <= 0:
+        raise ValueError("snapshot_updates_per_epoch must be positive.")
+
     loop = tqdm(loader, leave=True)
     loss_sums = torch.zeros(2, device=device)
+    window_loss_sums = [0.0, 0.0]
     num_examples = 0
+    window_examples = 0
+    num_batches = len(loader)
+    update_interval = max(
+        1,
+        (num_batches + loss_updates_per_epoch - 1)
+        // loss_updates_per_epoch,
+    )
+    snapshot_interval = max(
+        1,
+        (num_batches + snapshot_updates_per_epoch - 1)
+        // snapshot_updates_per_epoch,
+    )
 
     for i, (A,B) in enumerate(loop):
+        batch_idx = i + 1
         A = A.to(device)
         B = B.to(device)
         batch_size = A.shape[0]
@@ -83,13 +132,37 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
         g_scaler.step(opt_gen)
         g_scaler.update()
 
-        if i % 100 == 0:
-            test(i, A, B, fake_A, fake_B, out_dir)
+        if batch_idx % snapshot_interval == 0 or batch_idx == num_batches:
+            save_translation_snapshot(
+                epoch,
+                batch_idx,
+                A,
+                B,
+                fake_A,
+                fake_B,
+                out_dir,
+                domain_A_label,
+                domain_B_label,
+            )
 
         loss_sums[0] += D_loss.detach() * batch_size
         loss_sums[1] += G_loss.detach() * batch_size
         num_examples += batch_size
-        loop.set_postfix(D_loss=D_loss.item(), G_loss=G_loss.item())
+        D_loss_value = D_loss.item()
+        G_loss_value = G_loss.item()
+        if loss_callback is not None:
+            window_loss_sums[0] += D_loss_value * batch_size
+            window_loss_sums[1] += G_loss_value * batch_size
+            window_examples += batch_size
+            if batch_idx % update_interval == 0 or batch_idx == num_batches:
+                loss_callback(
+                    batch_idx / num_batches,
+                    window_loss_sums[0] / window_examples,
+                    window_loss_sums[1] / window_examples,
+                )
+                window_loss_sums = [0.0, 0.0]
+                window_examples = 0
+        loop.set_postfix(D_loss=D_loss_value, G_loss=G_loss_value)
 
     if num_examples == 0:
         raise ValueError("Cannot train CycleGAN with an empty data loader.")

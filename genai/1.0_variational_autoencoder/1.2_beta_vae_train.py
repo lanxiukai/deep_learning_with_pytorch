@@ -31,7 +31,7 @@ from dl_utils.filesystem.directories import reset_dir
 from dl_utils.genai.vae import VAE, device
 from dl_utils.plot.figures import Animator
 from dl_utils.plot.images import vae_sample_grid
-from dl_utils.training.timing import Timer
+from dl_utils.training.timing import Timer, format_epoch_timing
 
 BETA = 4.0  # the only change vs. the standard VAE objective
 
@@ -103,18 +103,10 @@ def main():
             vae.decoder, latent_dims, device,
             out_dir / "beta_vae_epoch" / f"beta_vae_samples_epoch_{epoch:02d}.png"
         )
-    elapsed = timer.stop()
+    timing = format_epoch_timing(timer.stop(), num_epochs)
     animator.fig.savefig(out_dir / 'loss_curve.png', dpi=300)
     torch.save(vae.state_dict(), out_dir / "BetaVAEglasses.pth")
-    total_tenths = round(elapsed * 10)
-    hours, remainder = divmod(total_tenths, 36000)
-    minutes, second_tenths = divmod(remainder, 600)
-    seconds = second_tenths / 10
-    avg_tenths = round(elapsed / num_epochs * 10)
-    avg_minutes, avg_second_tenths = divmod(avg_tenths, 600)
-    avg_seconds = avg_second_tenths / 10
-    print(f'training time {hours} h {minutes} min {seconds:.1f} s, '
-          f'avg {avg_minutes} min {avg_seconds:.1f} s/epoch')
+    print(timing)
 
 
 if __name__ == "__main__":

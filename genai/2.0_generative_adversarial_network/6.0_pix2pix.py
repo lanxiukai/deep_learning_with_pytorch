@@ -1,349 +1,228 @@
+"""Train pix2pix for paired CelebA grayscale -> color translation.
+
+Compared with 5.0_cycle_gan.py:
+    - Each grayscale/RGB pair comes from the same photograph.
+    - One U-Net generator replaces two ResNet generators.
+    - D sees (source, target), and G uses GAN + 100 * paired L1 loss.
+    - No reverse generator or cycle-consistency loss is needed.
+
+The reusable dataset and complete model definitions live in
+dl_utils/genai/pix2pix.py.  The configuration follows common pix2pix practice:
+256x256 U-Net, 70x70 PatchGAN, batch size 1, Adam(lr=2e-4, beta1=0.5), and
+200 epochs with linear learning-rate decay after epoch 100.
+
+Data:
+    data/celeba/{black,blond}, also used by 5.0_cycle_gan.py.  Grayscale inputs
+    are derived in memory, so no second dataset copy is required.
+
+Outputs:
+    output/pix2pix/training/epoch_*.png: input/generated/target rows
+    output/pix2pix/pix2pix_generator.pth
+    output/pix2pix/loss_curves.png
 """
-pix2pix: paired image-to-image translation with U-Net + PatchGAN.
 
-The conditional discriminator sees (source, target) pairs.  Its patch logits
-enforce local realism and source/target compatibility, while the generator's
-L1 term preserves the paired global content:
-
-    L_G = BCE(D(source, G(source)), real) + lambda_L1 * |target - G(source)|
-
-Expected data layout (matching filenames in both folders):
-
-    data/pix2pix/train/input/0001.png
-    data/pix2pix/train/target/0001.png
-
-Run:
-    python genai/2.0_generative_adversarial_network/6.0_pix2pix.py --smoke-test
-    python genai/2.0_generative_adversarial_network/6.0_pix2pix.py
-"""
-
-from __future__ import annotations
-
-import argparse
-import random
-from pathlib import Path
-
+import matplotlib.pyplot as plt
 import torch
-import torch.nn.functional as F
-from torch import Tensor, nn
-from torch.utils.data import DataLoader, Dataset
-from torchvision.transforms import InterpolationMode
-from torchvision.transforms import functional as TF
+import torch.nn as nn
+from torch.utils.data import DataLoader
 from torchvision.utils import save_image
+from tqdm import tqdm
 
-from dl_utils.data.images import load_rgb_image
+from dl_utils.devices.randomness import set_seed
+from dl_utils.devices.selection import try_gpu
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.genai.pix2pix import (
+    CelebAColorizationDataset,
+    ConditionalPatchDiscriminator,
+    UNetGenerator,
+    build_paired_transform,
+    denormalize,
+    initialize_weights,
+)
+from dl_utils.plot.figures import Animator
+from dl_utils.training.timing import Timer, format_epoch_timing
+
 
 PROJECT_ROOT = infer_project_root()
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+CELEBA_DIR = PROJECT_ROOT / "data" / "celeba"
+OUT_DIR = PROJECT_ROOT / "output" / "pix2pix" / "training"
+PIX2PIX_OUT_DIR = OUT_DIR.parent
+
+NUM_EPOCHS = 200
+DECAY_START_EPOCH = 100
+BATCH_SIZE = 1
+NUM_WORKERS = 4
+LEARNING_RATE = 2e-4
+LAMBDA_L1 = 100
 
 
-class PairedImageDataset(Dataset[tuple[Tensor, Tensor]]):
-    """Load filename-aligned pairs and apply the same random flip to both."""
+def train_epoch(
+    generator,
+    discriminator,
+    loader,
+    opt_G,
+    opt_D,
+    bce,
+    l1,
+    scaler_G,
+    scaler_D,
+    device,
+):
+    """Train one epoch; these two updates are the core pix2pix algorithm."""
+    loop = tqdm(loader, leave=True)
+    loss_sums = torch.zeros(4, device=device)
+    num_examples = 0
 
-    def __init__(self, root: Path, image_size: int = 256) -> None:
-        self.input_dir = root / "input"
-        self.target_dir = root / "target"
-        if not self.input_dir.is_dir() or not self.target_dir.is_dir():
-            raise FileNotFoundError(
-                f"expected paired folders {self.input_dir} and {self.target_dir}"
+    for source, target in loop:
+        source = source.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
+        batch_size = source.shape[0]
+
+        # D(source, real target) -> 1; D(source, generated target) -> 0.
+        opt_G.zero_grad(set_to_none=True)
+        opt_D.zero_grad(set_to_none=True)
+        with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
+            generated = generator(source)
+            real_logits = discriminator(source, target)
+            fake_logits = discriminator(source, generated.detach())
+            loss_D = 0.5 * (
+                bce(real_logits, torch.ones_like(real_logits))
+                + bce(fake_logits, torch.zeros_like(fake_logits))
             )
-        self.names = sorted(
-            path.name
-            for path in self.input_dir.iterdir()
-            if path.suffix.lower() in IMAGE_SUFFIXES
-            and (self.target_dir / path.name).is_file()
-        )
-        if not self.names:
-            raise FileNotFoundError("no matching image filenames were found")
-        self.image_size = image_size
+        scaler_D.scale(loss_D).backward()
+        scaler_D.step(opt_D)
+        scaler_D.update()
 
-    def __len__(self) -> int:
-        return len(self.names)
+        # G(source) must fool D and reconstruct its aligned target.
+        for parameter in discriminator.parameters():
+            parameter.requires_grad_(False)
+        with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
+            fake_logits = discriminator(source, generated)
+            loss_G_GAN = bce(fake_logits, torch.ones_like(fake_logits))
+            loss_G_L1 = l1(generated, target)
+            loss_G = loss_G_GAN + LAMBDA_L1 * loss_G_L1
+        scaler_G.scale(loss_G).backward()
+        scaler_G.step(opt_G)
+        scaler_G.update()
+        for parameter in discriminator.parameters():
+            parameter.requires_grad_(True)
 
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
-        name = self.names[index]
-        source = load_rgb_image(self.input_dir / name)
-        target = load_rgb_image(self.target_dir / name)
-        size = [self.image_size, self.image_size]
-        source = TF.resize(source, size, InterpolationMode.BICUBIC)
-        target = TF.resize(target, size, InterpolationMode.BICUBIC)
-        if random.random() < 0.5:
-            source = TF.hflip(source)
-            target = TF.hflip(target)
-        source_tensor = TF.normalize(TF.to_tensor(source), (0.5,) * 3, (0.5,) * 3)
-        target_tensor = TF.normalize(TF.to_tensor(target), (0.5,) * 3, (0.5,) * 3)
-        return source_tensor, target_tensor
+        loss_sums += torch.stack(
+            [loss_D, loss_G, loss_G_GAN, loss_G_L1]
+        ).detach() * batch_size
+        num_examples += batch_size
+        loop.set_postfix(loss_D=loss_D.item(), loss_G=loss_G.item())
 
-
-class DownBlock(nn.Module):
-    def __init__(
-        self, in_channels: int, out_channels: int, normalize: bool = True
-    ) -> None:
-        super().__init__()
-        layers: list[nn.Module] = [
-            nn.Conv2d(in_channels, out_channels, 4, 2, 1, bias=not normalize)
-        ]
-        if normalize:
-            layers.append(nn.BatchNorm2d(out_channels))
-        layers.append(nn.LeakyReLU(0.2, inplace=True))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.net(x)
+    return tuple(value / num_examples for value in loss_sums.tolist())
 
 
-class UpBlock(nn.Module):
-    def __init__(
-        self, in_channels: int, out_channels: int, dropout: float = 0.0
-    ) -> None:
-        super().__init__()
-        layers: list[nn.Module] = [
-            nn.ConvTranspose2d(in_channels, out_channels, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        ]
-        if dropout:
-            layers.append(nn.Dropout(dropout))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: Tensor, skip: Tensor) -> Tensor:
-        return torch.cat([self.net(x), skip], dim=1)
-
-
-class UNetGenerator(nn.Module):
-    """Eight-level U-Net for 256x256 paired translation."""
-
-    def __init__(self, base_channels: int = 64) -> None:
-        super().__init__()
-        c = base_channels
-        self.down1 = DownBlock(3, c, normalize=False)       # 128
-        self.down2 = DownBlock(c, c * 2)                    # 64
-        self.down3 = DownBlock(c * 2, c * 4)                # 32
-        self.down4 = DownBlock(c * 4, c * 8)                # 16
-        self.down5 = DownBlock(c * 8, c * 8)                # 8
-        self.down6 = DownBlock(c * 8, c * 8)                # 4
-        self.down7 = DownBlock(c * 8, c * 8)                # 2
-        self.down8 = DownBlock(c * 8, c * 8, normalize=False)  # 1
-
-        self.up1 = UpBlock(c * 8, c * 8, dropout=0.5)
-        self.up2 = UpBlock(c * 16, c * 8, dropout=0.5)
-        self.up3 = UpBlock(c * 16, c * 8, dropout=0.5)
-        self.up4 = UpBlock(c * 16, c * 8)
-        self.up5 = UpBlock(c * 16, c * 4)
-        self.up6 = UpBlock(c * 8, c * 2)
-        self.up7 = UpBlock(c * 4, c)
-        self.final = nn.Sequential(
-            nn.ConvTranspose2d(c * 2, 3, 4, 2, 1),
-            nn.Tanh(),
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        d1 = self.down1(x)
-        d2 = self.down2(d1)
-        d3 = self.down3(d2)
-        d4 = self.down4(d3)
-        d5 = self.down5(d4)
-        d6 = self.down6(d5)
-        d7 = self.down7(d6)
-        bottleneck = self.down8(d7)
-        u1 = self.up1(bottleneck, d7)
-        u2 = self.up2(u1, d6)
-        u3 = self.up3(u2, d5)
-        u4 = self.up4(u3, d4)
-        u5 = self.up5(u4, d3)
-        u6 = self.up6(u5, d2)
-        u7 = self.up7(u6, d1)
-        return self.final(u7)
-
-
-class ConditionalPatchDiscriminator(nn.Module):
-    """70x70 PatchGAN; source and candidate target are concatenated."""
-
-    def __init__(self, base_channels: int = 64) -> None:
-        super().__init__()
-
-        def block(
-            in_channels: int, out_channels: int, stride: int, normalize: bool
-        ) -> list[nn.Module]:
-            layers: list[nn.Module] = [
-                nn.Conv2d(
-                    in_channels, out_channels, 4, stride, 1, bias=not normalize
-                )
-            ]
-            if normalize:
-                layers.append(nn.BatchNorm2d(out_channels))
-            layers.append(nn.LeakyReLU(0.2, inplace=True))
-            return layers
-
-        c = base_channels
-        self.net = nn.Sequential(
-            *block(6, c, 2, False),
-            *block(c, c * 2, 2, True),
-            *block(c * 2, c * 4, 2, True),
-            *block(c * 4, c * 8, 1, True),
-            nn.Conv2d(c * 8, 1, 4, 1, 1),
-        )
-
-    def forward(self, source: Tensor, target: Tensor) -> Tensor:
-        return self.net(torch.cat([source, target], dim=1))
-
-
-def discriminator_loss(
-    discriminator: ConditionalPatchDiscriminator,
-    generator: UNetGenerator,
-    source: Tensor,
-    target: Tensor,
-) -> tuple[Tensor, Tensor]:
-    with torch.no_grad():
-        fake = generator(source)
-    real_logits = discriminator(source, target)
-    fake_logits = discriminator(source, fake)
-    loss = 0.5 * (
-        F.binary_cross_entropy_with_logits(real_logits, torch.ones_like(real_logits))
-        + F.binary_cross_entropy_with_logits(fake_logits, torch.zeros_like(fake_logits))
+def save_training_samples(generator, source, target, device, output_path):
+    """Save fixed validation pairs as input/generated/target rows."""
+    generator.eval()
+    with torch.inference_mode():
+        generated = generator(source.to(device)).cpu()
+    generator.train()
+    images = torch.cat(
+        [denormalize(source), denormalize(generated), denormalize(target)]
     )
-    return loss, fake
+    save_image(images, output_path, nrow=source.shape[0])
 
 
-def generator_loss(
-    discriminator: ConditionalPatchDiscriminator,
-    generator: UNetGenerator,
-    source: Tensor,
-    target: Tensor,
-    lambda_l1: float = 100.0,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    discriminator.requires_grad_(False)
-    try:
-        fake = generator(source)
-        fake_logits = discriminator(source, fake)
-        adversarial = F.binary_cross_entropy_with_logits(
-            fake_logits, torch.ones_like(fake_logits)
-        )
-        reconstruction = F.l1_loss(fake, target)
-        loss = adversarial + lambda_l1 * reconstruction
-    finally:
-        discriminator.requires_grad_(True)
-    return loss, adversarial.detach(), reconstruction.detach(), fake
+def main():
+    set_seed(42)
+    reset_dir(str(OUT_DIR))
+    device = try_gpu()
 
-
-def smoke_test() -> None:
-    torch.manual_seed(7)
-    generator = UNetGenerator(base_channels=8)
-    discriminator = ConditionalPatchDiscriminator(base_channels=8)
-    source = torch.randn(2, 3, 256, 256)
-    target = torch.randn(2, 3, 256, 256)
-    d_loss, _ = discriminator_loss(discriminator, generator, source, target)
-    d_loss.backward()
-    discriminator.zero_grad(set_to_none=True)
-    g_loss, adversarial, reconstruction, fake = generator_loss(
-        discriminator, generator, source, target
+    train_dataset = CelebAColorizationDataset(
+        CELEBA_DIR,
+        "train",
+        build_paired_transform(training=True),
     )
-    g_loss.backward()
-    assert fake.shape == target.shape
-    assert discriminator(source, target).shape[-2:] == (30, 30)
-    assert generator.down1.net[0].weight.grad is not None
-    print(
-        f"smoke test passed: G={g_loss.item():.3f}, D={d_loss.item():.3f}, "
-        f"adversarial={adversarial.item():.3f}, L1={reconstruction.item():.3f}"
+    validation_dataset = CelebAColorizationDataset(
+        CELEBA_DIR,
+        "validation",
+        build_paired_transform(training=False),
     )
-
-
-def initialize_weights(module: nn.Module) -> None:
-    if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
-        nn.init.normal_(module.weight, 0.0, 0.02)
-    elif isinstance(module, nn.BatchNorm2d):
-        nn.init.normal_(module.weight, 1.0, 0.02)
-        nn.init.zeros_(module.bias)
-
-
-def train(args: argparse.Namespace) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dataset = PairedImageDataset(args.data_root, image_size=256)
     loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
+        train_dataset,
+        batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=args.workers,
+        num_workers=NUM_WORKERS,
         pin_memory=device.type == "cuda",
+        persistent_workers=NUM_WORKERS > 0,
     )
-    out_dir = PROJECT_ROOT / "output" / "pix2pix"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    sample_source, sample_target = next(
+        iter(DataLoader(validation_dataset, batch_size=4, shuffle=False))
+    )
 
     generator = UNetGenerator().to(device)
     discriminator = ConditionalPatchDiscriminator().to(device)
     generator.apply(initialize_weights)
     discriminator.apply(initialize_weights)
-    generator_optimizer = torch.optim.Adam(
-        generator.parameters(), lr=args.lr, betas=(0.5, 0.999)
+
+    opt_G = torch.optim.Adam(
+        generator.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999)
     )
-    discriminator_optimizer = torch.optim.Adam(
-        discriminator.parameters(), lr=args.lr, betas=(0.5, 0.999)
+    opt_D = torch.optim.Adam(
+        discriminator.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999)
+    )
+    bce, l1 = nn.BCEWithLogitsLoss(), nn.L1Loss()
+    scaler_G = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
+    scaler_D = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
+
+    def lr_factor(epoch):
+        if epoch < DECAY_START_EPOCH:
+            return 1.0
+        decay_epochs = NUM_EPOCHS - DECAY_START_EPOCH
+        return max(0.0, 1 - (epoch - DECAY_START_EPOCH + 1) / (decay_epochs + 1))
+
+    scheduler_G = torch.optim.lr_scheduler.LambdaLR(opt_G, lr_factor)
+    scheduler_D = torch.optim.lr_scheduler.LambdaLR(opt_D, lr_factor)
+    animator = Animator(
+        xlabel="epoch",
+        ylabel="loss",
+        xlim=[1, NUM_EPOCHS],
+        legend=["discriminator", "generator"],
+        figsize=(5, 3.5),
     )
 
-    for epoch in range(1, args.epochs + 1):
-        sums = torch.zeros(4, device=device)
-        examples = 0
-        for source, target in loader:
-            source = source.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
-
-            d_loss, _ = discriminator_loss(
-                discriminator, generator, source, target
-            )
-            discriminator_optimizer.zero_grad(set_to_none=True)
-            d_loss.backward()
-            discriminator_optimizer.step()
-
-            g_loss, adversarial, reconstruction, fake = generator_loss(
-                discriminator, generator, source, target, args.lambda_l1
-            )
-            generator_optimizer.zero_grad(set_to_none=True)
-            g_loss.backward()
-            generator_optimizer.step()
-
-            batch_size = source.shape[0]
-            sums += torch.stack(
-                [g_loss.detach(), d_loss.detach(), adversarial, reconstruction]
-            ) * batch_size
-            examples += batch_size
-
-        means = (sums / examples).tolist()
+    timer = Timer()
+    for epoch in range(1, NUM_EPOCHS + 1):
+        loss_D, loss_G, loss_G_GAN, loss_G_L1 = train_epoch(
+            generator,
+            discriminator,
+            loader,
+            opt_G,
+            opt_D,
+            bce,
+            l1,
+            scaler_G,
+            scaler_D,
+            device,
+        )
+        animator.add(epoch, (loss_D, loss_G))
+        save_training_samples(
+            generator,
+            sample_source,
+            sample_target,
+            device,
+            OUT_DIR / f"epoch_{epoch:03d}.png",
+        )
         print(
-            f"epoch {epoch:03d}: G={means[0]:.4f}, D={means[1]:.4f}, "
-            f"adversarial={means[2]:.4f}, L1={means[3]:.4f}"
+            f"epoch {epoch:03d}: D={loss_D:.3f}, G={loss_G:.3f}, "
+            f"GAN={loss_G_GAN:.3f}, L1={loss_G_L1:.3f}"
         )
-        save_image(
-            torch.cat([source[:4], target[:4], fake[:4]]).mul(0.5).add(0.5),
-            out_dir / f"epoch_{epoch:03d}.png",
-            nrow=4,
-        )
+        scheduler_G.step()
+        scheduler_D.step()
 
-    torch.save(generator.state_dict(), out_dir / "pix2pix_generator.pth")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--smoke-test", action="store_true")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=PROJECT_ROOT / "data" / "pix2pix" / "train",
+    print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
+    torch.save(
+        generator.state_dict(),
+        PIX2PIX_OUT_DIR / "pix2pix_generator.pth",
     )
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--lambda-l1", type=float, default=100.0)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--workers", type=int, default=4)
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    if args.smoke_test:
-        smoke_test()
-    else:
-        train(args)
+    animator.fig.savefig(PIX2PIX_OUT_DIR / "loss_curves.png", dpi=300)
+    plt.close(animator.fig)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,8 @@ Data:
 
 Outputs:
     output/cyclegan/training/, reset at the start of every run. The directory
-    contains training snapshots.
+    contains titled 2x2 training grids (real black hair -> generated blond on
+    top and real blond hair -> generated black on the bottom).
     - output/cyclegan/loss_curves.png: discriminator and generator loss curves
     - output/cyclegan/gen_black.pth: blond -> black generator
     - output/cyclegan/gen_blond.pth: black -> blond generator
@@ -53,7 +54,7 @@ from dl_utils.genai.cyclegan import (
     weights_init,
 )
 from dl_utils.plot.figures import Animator
-from dl_utils.training.timing import Timer
+from dl_utils.training.timing import Timer, format_epoch_timing
 
 # installation
 # !pip install pandas albumentations
@@ -174,16 +175,22 @@ def main():
         betas=(0.5, 0.999),
     )
 
-    num_epochs = 1
+    num_epochs = 3
     animator = Animator(
         xlabel="epoch",
         ylabel="loss",
-        xlim=[1, num_epochs],
+        xlim=[0, num_epochs],
         legend=["discriminator", "generator"],
         figsize=(5, 3.5),
     )
     timer = Timer()
     for epoch in range(1, num_epochs + 1):
+        def update_loss_curve(progress, window_loss_D, window_loss_G):
+            animator.add(
+                epoch - 1 + progress,
+                (window_loss_D, window_loss_G),
+            )
+
         loss_D, loss_G = train_epoch(
             disc_A,
             disc_B,
@@ -198,21 +205,18 @@ def main():
             g_scaler,
             device,
             OUT_DIR,
+            epoch=epoch,
+            loss_callback=update_loss_curve,
+            loss_updates_per_epoch=20,
+            snapshot_updates_per_epoch=10,
+            domain_A_label="Black hair",
+            domain_B_label="Blond hair",
         )
-        animator.add(epoch, (loss_D, loss_G))
 
-    total_time = timer.stop()
-    total_tenths = round(total_time * 10)
-    hours, remainder = divmod(total_tenths, 36000)
-    minutes, second_tenths = divmod(remainder, 600)
-    seconds = second_tenths / 10
-    avg_tenths = round(total_time / num_epochs * 10)
-    avg_minutes, avg_second_tenths = divmod(avg_tenths, 600)
-    avg_seconds = avg_second_tenths / 10
+    timing = format_epoch_timing(timer.stop(), num_epochs)
     print(
         f"loss_D {loss_D:.3f}, loss_G {loss_G:.3f}, "
-        f"training time {hours} h {minutes} min {seconds:.1f} s, "
-        f"avg {avg_minutes} min {avg_seconds:.1f} s/epoch on {device}"
+        f"{timing} on {device}"
     )
 
     torch.save(gen_A.state_dict(), CYCLEGAN_OUT_DIR / "gen_black.pth")
