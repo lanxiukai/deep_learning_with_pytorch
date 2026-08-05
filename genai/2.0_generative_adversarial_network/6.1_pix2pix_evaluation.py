@@ -8,14 +8,11 @@ Input:
 
 Outputs:
     output/pix2pix/evaluation/, reset at the start of every run.
-    - input{n}.png: grayscale source
-    - generated{n}.png: predicted color image
-    - target{n}.png: paired RGB target
+    - pix2pix_evaluation.png: input, generated, and target rows
 """
 
 import torch
 from torch.utils.data import DataLoader
-from torchvision.utils import save_image
 
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
@@ -24,8 +21,8 @@ from dl_utils.genai.pix2pix import (
     CelebAColorizationDataset,
     UNetGenerator,
     build_paired_transform,
-    denormalize,
 )
+from dl_utils.plot.images import save_image_row_grid
 
 
 PROJECT_ROOT = infer_project_root()
@@ -61,25 +58,27 @@ def main():
     )
     generator.eval()
 
+    source_images = []
+    generated_images = []
+    target_images = []
+
     with torch.inference_mode():
         for index, (source, target) in enumerate(loader, start=1):
             source = source.to(device)
             generated = generator(source)
 
-            save_image(
-                denormalize(source),
-                OUT_DIR / f"input{index}.png",
-            )
-            save_image(
-                denormalize(generated),
-                OUT_DIR / f"generated{index}.png",
-            )
-            save_image(
-                denormalize(target),
-                OUT_DIR / f"target{index}.png",
-            )
+            source_images.append(source[0].cpu())
+            generated_images.append(generated[0].cpu())
+            target_images.append(target[0].cpu())
+
             if index == 10:
                 break
+
+    save_image_row_grid(
+        [source_images, generated_images, target_images],
+        ["input", "generated", "target"],
+        OUT_DIR / "pix2pix_evaluation.png",
+    )
 
 
 if __name__ == "__main__":

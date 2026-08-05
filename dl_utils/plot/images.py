@@ -77,6 +77,50 @@ def save_grid(
     _plt.close()
 
 
+def save_image_row_grid(image_rows, row_labels, output_path) -> None:
+    """Save labelled rows of ``C x H x W`` tensors normalized to [-1, 1]."""
+    if len(image_rows) == 0 or len(image_rows[0]) == 0:
+        raise ValueError("image_rows must contain at least one image")
+    if len(image_rows) != len(row_labels):
+        raise ValueError("image_rows and row_labels must have the same length")
+
+    num_columns = len(image_rows[0])
+    if any(len(images) != num_columns for images in image_rows):
+        raise ValueError("all image rows must have the same length")
+
+    fig, axes = _plt.subplots(
+        len(image_rows),
+        num_columns,
+        figsize=(1.8 * num_columns, 2.1 * len(image_rows)),
+        squeeze=False,
+    )
+    for row_index, (images, label) in enumerate(zip(image_rows, row_labels)):
+        axes[row_index, 0].set_ylabel(
+            label,
+            rotation=0,
+            ha="right",
+            va="center",
+            fontsize=12,
+        )
+        for column_index, image in enumerate(images):
+            display_image = (
+                image.detach()
+                .cpu()
+                .mul(0.5)
+                .add(0.5)
+                .clamp(0, 1)
+                .permute(1, 2, 0)
+                .numpy()
+            )
+            axes[row_index, column_index].imshow(display_image)
+            axes[row_index, column_index].set_xticks([])
+            axes[row_index, column_index].set_yticks([])
+
+    fig.subplots_adjust(wspace=0.02, hspace=0.08)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    _plt.close(fig)
+
+
 def vae_sample_grid(
     decoder: torch.nn.Module,
     latent_dims: int,

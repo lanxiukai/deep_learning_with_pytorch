@@ -19,7 +19,6 @@ Outputs:
 """
 
 import albumentations
-import matplotlib.pyplot as plt
 import torch
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import DataLoader
@@ -28,6 +27,7 @@ from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.cyclegan import Generator, LoadData
+from dl_utils.plot.images import save_image_row_grid
 
 
 PROJECT_ROOT = infer_project_root()
@@ -39,40 +39,6 @@ BLACK_DIR = DATA_DIR / "celeba" / "black"
 BLOND_DIR = DATA_DIR / "celeba" / "blond"
 GEN_BLACK_PATH = CHECKPOINT_DIR / "gen_black.pth"
 GEN_BLOND_PATH = CHECKPOINT_DIR / "gen_blond.pth"
-
-
-def save_cycle_grid(image_rows, row_titles, output_path):
-    """Save transformation stages as labelled rows in one image grid."""
-    num_columns = len(image_rows[0])
-    fig, axes = plt.subplots(
-        len(image_rows),
-        num_columns,
-        figsize=(1.8 * num_columns, 2.1 * len(image_rows)),
-        squeeze=False,
-    )
-    for row_index, (images, title) in enumerate(zip(image_rows, row_titles)):
-        axes[row_index, 0].set_ylabel(
-            title,
-            rotation=0,
-            ha="right",
-            va="center",
-            fontsize=12,
-        )
-        for column_index, image in enumerate(images):
-            display_image = (
-                image.mul(0.5)
-                .add(0.5)
-                .clamp(0, 1)
-                .permute(1, 2, 0)
-                .numpy()
-            )
-            axes[row_index, column_index].imshow(display_image)
-            axes[row_index, column_index].set_xticks([])
-            axes[row_index, column_index].set_yticks([])
-
-    fig.subplots_adjust(wspace=0.02, hspace=0.08)
-    fig.savefig(output_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
 
 
 def main():
@@ -161,12 +127,12 @@ def main():
             if index == 10:
                 break
 
-    save_cycle_grid(
+    save_image_row_grid(
         [black_images, fake_blond_images, fake2black_images],
         ["black", "fake_blond", "fake2black"],
         OUT_DIR / "black_to_blond_cycle.png",
     )
-    save_cycle_grid(
+    save_image_row_grid(
         [blond_images, fake_black_images, fake2blond_images],
         ["blond", "fake_black", "fake2blond"],
         OUT_DIR / "blond_to_black_cycle.png",

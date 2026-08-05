@@ -84,7 +84,7 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
         // snapshot_updates_per_epoch,
     )
 
-    for i, (A,B) in enumerate(loop):
+    for i, (A, B) in enumerate(loop):
         batch_idx = i + 1
         A = A.to(device)
         B = B.to(device)

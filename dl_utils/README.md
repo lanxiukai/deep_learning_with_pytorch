@@ -393,7 +393,7 @@ Public entries: use_svg_display, set_figsize, set_axes, plot, annotate, Animator
 ### dl_utils/plot/images.py
 
 Dependencies: math, os, pathlib (Path), typing (Any), dl_utils.plot._backend, numpy, torch, torchvision, matplotlib.pyplot.
-Public entries: show_images, save_grid, vae_sample_grid.
+Public entries: show_images, save_grid, save_image_row_grid, vae_sample_grid.
 
 ### dl_utils/training/__init__.py
 
