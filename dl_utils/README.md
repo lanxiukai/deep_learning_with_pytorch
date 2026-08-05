@@ -333,7 +333,7 @@ Public entries: none (docstring-only package marker, documents the generative-mo
 
 Dependencies: os, matplotlib.pyplot, torch, numpy, torch.nn, torch.utils.data
 (Dataset), tqdm, dl_utils.data.images (load_rgb_image).
-Public entries: save_translation_snapshot, train_epoch, ConvBlock,
+Public entries: LAMBDA_CYCLE, save_translation_snapshot, train_epoch, ConvBlock,
 ResidualBlock, Generator, Block, Discriminator, LoadData, weights_init.
 
 ### dl_utils/genai/ddpm.py
@@ -389,6 +389,9 @@ Public entries: none.
 
 Dependencies: csv, os, collections.abc (Mapping, Sequence), os (PathLike), typing (Any), dl_utils.plot._backend, matplotlib_inline.backend_inline, matplotlib.pyplot, dl_utils.training.metrics (MetricHistory, as_list, has_any_finite).
 Public entries: use_svg_display, set_figsize, set_axes, plot, annotate, Animator, heatmap, trace2d, seq_len_hist, save_curve, save_loss_curves, maybe_save_curve.
+`save_loss_curves` writes total discriminator loss, total generator loss,
+generator adversarial components, and weighted reconstruction components as
+four vertically stacked plots with independent y-axes.
 
 ### dl_utils/plot/images.py
 

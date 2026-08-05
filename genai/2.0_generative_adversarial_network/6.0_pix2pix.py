@@ -18,7 +18,8 @@ Data:
 Outputs:
     output/pix2pix/training/epoch_*.png: titled input/generated/target grids
     output/pix2pix/pix2pix_generator.pth
-    output/pix2pix/loss_curves.png
+    output/pix2pix/loss_curves.png: total D/G, G GAN, and LAMBDA_L1-weighted
+    G L1 losses in one four-panel figure
 """
 
 import matplotlib.pyplot as plt
@@ -49,7 +50,7 @@ PIX2PIX_OUT_DIR = OUT_DIR.parent
 
 NUM_EPOCHS = 20
 DECAY_START_EPOCH = 10
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 NUM_WORKERS = 8
 LEARNING_RATE = 2e-4
 LAMBDA_L1 = 100
@@ -71,7 +72,11 @@ def train_epoch(
     loss_updates_per_epoch=LOSS_UPDATES_PER_EPOCH,
     progress_bar=None,
 ):
-    """Train one epoch; these two updates are the core pix2pix algorithm."""
+    """Train one epoch; these two updates are the core pix2pix algorithm.
+
+    The optional callback receives progress, total D, total G, G GAN, and the
+    LAMBDA_L1-weighted G L1 loss.
+    """
     if loss_updates_per_epoch <= 0:
         raise ValueError("loss_updates_per_epoch must be positive.")
 
@@ -81,7 +86,8 @@ def train_epoch(
         else tqdm(loader, leave=True, mininterval=1.0)
     )
     loss_sums = torch.zeros(4, device=device)
-    window_loss_sums = [0.0, 0.0]
+    # D, G GAN, and LAMBDA_L1-weighted G L1.
+    window_loss_sums = [0.0] * 3
     num_examples = 0
     window_examples = 0
     num_batches = len(loader)
@@ -118,30 +124,47 @@ def train_epoch(
             fake_logits = discriminator(source, generated)
             loss_G_GAN = bce(fake_logits, torch.ones_like(fake_logits))
             loss_G_L1 = l1(generated, target)
-            loss_G = loss_G_GAN + LAMBDA_L1 * loss_G_L1
+            weighted_loss_G_L1 = LAMBDA_L1 * loss_G_L1
+            loss_G = loss_G_GAN + weighted_loss_G_L1
         scaler_G.scale(loss_G).backward()
         scaler_G.step(opt_G)
         scaler_G.update()
         for parameter in discriminator.parameters():
             parameter.requires_grad_(True)
 
-        loss_sums += torch.stack(
-            [loss_D, loss_G, loss_G_GAN, loss_G_L1]
-        ).detach() * batch_size
+        batch_losses = torch.stack(
+            [loss_D, loss_G, loss_G_GAN, weighted_loss_G_L1]
+        ).detach()
+        loss_sums += batch_losses * batch_size
         num_examples += batch_size
-        loss_D_value = loss_D.item()
-        loss_G_value = loss_G.item()
+        (
+            loss_D_value,
+            loss_G_value,
+            loss_G_GAN_value,
+            weighted_loss_G_L1_value,
+        ) = batch_losses.tolist()
         if loss_callback is not None:
-            window_loss_sums[0] += loss_D_value * batch_size
-            window_loss_sums[1] += loss_G_value * batch_size
+            loss_values = (
+                loss_D_value,
+                loss_G_GAN_value,
+                weighted_loss_G_L1_value,
+            )
+            for index, loss_value in enumerate(loss_values):
+                window_loss_sums[index] += loss_value * batch_size
             window_examples += batch_size
             if batch_idx % update_interval == 0 or batch_idx == num_batches:
+                window_losses = [
+                    loss_sum / window_examples
+                    for loss_sum in window_loss_sums
+                ]
+                window_loss_D, *window_generator_components = window_losses
                 loss_callback(
                     batch_idx / num_batches,
-                    window_loss_sums[0] / window_examples,
-                    window_loss_sums[1] / window_examples,
+                    window_loss_D,
+                    sum(window_generator_components),
+                    *window_generator_components,
                 )
-                window_loss_sums = [0.0, 0.0]
+                window_loss_sums = [0.0] * 3
                 window_examples = 0
         if progress_bar is None:
             loop.set_postfix(
@@ -157,7 +180,11 @@ def train_epoch(
             )
             progress_bar.update(1)
 
-    return tuple(value / num_examples for value in loss_sums.tolist())
+    loss_D, _, loss_G_GAN, weighted_loss_G_L1 = (
+        value / num_examples for value in loss_sums.tolist()
+    )
+    loss_G = loss_G_GAN + weighted_loss_G_L1
+    return loss_D, loss_G, loss_G_GAN, weighted_loss_G_L1
 
 
 def save_training_samples(
@@ -259,6 +286,10 @@ def main():
     loss_steps = []
     discriminator_losses = []
     generator_losses = []
+    generator_adversarial_losses = {"G GAN loss": []}
+    generator_reconstruction_losses = {
+        f"{LAMBDA_L1} × G L1 loss": [],
+    }
 
     timer = Timer()
     with tqdm(
@@ -274,12 +305,24 @@ def main():
                 refresh=False,
             )
 
-            def update_loss_curve(progress, window_loss_D, window_loss_G):
+            def update_loss_curve(
+                progress,
+                window_loss_D,
+                window_loss_G,
+                window_loss_G_GAN,
+                window_weighted_loss_G_L1,
+            ):
                 loss_steps.append(epoch - 1 + progress)
                 discriminator_losses.append(window_loss_D)
                 generator_losses.append(window_loss_G)
+                generator_adversarial_losses["G GAN loss"].append(
+                    window_loss_G_GAN
+                )
+                generator_reconstruction_losses[
+                    f"{LAMBDA_L1} × G L1 loss"
+                ].append(window_weighted_loss_G_L1)
 
-            loss_D, loss_G, loss_G_GAN, loss_G_L1 = train_epoch(
+            loss_D, loss_G, loss_G_GAN, weighted_loss_G_L1 = train_epoch(
                 generator,
                 discriminator,
                 loader,
@@ -304,7 +347,8 @@ def main():
             )
             progress_bar.write(
                 f"epoch {epoch:03d}: D={loss_D:.3f}, G={loss_G:.3f}, "
-                f"GAN={loss_G_GAN:.3f}, L1={loss_G_L1:.3f}"
+                f"GAN={loss_G_GAN:.3f}, "
+                f"{LAMBDA_L1}×L1={weighted_loss_G_L1:.3f}"
             )
             scheduler_G.step()
             scheduler_D.step()
@@ -318,6 +362,8 @@ def main():
         loss_steps,
         discriminator_losses,
         generator_losses,
+        generator_adversarial_losses,
+        generator_reconstruction_losses,
         PIX2PIX_OUT_DIR / "loss_curves.png",
     )
 

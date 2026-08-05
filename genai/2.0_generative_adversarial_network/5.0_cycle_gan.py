@@ -12,7 +12,8 @@ Outputs:
     output/cyclegan/training/, reset at the start of every run. The directory
     contains titled 2x2 training grids (real black hair -> generated blond on
     top and real blond hair -> generated black on the bottom).
-    - output/cyclegan/loss_curves.png: discriminator and generator loss curves
+    - output/cyclegan/loss_curves.png: total D/G, directional adversarial, and
+      10 × directional cycle-consistency losses in one four-panel figure
     - output/cyclegan/gen_black.pth: blond -> black generator
     - output/cyclegan/gen_blond.pth: black -> blond generator
 
@@ -49,6 +50,7 @@ from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.cyclegan import (
     Discriminator,
     Generator,
+    LAMBDA_CYCLE,
     LoadData,
     train_epoch,
     weights_init,
@@ -179,6 +181,14 @@ def main():
     loss_steps = []
     discriminator_losses = []
     generator_losses = []
+    generator_adversarial_losses = {
+        "Blond → Black": [],
+        "Black → Blond": [],
+    }
+    generator_reconstruction_losses = {
+        f"Black → Blond → Black ({LAMBDA_CYCLE} × cycle)": [],
+        f"Blond → Black → Blond ({LAMBDA_CYCLE} × cycle)": [],
+    }
     timer = Timer()
     with tqdm(
         total=num_epochs * len(loader),
@@ -193,10 +203,30 @@ def main():
                 refresh=False,
             )
 
-            def update_loss_curve(progress, window_loss_D, window_loss_G):
+            def update_loss_curve(
+                progress,
+                window_loss_D,
+                window_loss_G,
+                window_loss_G_A,
+                window_loss_G_B,
+                window_cycle_A_loss,
+                window_cycle_B_loss,
+            ):
                 loss_steps.append(epoch - 1 + progress)
                 discriminator_losses.append(window_loss_D)
                 generator_losses.append(window_loss_G)
+                generator_adversarial_losses["Blond → Black"].append(
+                    window_loss_G_A
+                )
+                generator_adversarial_losses["Black → Blond"].append(
+                    window_loss_G_B
+                )
+                generator_reconstruction_losses[
+                    f"Black → Blond → Black ({LAMBDA_CYCLE} × cycle)"
+                ].append(window_cycle_A_loss)
+                generator_reconstruction_losses[
+                    f"Blond → Black → Blond ({LAMBDA_CYCLE} × cycle)"
+                ].append(window_cycle_B_loss)
 
             loss_D, loss_G = train_epoch(
                 disc_A,
@@ -233,6 +263,8 @@ def main():
         loss_steps,
         discriminator_losses,
         generator_losses,
+        generator_adversarial_losses,
+        generator_reconstruction_losses,
         CYCLEGAN_OUT_DIR / "loss_curves.png",
     )
 

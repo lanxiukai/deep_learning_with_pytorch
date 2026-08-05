@@ -18,6 +18,9 @@ from tqdm import tqdm
 from dl_utils.data.images import load_rgb_image
 
 
+LAMBDA_CYCLE = 10
+
+
 def save_translation_snapshot(
     epoch,
     batch_idx,
@@ -57,7 +60,11 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
         epoch=1, loss_callback=None, loss_updates_per_epoch=20,
         snapshot_updates_per_epoch=10, domain_A_label="Domain A",
         domain_B_label="Domain B", progress_bar=None):
-    """Train one epoch and optionally update a caller-owned progress bar."""
+    """Train one epoch and report weighted generator-loss components.
+
+    The optional callback receives progress, total D, total G, both
+    directional adversarial terms, and both LAMBDA_CYCLE-weighted cycle terms.
+    """
     if loss_updates_per_epoch <= 0:
         raise ValueError("loss_updates_per_epoch must be positive.")
     if snapshot_updates_per_epoch <= 0:
@@ -69,7 +76,8 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
         else tqdm(loader, leave=True, mininterval=1.0)
     )
     loss_sums = torch.zeros(2, device=device)
-    window_loss_sums = [0.0, 0.0]
+    # D, G_A adversarial, G_B adversarial, weighted cycle_A, weighted cycle_B.
+    window_loss_sums = [0.0] * 5
     num_examples = 0
     window_examples = 0
     num_batches = len(loader)
@@ -126,10 +134,16 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
             cycle_A = gen_A(fake_B)
             cycle_B_loss = l1(B, cycle_B)
             cycle_A_loss = l1(A, cycle_A)
+            weighted_cycle_A_loss = cycle_A_loss * LAMBDA_CYCLE
+            weighted_cycle_B_loss = cycle_B_loss * LAMBDA_CYCLE
 
             # Total generator loss
-            G_loss = (loss_G_A + loss_G_B + cycle_A_loss * 10
-                + cycle_B_loss * 10)
+            G_loss = (
+                loss_G_A
+                + loss_G_B
+                + weighted_cycle_A_loss
+                + weighted_cycle_B_loss
+            )
 
         opt_gen.zero_grad()
         g_scaler.scale(G_loss).backward()
@@ -149,22 +163,50 @@ def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
                 domain_B_label,
             )
 
-        loss_sums[0] += D_loss.detach() * batch_size
-        loss_sums[1] += G_loss.detach() * batch_size
+        batch_losses = torch.stack(
+            [
+                D_loss,
+                G_loss,
+                loss_G_A,
+                loss_G_B,
+                weighted_cycle_A_loss,
+                weighted_cycle_B_loss,
+            ]
+        ).detach()
+        loss_sums += batch_losses[:2] * batch_size
         num_examples += batch_size
-        D_loss_value = D_loss.item()
-        G_loss_value = G_loss.item()
+        (
+            D_loss_value,
+            G_loss_value,
+            loss_G_A_value,
+            loss_G_B_value,
+            weighted_cycle_A_loss_value,
+            weighted_cycle_B_loss_value,
+        ) = batch_losses.tolist()
         if loss_callback is not None:
-            window_loss_sums[0] += D_loss_value * batch_size
-            window_loss_sums[1] += G_loss_value * batch_size
+            loss_values = (
+                D_loss_value,
+                loss_G_A_value,
+                loss_G_B_value,
+                weighted_cycle_A_loss_value,
+                weighted_cycle_B_loss_value,
+            )
+            for index, loss_value in enumerate(loss_values):
+                window_loss_sums[index] += loss_value * batch_size
             window_examples += batch_size
             if batch_idx % update_interval == 0 or batch_idx == num_batches:
+                window_losses = [
+                    loss_sum / window_examples
+                    for loss_sum in window_loss_sums
+                ]
+                window_loss_D, *window_generator_components = window_losses
                 loss_callback(
                     batch_idx / num_batches,
-                    window_loss_sums[0] / window_examples,
-                    window_loss_sums[1] / window_examples,
+                    window_loss_D,
+                    sum(window_generator_components),
+                    *window_generator_components,
                 )
-                window_loss_sums = [0.0, 0.0]
+                window_loss_sums = [0.0] * 5
                 window_examples = 0
         if progress_bar is None:
             loop.set_postfix(
