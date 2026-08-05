@@ -388,7 +388,7 @@ Public entries: none.
 ### dl_utils/plot/figures.py
 
 Dependencies: csv, os, collections.abc (Mapping, Sequence), os (PathLike), typing (Any), dl_utils.plot._backend, matplotlib_inline.backend_inline, matplotlib.pyplot, dl_utils.training.metrics (MetricHistory, as_list, has_any_finite).
-Public entries: use_svg_display, set_figsize, set_axes, plot, annotate, Animator, heatmap, trace2d, seq_len_hist, save_curve, maybe_save_curve.
+Public entries: use_svg_display, set_figsize, set_axes, plot, annotate, Animator, heatmap, trace2d, seq_len_hist, save_curve, save_loss_curves, maybe_save_curve.
 
 ### dl_utils/plot/images.py
 

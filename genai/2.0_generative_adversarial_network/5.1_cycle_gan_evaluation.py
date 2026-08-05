@@ -109,8 +109,7 @@ def main():
                 std=[0.5, 0.5, 0.5],
                 max_pixel_value=255,
             ),
-            ToTensorV2(),  # numpy array -> PyTorch Tensor,
-                           # (H, W, C) -> (C, H, W)
+            ToTensorV2(),  # numpy H×W×C → torch C×H×W
         ],
         additional_targets={"image0": "image"}
     )

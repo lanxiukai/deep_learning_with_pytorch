@@ -242,6 +242,50 @@ def save_curve(
             writer.writerows(rows)
 
 
+def save_loss_curves(
+    x: Sequence[float],
+    discriminator_losses: Sequence[float],
+    generator_losses: Sequence[float],
+    path: str | PathLike[str],
+    *,
+    xlabel: str = "epoch",
+) -> None:
+    """Save adversarial losses on separate subplots with independent y-axes."""
+    x_values = list(x)
+    discriminator_values = list(map(float, discriminator_losses))
+    generator_values = list(map(float, generator_losses))
+    if len(discriminator_values) != len(x_values):
+        raise ValueError(
+            "save_loss_curves: discriminator loss length does not match x."
+        )
+    if len(generator_values) != len(x_values):
+        raise ValueError(
+            "save_loss_curves: generator loss length does not match x."
+        )
+
+    path_str = os.fspath(path)
+    parent = os.path.dirname(path_str)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    fig, (disc_axis, gen_axis) = _plt.subplots(
+        2,
+        1,
+        figsize=(6, 6),
+        sharex=True,
+    )
+    disc_axis.plot(x_values, discriminator_values, color="tab:blue")
+    disc_axis.set_ylabel("discriminator loss")
+    disc_axis.grid()
+    gen_axis.plot(x_values, generator_values, color="tab:orange")
+    gen_axis.set_xlabel(xlabel)
+    gen_axis.set_ylabel("generator loss")
+    gen_axis.grid()
+    fig.tight_layout()
+    fig.savefig(path_str, dpi=300)
+    _plt.close(fig)
+
+
 def maybe_save_curve(
     x: Sequence[float],
     metrics: MetricHistory,

@@ -7,16 +7,16 @@ Compared with 5.0_cycle_gan.py:
     - No reverse generator or cycle-consistency loss is needed.
 
 The reusable dataset and complete model definitions live in
-dl_utils/genai/pix2pix.py.  The configuration follows common pix2pix practice:
-256x256 U-Net, 70x70 PatchGAN, batch size 1, Adam(lr=2e-4, beta1=0.5), and
-200 epochs with linear learning-rate decay after epoch 100.
+dl_utils/genai/pix2pix.py.  The configuration uses a 256x256 U-Net, 70x70
+PatchGAN, batch size 1, Adam(lr=2e-4, beta1=0.5), and 20 epochs with linear
+learning-rate decay after epoch 10.
 
 Data:
     data/celeba/{black,blond}, also used by 5.0_cycle_gan.py.  Grayscale inputs
     are derived in memory, so no second dataset copy is required.
 
 Outputs:
-    output/pix2pix/training/epoch_*.png: input/generated/target rows
+    output/pix2pix/training/epoch_*.png: titled input/generated/target grids
     output/pix2pix/pix2pix_generator.pth
     output/pix2pix/loss_curves.png
 """
@@ -25,10 +25,8 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torchvision.utils import save_image
 from tqdm import tqdm
 
-from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
@@ -40,7 +38,7 @@ from dl_utils.genai.pix2pix import (
     denormalize,
     initialize_weights,
 )
-from dl_utils.plot.figures import Animator
+from dl_utils.plot.figures import save_loss_curves
 from dl_utils.training.timing import Timer, format_epoch_timing
 
 
@@ -49,12 +47,13 @@ CELEBA_DIR = PROJECT_ROOT / "data" / "celeba"
 OUT_DIR = PROJECT_ROOT / "output" / "pix2pix" / "training"
 PIX2PIX_OUT_DIR = OUT_DIR.parent
 
-NUM_EPOCHS = 200
-DECAY_START_EPOCH = 100
+NUM_EPOCHS = 20
+DECAY_START_EPOCH = 10
 BATCH_SIZE = 1
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 LEARNING_RATE = 2e-4
 LAMBDA_L1 = 100
+LOSS_UPDATES_PER_EPOCH = 20
 
 
 def train_epoch(
@@ -68,13 +67,31 @@ def train_epoch(
     scaler_G,
     scaler_D,
     device,
+    loss_callback=None,
+    loss_updates_per_epoch=LOSS_UPDATES_PER_EPOCH,
+    progress_bar=None,
 ):
     """Train one epoch; these two updates are the core pix2pix algorithm."""
-    loop = tqdm(loader, leave=True)
-    loss_sums = torch.zeros(4, device=device)
-    num_examples = 0
+    if loss_updates_per_epoch <= 0:
+        raise ValueError("loss_updates_per_epoch must be positive.")
 
-    for source, target in loop:
+    loop = (
+        loader
+        if progress_bar is not None
+        else tqdm(loader, leave=True, mininterval=1.0)
+    )
+    loss_sums = torch.zeros(4, device=device)
+    window_loss_sums = [0.0, 0.0]
+    num_examples = 0
+    window_examples = 0
+    num_batches = len(loader)
+    update_interval = max(
+        1,
+        (num_batches + loss_updates_per_epoch - 1)
+        // loss_updates_per_epoch,
+    )
+
+    for batch_idx, (source, target) in enumerate(loop, start=1):
         source = source.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
         batch_size = source.shape[0]
@@ -112,25 +129,85 @@ def train_epoch(
             [loss_D, loss_G, loss_G_GAN, loss_G_L1]
         ).detach() * batch_size
         num_examples += batch_size
-        loop.set_postfix(loss_D=loss_D.item(), loss_G=loss_G.item())
+        loss_D_value = loss_D.item()
+        loss_G_value = loss_G.item()
+        if loss_callback is not None:
+            window_loss_sums[0] += loss_D_value * batch_size
+            window_loss_sums[1] += loss_G_value * batch_size
+            window_examples += batch_size
+            if batch_idx % update_interval == 0 or batch_idx == num_batches:
+                loss_callback(
+                    batch_idx / num_batches,
+                    window_loss_sums[0] / window_examples,
+                    window_loss_sums[1] / window_examples,
+                )
+                window_loss_sums = [0.0, 0.0]
+                window_examples = 0
+        if progress_bar is None:
+            loop.set_postfix(
+                loss_D=loss_D_value,
+                loss_G=loss_G_value,
+                refresh=False,
+            )
+        else:
+            progress_bar.set_postfix(
+                loss_D=loss_D_value,
+                loss_G=loss_G_value,
+                refresh=False,
+            )
+            progress_bar.update(1)
 
     return tuple(value / num_examples for value in loss_sums.tolist())
 
 
-def save_training_samples(generator, source, target, device, output_path):
-    """Save fixed validation pairs as input/generated/target rows."""
+def save_training_samples(
+    generator,
+    source,
+    target,
+    device,
+    output_path,
+    epoch,
+):
+    """Save fixed validation pairs as one titled comparison grid."""
     generator.eval()
     with torch.inference_mode():
         generated = generator(source.to(device)).cpu()
     generator.train()
-    images = torch.cat(
-        [denormalize(source), denormalize(generated), denormalize(target)]
+
+    image_rows = (
+        denormalize(source),
+        denormalize(generated),
+        denormalize(target),
     )
-    save_image(images, output_path, nrow=source.shape[0])
+    row_labels = ("Grayscale input", "Generated color", "Ground truth")
+    num_samples = source.shape[0]
+    fig, axes = plt.subplots(
+        len(image_rows),
+        num_samples,
+        figsize=(2.4 * num_samples, 6.8),
+        squeeze=False,
+    )
+    for row, (images, label) in enumerate(zip(image_rows, row_labels)):
+        for column, image in enumerate(images):
+            axis = axes[row, column]
+            axis.imshow(image.permute(1, 2, 0).numpy())
+            axis.set_xticks([])
+            axis.set_yticks([])
+            for spine in axis.spines.values():
+                spine.set_visible(False)
+            if row == 0:
+                axis.set_title(f"Sample {column + 1}")
+        axes[row, 0].set_ylabel(label, fontsize=11)
+    fig.suptitle(
+        f"pix2pix grayscale-to-color validation — epoch {epoch:03d}",
+        fontsize=14,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main():
-    set_seed(42)
     reset_dir(str(OUT_DIR))
     device = try_gpu()
 
@@ -179,50 +256,70 @@ def main():
 
     scheduler_G = torch.optim.lr_scheduler.LambdaLR(opt_G, lr_factor)
     scheduler_D = torch.optim.lr_scheduler.LambdaLR(opt_D, lr_factor)
-    animator = Animator(
-        xlabel="epoch",
-        ylabel="loss",
-        xlim=[1, NUM_EPOCHS],
-        legend=["discriminator", "generator"],
-        figsize=(5, 3.5),
-    )
+    loss_steps = []
+    discriminator_losses = []
+    generator_losses = []
 
     timer = Timer()
-    for epoch in range(1, NUM_EPOCHS + 1):
-        loss_D, loss_G, loss_G_GAN, loss_G_L1 = train_epoch(
-            generator,
-            discriminator,
-            loader,
-            opt_G,
-            opt_D,
-            bce,
-            l1,
-            scaler_G,
-            scaler_D,
-            device,
-        )
-        animator.add(epoch, (loss_D, loss_G))
-        save_training_samples(
-            generator,
-            sample_source,
-            sample_target,
-            device,
-            OUT_DIR / f"epoch_{epoch:03d}.png",
-        )
-        print(
-            f"epoch {epoch:03d}: D={loss_D:.3f}, G={loss_G:.3f}, "
-            f"GAN={loss_G_GAN:.3f}, L1={loss_G_L1:.3f}"
-        )
-        scheduler_G.step()
-        scheduler_D.step()
+    with tqdm(
+        total=NUM_EPOCHS * len(loader),
+        desc=f"Epoch 1/{NUM_EPOCHS}",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    ) as progress_bar:
+        for epoch in range(1, NUM_EPOCHS + 1):
+            progress_bar.set_description(
+                f"Epoch {epoch}/{NUM_EPOCHS}",
+                refresh=False,
+            )
+
+            def update_loss_curve(progress, window_loss_D, window_loss_G):
+                loss_steps.append(epoch - 1 + progress)
+                discriminator_losses.append(window_loss_D)
+                generator_losses.append(window_loss_G)
+
+            loss_D, loss_G, loss_G_GAN, loss_G_L1 = train_epoch(
+                generator,
+                discriminator,
+                loader,
+                opt_G,
+                opt_D,
+                bce,
+                l1,
+                scaler_G,
+                scaler_D,
+                device,
+                loss_callback=update_loss_curve,
+                loss_updates_per_epoch=LOSS_UPDATES_PER_EPOCH,
+                progress_bar=progress_bar,
+            )
+            save_training_samples(
+                generator,
+                sample_source,
+                sample_target,
+                device,
+                OUT_DIR / f"epoch_{epoch:03d}.png",
+                epoch,
+            )
+            progress_bar.write(
+                f"epoch {epoch:03d}: D={loss_D:.3f}, G={loss_G:.3f}, "
+                f"GAN={loss_G_GAN:.3f}, L1={loss_G_L1:.3f}"
+            )
+            scheduler_G.step()
+            scheduler_D.step()
 
     print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
     torch.save(
         generator.state_dict(),
         PIX2PIX_OUT_DIR / "pix2pix_generator.pth",
     )
-    animator.fig.savefig(PIX2PIX_OUT_DIR / "loss_curves.png", dpi=300)
-    plt.close(animator.fig)
+    save_loss_curves(
+        loss_steps,
+        discriminator_losses,
+        generator_losses,
+        PIX2PIX_OUT_DIR / "loss_curves.png",
+    )
 
 
 if __name__ == "__main__":

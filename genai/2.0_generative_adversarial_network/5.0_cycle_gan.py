@@ -53,7 +53,7 @@ from dl_utils.genai.cyclegan import (
     train_epoch,
     weights_init,
 )
-from dl_utils.plot.figures import Animator
+from dl_utils.plot.figures import save_loss_curves
 from dl_utils.training.timing import Timer, format_epoch_timing
 
 # installation
@@ -129,7 +129,7 @@ def main():
                 std=[0.5, 0.5, 0.5],
                 max_pixel_value=255,
             ),
-            ToTensorV2(),  # -> PyTorch Tensor: (C, H, W)
+            ToTensorV2(),  # numpy H×W×C → torch C×H×W
         ],
         additional_targets={"image0": "image"},
     )  # Apply the same transforms to image0.
@@ -176,13 +176,9 @@ def main():
     )
 
     num_epochs = 3
-    animator = Animator(
-        xlabel="epoch",
-        ylabel="loss",
-        xlim=[0, num_epochs],
-        legend=["discriminator", "generator"],
-        figsize=(5, 3.5),
-    )
+    loss_steps = []
+    discriminator_losses = []
+    generator_losses = []
     timer = Timer()
     with tqdm(
         total=num_epochs * len(loader),
@@ -198,10 +194,9 @@ def main():
             )
 
             def update_loss_curve(progress, window_loss_D, window_loss_G):
-                animator.add(
-                    epoch - 1 + progress,
-                    (window_loss_D, window_loss_G),
-                )
+                loss_steps.append(epoch - 1 + progress)
+                discriminator_losses.append(window_loss_D)
+                generator_losses.append(window_loss_G)
 
             loss_D, loss_G = train_epoch(
                 disc_A,
@@ -234,8 +229,12 @@ def main():
 
     torch.save(gen_A.state_dict(), CYCLEGAN_OUT_DIR / "gen_black.pth")
     torch.save(gen_B.state_dict(), CYCLEGAN_OUT_DIR / "gen_blond.pth")
-    animator.fig.savefig(CYCLEGAN_OUT_DIR / "loss_curves.png", dpi=300)
-    plt.close(animator.fig)
+    save_loss_curves(
+        loss_steps,
+        discriminator_losses,
+        generator_losses,
+        CYCLEGAN_OUT_DIR / "loss_curves.png",
+    )
 
 
 if __name__ == "__main__":

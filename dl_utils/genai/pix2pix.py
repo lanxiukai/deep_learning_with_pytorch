@@ -89,6 +89,9 @@ class CelebAColorizationDataset(Dataset[tuple[Tensor, Tensor]]):
 
     def __getitem__(self, index):
         target = load_rgb_image(self.image_paths[index])
+        # Derive the grayscale input from the color target on the fly so the
+        # pair stays pixel-aligned, then convert back to RGB (replicated
+        # luminance) to match the generator's expected input channels.
         source = ImageOps.grayscale(target).convert("RGB")
         pair = self.transform(
             image=np.array(target),
@@ -134,27 +137,27 @@ class UNetGenerator(nn.Module):
     def __init__(self, input_channels=3, output_channels=3, features=64):
         super().__init__()
         c = features
-        self.down1 = DownBlock(input_channels, c, normalize=False)  # 128
-        self.down2 = DownBlock(c, c * 2)  # 64
-        self.down3 = DownBlock(c * 2, c * 4)  # 32
-        self.down4 = DownBlock(c * 4, c * 8)  # 16
-        self.down5 = DownBlock(c * 8, c * 8)  # 8
-        self.down6 = DownBlock(c * 8, c * 8)  # 4
-        self.down7 = DownBlock(c * 8, c * 8)  # 2
+        self.down1 = DownBlock(input_channels, c, normalize=False)  # (B, 64, 128, 128)
+        self.down2 = DownBlock(c, c * 2)      # (B, 128, 64, 64)
+        self.down3 = DownBlock(c * 2, c * 4)  # (B, 256, 32, 32)
+        self.down4 = DownBlock(c * 4, c * 8)  # (B, 512, 16, 16)
+        self.down5 = DownBlock(c * 8, c * 8)  # (B, 512, 8, 8)
+        self.down6 = DownBlock(c * 8, c * 8)  # (B, 512, 4, 4)
+        self.down7 = DownBlock(c * 8, c * 8)  # (B, 512, 2, 2)
         # PyTorch BatchNorm cannot train on a 1x1 tensor with batch size 1.
-        self.down8 = DownBlock(c * 8, c * 8, normalize=False)  # 1
+        self.down8 = DownBlock(c * 8, c * 8, normalize=False)  # (B, 512, 1, 1)
 
-        self.up1 = UpBlock(c * 8, c * 8, dropout=True)
-        self.up2 = UpBlock(c * 16, c * 8, dropout=True)
-        self.up3 = UpBlock(c * 16, c * 8, dropout=True)
-        self.up4 = UpBlock(c * 16, c * 8)
-        self.up5 = UpBlock(c * 16, c * 4)
-        self.up6 = UpBlock(c * 8, c * 2)
-        self.up7 = UpBlock(c * 4, c)
+        self.up1 = UpBlock(c * 8, c * 8, dropout=True)   # (B, 1024, 2, 2)
+        self.up2 = UpBlock(c * 16, c * 8, dropout=True)  # (B, 1024, 4, 4)
+        self.up3 = UpBlock(c * 16, c * 8, dropout=True)  # (B, 1024, 8, 8)
+        self.up4 = UpBlock(c * 16, c * 8)  # (B, 1024, 16, 16)
+        self.up5 = UpBlock(c * 16, c * 4)  # (B, 512, 32, 32)
+        self.up6 = UpBlock(c * 8, c * 2)   # (B, 256, 64, 64)
+        self.up7 = UpBlock(c * 4, c)       # (B, 128, 128, 128)
         self.final = nn.Sequential(
             nn.ConvTranspose2d(c * 2, output_channels, 4, 2, 1),
             nn.Tanh(),
-        )
+        )                                  # (B, 3, 256, 256)
 
     def forward(self, inputs):
         down1 = self.down1(inputs)
@@ -177,22 +180,14 @@ class UNetGenerator(nn.Module):
 
 
 class ConditionalPatchDiscriminator(nn.Module):
-    """70x70 PatchGAN conditioned on concatenated source/target images."""
+    """70x70 PatchGAN producing a 30x30 prediction map for 256x256 inputs."""
 
     def __init__(self, source_channels=3, target_channels=3, features=64):
         super().__init__()
 
         def block(in_channels, out_channels, stride, normalize=True):
-            layers = [
-                nn.Conv2d(
-                    in_channels,
-                    out_channels,
-                    4,
-                    stride,
-                    1,
-                    bias=not normalize,
-                )
-            ]
+            layers = [nn.Conv2d(in_channels, out_channels, 4, stride, 1,
+                                bias=not normalize)]
             if normalize:
                 layers.append(nn.BatchNorm2d(out_channels))
             layers.append(nn.LeakyReLU(0.2, inplace=True))
@@ -200,11 +195,12 @@ class ConditionalPatchDiscriminator(nn.Module):
 
         c = features
         self.net = nn.Sequential(
-            *block(source_channels + target_channels, c, 2, normalize=False),
-            *block(c, c * 2, 2),
-            *block(c * 2, c * 4, 2),
-            *block(c * 4, c * 8, 1),
-            nn.Conv2d(c * 8, 1, 4, 1, 1),
+            *block(source_channels + target_channels,
+                   c, 2, normalize=False),  # (B, 64, 128, 128)
+            *block(c, c * 2, 2),            # (B, 128, 64, 64)
+            *block(c * 2, c * 4, 2),        # (B, 256, 32, 32)
+            *block(c * 4, c * 8, 1),        # (B, 512, 31, 31)
+            nn.Conv2d(c * 8, 1, 4, 1, 1),   # (B, 1, 30, 30)
         )
 
     def forward(self, source, target):
