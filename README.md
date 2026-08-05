@@ -33,6 +33,10 @@ the PyTorch framework.
 │   ├── 2.0_generative_adversarial_network/
 │   └── 3.0_diffusion_model/
 │
+├── docs/                            # Implementation notes and model guides
+├── environments/                    # Exact, checksummed runtime records
+│   └── d2l/
+│
 ├── tool_scripts/
 │   ├── download_dataset_test.py
 │   ├── plot_fashion_mnist.py
@@ -40,8 +44,7 @@ the PyTorch framework.
 │   ├── sgd_animation.py
 │   └── word_frequency.py
 │
-├── tests/                           # Test suite and one-off verification tools
-│   └── batch_verify_glasses.py      # Historical Vision-LLM label audit
+├── tests/                           # Utility and lesson regression tests
 │
 ├── pyproject.toml
 ├── environment.yml

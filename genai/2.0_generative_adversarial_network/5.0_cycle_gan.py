@@ -18,7 +18,6 @@ Outputs:
 
 Related scripts:
     - 5.1_cycle_gan_evaluation.py evaluates the saved hair-color generators.
-    - 5.2_cycle_gan_glasses.py trains the same architecture for glasses.
 
 Training data — hair-color task:
 Black hair:              48,472 images

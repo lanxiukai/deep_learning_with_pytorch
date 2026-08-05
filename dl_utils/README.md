@@ -47,6 +47,7 @@ dl_utils/
 │   ├── dataset_preparation.py
 │   ├── downloads.py
 │   ├── glasses_label_corrections.json
+│   ├── images.py
 │   └── vision.py
 │
 ├── devices/
@@ -185,16 +186,26 @@ the registry's standard subdirectory layout below a caller-selected root;
 ### dl_utils/data/dataset_preparation.py
 
 Dependencies: csv, filecmp, json, os, shutil, concurrent.futures
-(ThreadPoolExecutor, as_completed), pathlib (Path), PIL (Image), and optional
-kagglehub inside `download_kaggle_dataset`.
+(ThreadPoolExecutor, as_completed), pathlib (Path), PIL (Image),
+dl_utils.data.images (flatten_to_rgb), and optional kagglehub inside
+`download_kaggle_dataset`.
 Public entries: download_kaggle_dataset, prepare_celeba_cyclegan_splits,
 resize_image, build_image_folder_cache, load_corrections,
 ensure_glasses_classification, validate_glasses_classification,
 apply_glasses_label_corrections.
 
+### dl_utils/data/images.py
+
+Dependencies: pathlib (Path), PIL (Image).
+Public entries: flatten_to_rgb, load_rgb_image.
+Both helpers preserve palette and explicit alpha information by compositing
+transparent images onto a caller-selectable solid background before returning
+RGB data.
+
 ### dl_utils/data/vision.py
 
-Dependencies: os, pathlib (Path), typing (TypeAlias), torch, torch.utils.data, torchvision, torchvision.transforms.
+Dependencies: os, pathlib (Path), typing (TypeAlias), torch, torch.utils.data,
+torchvision, torchvision.transforms, dl_utils.data.images (load_rgb_image).
 Public entries: TensorBatch, TensorDataLoader, vision_loaders, image_folder_dataset, image_folder_loader, load_array.
 
 ### dl_utils/devices/__init__.py
@@ -320,33 +331,44 @@ Public entries: none (docstring-only package marker, documents the generative-mo
 
 ### dl_utils/genai/cyclegan.py
 
-Dependencies: os, torch, numpy, torch.nn, PIL.Image, torch.utils.data (Dataset), tqdm, torchvision.utils (save_image).
-Public entries: test, train_epoch, ConvBlock, ResidualBlock, Generator, Block, Discriminator, LoadData, weights_init.
-
-### dl_utils/genai/pix2pix.py
-
-Dependencies: csv, pathlib, albumentations, numpy, torch, PIL, torch.utils.data (Dataset), dl_utils.data.images (load_rgb_image).
-Public entries: build_paired_transform, CelebAColorizationDataset, DownBlock, UpBlock, UNetGenerator, ConditionalPatchDiscriminator, initialize_weights, denormalize.
-
-### dl_utils/genai/sagan_biggan.py
-
-Dependencies: torch, torch.nn.functional, torch (nn), torch.nn.utils (spectral_norm).
-Public entries: SelfAttention, ConditionalBatchNorm2d, GeneratorResidualBlock, ConditionalGenerator, DiscriminatorResidualBlock, ProjectionDiscriminator, truncated_normal, denormalize.
-
-### dl_utils/genai/stylegan2.py
-
-Dependencies: math, random, torch, torch.nn.functional, torch (nn).
-Public entries: PixelNorm, EqualizedLinear, MappingNetwork, ModulatedConv2d, NoiseInjection, StyledConv, ToRGB, SynthesisBlock, StyleGenerator, DiscriminatorResidualBlock, MinibatchStandardDeviation, StyleDiscriminator, denormalize.
+Dependencies: os, matplotlib.pyplot, torch, numpy, torch.nn, torch.utils.data
+(Dataset), tqdm, dl_utils.data.images (load_rgb_image).
+Public entries: save_translation_snapshot, train_epoch, ConvBlock,
+ResidualBlock, Generator, Block, Discriminator, LoadData, weights_init.
 
 ### dl_utils/genai/ddpm.py
 
-Dependencies: math, typing (Union), numpy, torch, einops (rearrange), einops.layers.torch (Rearrange), torch (einsum, nn), torchvision.transforms (CenterCrop, Compose, InterpolationMode, RandomHorizontalFlip, Resize, ToTensor), tqdm.
+Dependencies: math, typing (Union), numpy, torch, einops (rearrange),
+einops.layers.torch (Rearrange), torch (einsum, nn), torchvision.transforms
+(CenterCrop, Compose, InterpolationMode, RandomHorizontalFlip, Resize,
+ToTensor), tqdm, dl_utils.data.images (flatten_to_rgb).
 Public entries (__all__): transforms, DDIMScheduler, UNet.
 
 ### dl_utils/genai/gan.py
 
 Dependencies: torch, torch.nn (as nn).
 Public entries: gradient_penalty, update_D, update_G, Generator, Critic.
+
+### dl_utils/genai/pix2pix.py
+
+Dependencies: __future__ (annotations), csv, pathlib (Path), albumentations,
+albumentations.pytorch (ToTensorV2), numpy, torch, PIL (ImageOps), torch
+(Tensor, nn), torch.utils.data (Dataset), dl_utils.data.images
+(load_rgb_image).
+Public entries: build_paired_transform, CelebAColorizationDataset, DownBlock,
+UpBlock, UNetGenerator, ConditionalPatchDiscriminator, initialize_weights,
+denormalize.
+
+### dl_utils/genai/sagan_biggan.py
+
+Dependencies: torch, torch.nn.functional (as F), torch (nn), torch.nn.utils
+(spectral_norm).
+Public entries: SelfAttention, ConditionalBatchNorm2d, GeneratorResidualBlock, ConditionalGenerator, DiscriminatorResidualBlock, ProjectionDiscriminator, truncated_normal, denormalize.
+
+### dl_utils/genai/stylegan2.py
+
+Dependencies: math, random, torch, torch.nn.functional (as F), torch (nn).
+Public entries: PixelNorm, EqualizedLinear, MappingNetwork, ModulatedConv2d, NoiseInjection, StyledConv, ToRGB, SynthesisBlock, StyleGenerator, DiscriminatorResidualBlock, MinibatchStandardDeviation, StyleDiscriminator, denormalize.
 
 ### dl_utils/genai/vae.py
 
