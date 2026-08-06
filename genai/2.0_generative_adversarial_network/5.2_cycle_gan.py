@@ -18,7 +18,7 @@ Outputs:
     - output/cyclegan/gen_blond.pth: black -> blond generator
 
 Related scripts:
-    - 5.1_cycle_gan_evaluation.py evaluates the saved hair-color generators.
+    - 5.3_cycle_gan_evaluation.py evaluates the saved hair-color generators.
 
 Training data — hair-color task:
 Black hair:              48,472 images

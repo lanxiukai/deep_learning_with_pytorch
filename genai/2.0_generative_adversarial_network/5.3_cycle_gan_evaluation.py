@@ -10,7 +10,7 @@ Data:
 Inputs:
     - output/cyclegan/gen_black.pth: blond -> black generator
     - output/cyclegan/gen_blond.pth: black -> blond generator
-    Run 5.0_cycle_gan.py first to create both checkpoints.
+    Run 5.2_cycle_gan.py first to create both checkpoints.
 
 Outputs:
     output/cyclegan/evaluation/, reset at the start of every run.
@@ -64,7 +64,7 @@ def main():
         missing = ", ".join(str(path) for path in missing_checkpoints)
         raise FileNotFoundError(
             f"CycleGAN checkpoints not found: {missing}. "
-            "Run 5.0_cycle_gan.py first."
+            "Run 5.2_cycle_gan.py first."
         )
 
     transforms = albumentations.Compose(

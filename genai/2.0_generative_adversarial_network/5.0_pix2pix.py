@@ -1,6 +1,6 @@
 """Train pix2pix for paired CelebA grayscale -> color translation.
 
-Compared with 5.0_cycle_gan.py:
+Compared with 5.2_cycle_gan.py:
     - Each grayscale/RGB pair comes from the same photograph.
     - One U-Net generator replaces two ResNet generators.
     - D sees (source, target), and G uses GAN + 100 * paired L1 loss.
@@ -12,7 +12,7 @@ PatchGAN, batch size 1, Adam(lr=2e-4, beta1=0.5), and 20 epochs with linear
 learning-rate decay after epoch 10.
 
 Data:
-    data/celeba/{black,blond}, also used by 5.0_cycle_gan.py.  Grayscale inputs
+    data/celeba/{black,blond}, also used by 5.2_cycle_gan.py.  Grayscale inputs
     are derived in memory, so no second dataset copy is required.
 
 Outputs:

@@ -1,10 +1,10 @@
 """Evaluate pix2pix on ten paired CelebA test images.
 
-This mirrors 5.1_cycle_gan_evaluation.py, but every generated image has an
+This mirrors 5.3_cycle_gan_evaluation.py, but every generated image has an
 aligned target that can be inspected directly.
 
 Input:
-    output/pix2pix/pix2pix_generator.pth, created by 6.0_pix2pix.py.
+    output/pix2pix/pix2pix_generator.pth, created by 5.0_pix2pix.py.
 
 Outputs:
     output/pix2pix/evaluation/, reset at the start of every run.
@@ -35,7 +35,7 @@ def main():
     if not GENERATOR_PATH.is_file():
         raise FileNotFoundError(
             f"pix2pix checkpoint not found: {GENERATOR_PATH}. "
-            "Run 6.0_pix2pix.py first."
+            "Run 5.0_pix2pix.py first."
         )
     reset_dir(str(OUT_DIR))
 

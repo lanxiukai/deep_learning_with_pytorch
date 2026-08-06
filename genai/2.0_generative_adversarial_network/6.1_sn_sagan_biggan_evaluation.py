@@ -4,7 +4,7 @@ The two grids use different truncation thresholds to expose BigGAN's
 fidelity/diversity control.  Each row is one CIFAR-10 class.
 
 Input:
-    output/sagan/conditional_generator.pth, created by 7.0.
+    output/sagan/conditional_generator.pth, created by 6.0.
 
 Outputs:
     output/sagan/evaluation/truncation_1.0.png
@@ -38,7 +38,7 @@ def main():
     if not GENERATOR_PATH.is_file():
         raise FileNotFoundError(
             f"SAGAN checkpoint not found: {GENERATOR_PATH}. "
-            "Run 7.0_sn_sagan_biggan.py first."
+            "Run 6.0_sn_sagan_biggan.py first."
         )
     reset_dir(str(OUT_DIR))
     device = try_gpu()

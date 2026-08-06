@@ -1,7 +1,7 @@
 """Qualitatively evaluate a trained compact StyleGAN2 generator.
 
 Input:
-    output/stylegan2/stylegan2_generator.pth, created by 8.0.
+    output/stylegan2/stylegan2_generator.pth, created by 7.0.
 
 Outputs:
     output/stylegan2/evaluation/, reset at the start of every run.
@@ -32,7 +32,7 @@ def main():
     if not GENERATOR_PATH.is_file():
         raise FileNotFoundError(
             f"StyleGAN2 checkpoint not found: {GENERATOR_PATH}. "
-            "Run 8.0_stylegan2.py first."
+            "Run 7.0_stylegan2.py first."
         )
     reset_dir(str(OUT_DIR))
     device = try_gpu()
