@@ -8,7 +8,7 @@ Compared with 5.2_cycle_gan.py:
 
 The reusable dataset and complete model definitions live in
 dl_utils/genai/pix2pix.py.  The configuration uses a 256x256 U-Net, 70x70
-PatchGAN, batch size 1, Adam(lr=2e-4, beta1=0.5), and 20 epochs with linear
+PatchGAN, batch size 8, Adam(lr=2e-4, beta1=0.5), and 20 epochs with linear
 learning-rate decay after epoch 10.
 
 Data:
@@ -16,10 +16,29 @@ Data:
     are derived in memory, so no second dataset copy is required.
 
 Outputs:
-    output/pix2pix/training/epoch_*.png: titled input/generated/target grids
-    output/pix2pix/pix2pix_generator.pth
-    output/pix2pix/loss_curves.png: total D/G, G GAN, and LAMBDA_L1-weighted
-    G L1 losses in one four-panel figure
+    output/pix2pix/training/, reset at the start of every run. The directory
+    contains titled input/generated/target grids for fixed validation pairs.
+    - output/pix2pix/loss_curves.png: total D/G, G GAN, and
+      LAMBDA_L1-weighted G L1 losses in one four-panel figure
+    - output/pix2pix/pix2pix_generator.pth: trained grayscale -> color generator
+
+Related scripts:
+    - 5.1_pix2pix_evaluation.py evaluates the saved colorization generator.
+
+Training data — grayscale-to-color task:
+Black-hair images:       48,472
+Blond-hair images:       29,980
+Available total:         78,452 unique images
+Training split:          63,171 paired images
+Validation split:         7,199 paired images
+Test split:               8,082 paired images
+Samples per epoch:       63,171 aligned grayscale/RGB pairs
+Note: The grayscale source is derived from the same RGB target in memory, so
+each training image contributes one pixel-aligned pair per epoch.
+
+Generator:              54.4 M params
+Discriminator:           2.8 M params
+Total:                  57.2 M params
 """
 
 import matplotlib.pyplot as plt
@@ -54,7 +73,7 @@ BATCH_SIZE = 8
 NUM_WORKERS = 8
 LEARNING_RATE = 2e-4
 LAMBDA_L1 = 100
-LOSS_UPDATES_PER_EPOCH = 20
+LOSS_UPDATES_PER_EPOCH = 1
 
 
 def train_epoch(
