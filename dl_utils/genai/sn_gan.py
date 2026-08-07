@@ -180,148 +180,64 @@ def denormalize(images):
     return images.mul(0.5).add(0.5).clamp(0, 1)
 
 
-class _SpectralNormScratch:
-    """Forward pre-hook that computes a spectrally normalized weight.
+def init_spectral_norm_state(weight_orig, eps=1e-12):
+    """Initialize unit vectors for the minimal spectral-normalization lesson.
 
-    The original parameter is kept as ``<name>_orig``. Two one-dimensional
-    buffers, ``<name>_u`` and ``<name>_v``, approximate the leading left and
-    right singular vectors of the flattened weight matrix.
+    This helper accepts only a two-dimensional ``Linear`` weight and belongs
+    to a pure-function teaching example. It is not a replacement for
+    :func:`torch.nn.utils.spectral_norm`. Callers must retain the returned
+    ``u`` and ``v`` across training steps.
     """
-
-    def __init__(self, name, n_power_iterations, dim, eps):
-        if n_power_iterations <= 0:
-            raise ValueError(
-                "n_power_iterations must be positive, "
-                f"but got {n_power_iterations}"
-            )
-        self.name = name
-        self.n_power_iterations = n_power_iterations
-        self.dim = dim
-        self.eps = eps
-
-    def _reshape_weight_to_matrix(self, weight):
-        """Move the output dimension first, then flatten all input axes."""
-        if self.dim != 0:
-            axes = [self.dim]
-            axes.extend(axis for axis in range(weight.ndim) if axis != self.dim)
-            weight = weight.permute(*axes)
-        return weight.reshape(weight.shape[0], -1)
-
-    def _normalize(self, vector):
-        """Return a unit vector while avoiding division by a tiny norm."""
-        norm = torch.linalg.vector_norm(vector).clamp_min(self.eps)
-        return vector / norm
-
-    def _compute_weight(self, module):
-        weight_orig = getattr(module, f"{self.name}_orig")
-        u = getattr(module, f"{self.name}_u")
-        v = getattr(module, f"{self.name}_v")
-        weight_matrix = self._reshape_weight_to_matrix(weight_orig)
-
-        if module.training:
-            # Power iteration alternates between the two singular-vector
-            # equations: v <- normalize(W^T u), u <- normalize(W v).
-            # These estimates are buffers, not trainable parameters.
-            with torch.no_grad():
-                for _ in range(self.n_power_iterations):
-                    v.copy_(self._normalize(torch.mv(weight_matrix.t(), u)))
-                    u.copy_(self._normalize(torch.mv(weight_matrix, v)))
-
-            # A discriminator is often called for both real and fake samples
-            # before one backward pass. Clones prevent the second call's
-            # in-place power iteration from invalidating the first graph.
-            u_for_sigma = u.clone()
-            v_for_sigma = v.clone()
-        else:
-            u_for_sigma = u
-            v_for_sigma = v
-
-        # For the leading singular vectors, sigma = u^T W v approximates the
-        # largest singular value. Division makes the weight's spectral norm
-        # approximately one while gradients still flow to weight_orig.
-        sigma = torch.dot(
-            u_for_sigma,
-            torch.mv(weight_matrix, v_for_sigma),
+    if weight_orig.ndim != 2:
+        raise ValueError(
+            "init_spectral_norm_state requires a two-dimensional Linear "
+            f"weight, but got {weight_orig.ndim} dimensions"
         )
-        return weight_orig / sigma
 
-    def __call__(self, module, inputs):
-        """Replace the public weight immediately before every forward call."""
-        setattr(module, self.name, self._compute_weight(module))
-
-    def apply(self, module):
-        """Move the parameter, initialize power iteration, and install hook."""
-        for hook in module._forward_pre_hooks.values():
-            if (
-                isinstance(hook, _SpectralNormScratch)
-                and hook.name == self.name
-            ):
-                raise RuntimeError(
-                    "Cannot register spectral_norm_scratch twice for "
-                    f"parameter {self.name!r}"
-                )
-
-        weight = module._parameters.get(self.name)
-        if weight is None:
-            raise ValueError(
-                "spectral_norm_scratch requires an initialized parameter "
-                f"named {self.name!r}"
-            )
-        if isinstance(weight, nn.parameter.UninitializedParameter):
-            raise ValueError(
-                "spectral_norm_scratch does not support uninitialized "
-                "parameters; run a dummy forward first"
-            )
-
-        with torch.no_grad():
-            weight_matrix = self._reshape_weight_to_matrix(weight)
-            height, width = weight_matrix.shape
-            u = self._normalize(weight.new_empty(height).normal_())
-            v = self._normalize(weight.new_empty(width).normal_())
-
-        # Optimizers should update the unconstrained weight_orig. The public
-        # weight becomes an ordinary Tensor recomputed by the pre-hook.
-        delattr(module, self.name)
-        module.register_parameter(f"{self.name}_orig", weight)
-        setattr(module, self.name, weight.detach())
-        module.register_buffer(f"{self.name}_u", u)
-        module.register_buffer(f"{self.name}_v", v)
-        module.register_forward_pre_hook(self)
+    with torch.no_grad():
+        height, width = weight_orig.shape
+        u = F.normalize(weight_orig.new_empty(height).normal_(), dim=0, eps=eps)
+        v = F.normalize(weight_orig.new_empty(width).normal_(), dim=0, eps=eps)
+    return u, v
 
 
-def spectral_norm_scratch(
-    module,
-    name="weight",
-    n_power_iterations=1,
+def spectral_norm_scratch_minimal(
+    weight_orig,
+    u,
+    v,
+    training,
     eps=1e-12,
-    dim=None,
 ):
-    """Apply spectral normalization using an explicit power-iteration hook.
+    """Run one teaching-only power iteration for a 2D ``Linear`` weight.
 
-    This teaching implementation mirrors the commonly used
-    :func:`torch.nn.utils.spectral_norm` interface and can replace it for the
-    ``Linear``, ``Conv2d``, and ``Embedding`` layers in this module. It skips
-    legacy state-dict migration and hook-removal utilities.
-
-    Args:
-        module: Module that owns the parameter to normalize.
-        name: Name of the weight parameter.
-        n_power_iterations: Power-iteration steps performed per training call.
-        eps: Lower bound used when normalizing the singular-vector estimates.
-        dim: Weight axis representing outputs. Defaults to 1 for transposed
-            convolutions and 0 for other modules.
+    This is a two-dimensional, pure-function teaching implementation, not a
+    replacement for :func:`torch.nn.utils.spectral_norm`. Callers must retain
+    the returned ``u`` and ``v`` across training steps; this function owns no
+    persistent state.
 
     Returns:
-        The same module, modified in place with a forward pre-hook.
+        ``(normalized_weight, next_u, next_v, sigma)``.
     """
-    if dim is None:
-        transposed_convolutions = (
-            nn.ConvTranspose1d,
-            nn.ConvTranspose2d,
-            nn.ConvTranspose3d,
+    if weight_orig.ndim != 2:
+        raise ValueError(
+            "spectral_norm_scratch_minimal requires a two-dimensional Linear "
+            f"weight, but got {weight_orig.ndim} dimensions"
         )
-        dim = 1 if isinstance(module, transposed_convolutions) else 0
 
-    hook = _SpectralNormScratch(name, n_power_iterations, dim, eps)
-    hook.apply(module)
-    return module
+    if training:
+        # Singular-vector state follows the weight without joining autograd.
+        with torch.no_grad():
+            next_v = F.normalize(
+                torch.mv(weight_orig.t(), u.detach()), dim=0, eps=eps
+            )
+            next_u = F.normalize(
+                torch.mv(weight_orig, next_v), dim=0, eps=eps
+            )
+    else:
+        next_u = u.detach()
+        next_v = v.detach()
+
+    # Recompute sigma with grad enabled so weight_orig receives gradients.
+    sigma = torch.dot(next_u, torch.mv(weight_orig, next_v))
+    normalized_weight = weight_orig / sigma
+    return normalized_weight, next_u, next_v, sigma

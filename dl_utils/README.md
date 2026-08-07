@@ -386,7 +386,7 @@ Dependencies: torch, torch.nn.functional (as F), torch (nn), torch.nn.utils
 Public entries: SNGeneratorResidualBlock, SNDiscriminatorResidualBlock,
 CIFAR10_CLASS_NAMES, SNGenerator, ProjectionSNDiscriminator,
 discriminator_hinge_loss, generator_hinge_loss, denormalize,
-spectral_norm_scratch.
+init_spectral_norm_state, spectral_norm_scratch_minimal.
 
 ### dl_utils/genai/stylegan_common.py
 

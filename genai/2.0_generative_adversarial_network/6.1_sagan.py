@@ -56,7 +56,7 @@ Z_DIM = 120
 BASE_CHANNELS = 32
 CONDITION_DIM = 128
 LEARNING_RATE = 2e-4
-LOSS_UPDATES_PER_EPOCH = 1
+SAMPLE_EVERY_EPOCHS = 5
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
@@ -73,31 +73,18 @@ def train_epoch(
     opt_g,
     opt_d,
     device,
-    loss_callback=None,
-    loss_updates_per_epoch=LOSS_UPDATES_PER_EPOCH,
     progress_bar=None,
 ):
-    """Train one epoch and optionally report windowed losses and progress."""
-    if loss_updates_per_epoch <= 0:
-        raise ValueError("loss_updates_per_epoch must be positive.")
-
+    """Train one epoch and report batch progress."""
     loop = (
         loader
         if progress_bar is not None
         else tqdm(loader, leave=True, mininterval=1.0)
     )
     loss_sums = torch.zeros(2, device=device)
-    window_loss_sums = [0.0] * 2
     num_examples = 0
-    window_examples = 0
-    num_batches = len(loader)
-    update_interval = max(
-        1,
-        (num_batches + loss_updates_per_epoch - 1)
-        // loss_updates_per_epoch,
-    )
 
-    for batch_index, (real, labels) in enumerate(loop, start=1):
+    for real, labels in loop:
         real = real.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         batch_size = real.shape[0]
@@ -133,22 +120,6 @@ def train_epoch(
         num_examples += batch_size
         batch_loss_values = batch_losses.tolist()
         loss_d_value, loss_g_value = batch_loss_values
-
-        if loss_callback is not None:
-            for index, loss_value in enumerate(batch_loss_values):
-                window_loss_sums[index] += loss_value * batch_size
-            window_examples += batch_size
-            if (
-                batch_index % update_interval == 0
-                or batch_index == num_batches
-            ):
-                window_losses = [
-                    loss_sum / window_examples
-                    for loss_sum in window_loss_sums
-                ]
-                loss_callback(batch_index / num_batches, *window_losses)
-                window_loss_sums = [0.0] * 2
-                window_examples = 0
 
         if progress_bar is None:
             loop.set_postfix(
@@ -239,11 +210,6 @@ def main():
                 refresh=False,
             )
 
-            def update_loss_curve(progress, window_loss_d, window_loss_g):
-                loss_steps.append(epoch - 1 + progress)
-                discriminator_losses.append(window_loss_d)
-                generator_losses.append(window_loss_g)
-
             loss_d, loss_g = train_epoch(
                 generator,
                 discriminator,
@@ -251,18 +217,20 @@ def main():
                 opt_g,
                 opt_d,
                 device,
-                loss_callback=update_loss_curve,
-                loss_updates_per_epoch=LOSS_UPDATES_PER_EPOCH,
                 progress_bar=progress_bar,
             )
-            save_training_samples(
-                generator,
-                fixed_noise,
-                fixed_labels,
-                TRAINING_DIR / f"epoch_{epoch:03d}.png",
-                class_names=CIFAR10_CLASS_NAMES[:NUM_CLASSES],
-                title=f"SAGAN fixed class samples - epoch {epoch:03d}",
-            )
+            loss_steps.append(epoch)
+            discriminator_losses.append(loss_d)
+            generator_losses.append(loss_g)
+            if epoch == 1 or epoch % SAMPLE_EVERY_EPOCHS == 0:
+                save_training_samples(
+                    generator,
+                    fixed_noise,
+                    fixed_labels,
+                    TRAINING_DIR / f"epoch_{epoch:03d}.png",
+                    class_names=CIFAR10_CLASS_NAMES[:NUM_CLASSES],
+                    title=f"SAGAN fixed class samples - epoch {epoch:03d}",
+                )
             progress_bar.write(
                 f"epoch {epoch:03d}: D={loss_d:.3f}, G={loss_g:.3f}, "
                 f"gamma_G={generator.attention.gamma.item():.3f}, "
