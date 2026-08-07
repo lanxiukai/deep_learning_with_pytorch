@@ -30,7 +30,7 @@ from dl_utils.genai.sn_gan import (
     generator_hinge_loss,
 )
 from dl_utils.plot.figures import save_loss_panels
-from dl_utils.plot.images import save_image_row_grid
+from dl_utils.plot.images import save_training_samples
 from dl_utils.training.timing import Timer, format_epoch_timing
 
 
@@ -159,32 +159,6 @@ def train_epoch(
     return tuple(value / num_examples for value in loss_sums.tolist())
 
 
-def save_training_samples(generator, noise, labels, output_path, epoch):
-    """Save titled fixed class samples for visual training monitoring."""
-    was_training = generator.training
-    generator.eval()
-    with torch.inference_mode():
-        samples = generator(noise, labels).cpu()
-    if was_training:
-        generator.train()
-
-    cpu_labels = labels.cpu()
-    image_rows = [
-        samples[cpu_labels == class_index]
-        for class_index in range(NUM_CLASSES)
-    ]
-    save_image_row_grid(
-        image_rows,
-        [name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]],
-        output_path,
-        title=f"SAGAN fixed class samples - epoch {epoch:03d}",
-        column_labels=[
-            f"Sample {index + 1}" for index in range(SAMPLES_PER_CLASS)
-        ],
-        dpi=200,
-    )
-
-
 def count_parameters(module):
     """Count trainable parameters."""
     return sum(parameter.numel() for parameter in module.parameters())
@@ -288,7 +262,8 @@ def main():
                 fixed_noise,
                 fixed_labels,
                 TRAINING_DIR / f"epoch_{epoch:03d}.png",
-                epoch,
+                class_names=CIFAR10_CLASS_NAMES[:NUM_CLASSES],
+                title=f"SAGAN fixed class samples - epoch {epoch:03d}",
             )
             progress_bar.write(
                 f"epoch {epoch:03d}: D={loss_d:.3f}, G={loss_g:.3f}, "

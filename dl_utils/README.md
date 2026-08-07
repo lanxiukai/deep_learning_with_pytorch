@@ -446,9 +446,12 @@ writes each group on its own independent-y subplot.
 ### dl_utils/plot/images.py
 
 Dependencies: math, os, pathlib (Path), typing (Any), dl_utils.plot._backend, numpy, torch, torchvision, matplotlib.pyplot.
-Public entries: show_images, save_grid, save_image_row_grid, vae_sample_grid.
+Public entries: show_images, save_grid, save_image_row_grid,
+save_training_samples, vae_sample_grid.
 `save_image_row_grid` supports an optional figure title, column labels, and
 output DPI while retaining labelled image rows.
+`save_training_samples` preserves the generator's current training mode while
+rendering fixed class-conditional samples as labelled image rows.
 
 ### dl_utils/training/__init__.py
 

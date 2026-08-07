@@ -156,6 +156,44 @@ def save_image_row_grid(
     _plt.close(fig)
 
 
+def save_training_samples(
+    generator,
+    noise,
+    labels,
+    output_path,
+    *,
+    class_names,
+    title,
+    dpi=200,
+) -> None:
+    """Generate and save fixed class-conditional samples grouped by class."""
+    class_names = tuple(class_names)
+    was_training = generator.training
+    generator.eval()
+    try:
+        with torch.inference_mode():
+            samples = generator(noise, labels).cpu()
+    finally:
+        generator.train(was_training)
+
+    cpu_labels = labels.cpu()
+    image_rows = [
+        samples[cpu_labels == class_index]
+        for class_index in range(len(class_names))
+    ]
+    save_image_row_grid(
+        image_rows,
+        [name.title() for name in class_names],
+        output_path,
+        title=title,
+        column_labels=[
+            f"Sample {index + 1}"
+            for index in range(len(image_rows[0]) if image_rows else 0)
+        ],
+        dpi=dpi,
+    )
+
+
 def vae_sample_grid(
     decoder: torch.nn.Module,
     latent_dims: int,
