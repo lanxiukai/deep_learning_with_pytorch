@@ -21,8 +21,13 @@ Outputs:
     output/stylegan2/stylegan2_generator.pth: EMA generator checkpoint
     output/stylegan2/loss_curves.png: objectives and regularizers
 
-Training images: 50,000 (49,984 used per epoch with drop_last=True)
-Generator: 3.28 M params; discriminator: 3.48 M; total: 6.77 M
+Training data — CIFAR-10:
+Training images:         50,000
+Samples per epoch:       49,984 (1,562 full batches; drop_last=True)
+
+Generator:                3.28 M params
+Discriminator:            3.48 M params
+Total:                    6.77 M params
 """
 
 import math
@@ -333,11 +338,6 @@ def save_training_samples(generator, fixed_z, output_path, epoch):
     )
 
 
-def count_parameters(module):
-    """Count trainable parameters."""
-    return sum(parameter.numel() for parameter in module.parameters())
-
-
 def main():
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
@@ -386,11 +386,6 @@ def main():
         discriminator.parameters(),
         lr=LEARNING_RATE * d_ratio,
         betas=(0.0, 0.99**d_ratio),
-    )
-
-    print(
-        f"Generator parameters: {count_parameters(generator):,}; "
-        f"discriminator parameters: {count_parameters(discriminator):,}."
     )
 
     fixed_z = torch.randn(64, Z_DIM, device=device)

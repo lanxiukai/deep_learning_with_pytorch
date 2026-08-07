@@ -13,6 +13,16 @@ Outputs:
     output/progan/training/*.png: fixed-z samples labelled by stage and alpha
     output/progan/progan_generator.pth: final 32x32 generator checkpoint
     output/progan/loss_curves.png: independent objective and penalty panels
+
+Training data — CIFAR-10:
+Training images:         50,000
+Samples per epoch:       49,920 at 4x4/8x8; 49,984 at 16x16/32x32
+Note: Each phase lasts 12 epochs. The 4x4 stage has one stabilization phase;
+later stages have one fade-in and one stabilization phase each.
+
+Generator:                2.85 M params
+Discriminator:            3.38 M params
+Total:                    6.23 M params
 """
 
 from dataclasses import asdict, dataclass
@@ -366,11 +376,6 @@ def save_training_samples(
     )
 
 
-def count_parameters(module):
-    """Count trainable parameters."""
-    return sum(parameter.numel() for parameter in module.parameters())
-
-
 def main():
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
@@ -405,11 +410,6 @@ def main():
         lr=LEARNING_RATE,
         betas=(0.0, 0.99),
     )
-    print(
-        f"Generator parameters: {count_parameters(generator):,}; "
-        f"discriminator parameters: {count_parameters(discriminator):,}."
-    )
-
     fixed_z = torch.randn(64, Z_DIM, device=device)
     loss_steps = []
     metric_history = {name: [] for name in METRIC_NAMES}

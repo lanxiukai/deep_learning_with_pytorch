@@ -104,6 +104,7 @@ dl_utils/
     ├── __init__.py
     ├── metrics.py
     ├── optimization.py
+    ├── parameters.py
     └── timing.py
 ```
 
@@ -468,6 +469,13 @@ Public entries: NumericScalar, MetricHistory, Accumulator, accuracy, evaluate_ac
 
 Dependencies: torch, torch.nn.
 Public entries: sgd, grad_clipping.
+
+### dl_utils/training/parameters.py
+
+Dependencies: torch.nn.
+Public entries (__all__): count_parameters.
+`count_parameters` counts all model parameters by default, excludes buffers,
+and accepts `trainable_only=True` to count only gradient-enabled parameters.
 
 ### dl_utils/training/timing.py
 

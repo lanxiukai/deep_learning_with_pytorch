@@ -115,16 +115,17 @@ class SNGenerator(nn.Module):
         self.output = spectral_norm(nn.Conv2d(base_channels, 3, 3, padding=1))
 
     def forward(self, noise, labels):
-        condition = self.class_embedding(labels)
-        hidden = self.input(torch.cat([noise, condition], dim=1))
-        hidden = hidden.view(noise.shape[0], -1, 4, 4)
-        hidden = self.block1(hidden)
-        hidden = self.block2(hidden)
-        hidden = self.attention(hidden)
-        hidden = self.block3(hidden)
-        hidden = self.block4(hidden)
+        # noise shape: (B, 120), labels shape: (B,)
+        condition = self.class_embedding(labels)  # (B, 128)
+        hidden = self.input(torch.cat([noise, condition], dim=1))  # (B, 248) -> (B, 4096)
+        hidden = hidden.view(noise.shape[0], -1, 4, 4)  # (B, 256, 4, 4)
+        hidden = self.block1(hidden)     # (B, 128, 8, 8)
+        hidden = self.block2(hidden)     # (B, 64, 16, 16)
+        hidden = self.attention(hidden)  # (B, 64, 16, 16)
+        hidden = self.block3(hidden)     # (B, 32, 32, 32)
+        hidden = self.block4(hidden)     # (B, 32, 64, 64)
         hidden = F.relu(self.output_norm(hidden), inplace=True)
-        return torch.tanh(self.output(hidden))
+        return torch.tanh(self.output(hidden))  # (B, 3, 64, 64)
 
 
 class ProjectionSNDiscriminator(nn.Module):
@@ -150,16 +151,18 @@ class ProjectionSNDiscriminator(nn.Module):
         )
 
     def forward(self, images, labels):
-        hidden = self.block1(images)
-        hidden = self.block2(hidden)
-        hidden = self.attention(hidden)
-        hidden = self.block3(hidden)
-        hidden = self.block4(hidden)
-        hidden = F.relu(hidden, inplace=True).sum(dim=(2, 3))
+        # images shape: (B, 3, 64, 64)，labels shape: (B,)
+        hidden = self.block1(images)     # (B, 32, 32, 32)
+        hidden = self.block2(hidden)     # (B, 64, 16, 16)
+        hidden = self.attention(hidden)  # (B, 64, 16, 16)
+        hidden = self.block3(hidden)     # (B, 128, 8, 8)
+        hidden = self.block4(hidden)     # (B, 256, 4, 4)
+        hidden = F.relu(hidden, inplace=True).sum(dim=(2, 3))  # (B, 256)
 
         unconditional = self.output(hidden).squeeze(1)
+        # Projection discriminator: D(x, y) = f(h(x)) + <e(y), h(x)>.
         projection = (self.class_embedding(labels) * hidden).sum(dim=1)
-        return unconditional + projection
+        return unconditional + projection  # (B,)
 
 
 def discriminator_hinge_loss(real_scores, fake_scores):

@@ -17,6 +17,14 @@ Outputs:
     output/sn_gan/training/epoch_*.png: titled fixed class samples
     output/sn_gan/generator.pth
     output/sn_gan/loss_curves.png: separate D and G loss panels
+
+Training data — CIFAR-10:
+Training images:         50,000
+Samples per epoch:       49,984 (781 full batches; drop_last=True)
+
+Generator:                1.67 M params
+Discriminator:            1.22 M params
+Total:                    2.89 M params
 """
 
 import torch
@@ -95,6 +103,7 @@ def train_epoch(
     )
 
     for batch_index, (real, labels) in enumerate(loop, start=1):
+        # real shape: (B, 3, H, W), labels shape: (B,)
         real = real.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         batch_size = real.shape[0]
@@ -113,17 +122,18 @@ def train_epoch(
             NUM_CLASSES, (batch_size,), device=device
         )
         noise = torch.randn(batch_size, Z_DIM, device=device)
+
         discriminator.requires_grad_(False)
-        try:
-            opt_g.zero_grad(set_to_none=True)
-            fake = generator(noise, sampled_labels)
-            loss_g = generator_hinge_loss(
-                discriminator(fake, sampled_labels)
-            )
-            loss_g.backward()
-            opt_g.step()
-        finally:
-            discriminator.requires_grad_(True)
+
+        opt_g.zero_grad(set_to_none=True)
+        fake = generator(noise, sampled_labels)
+        loss_g = generator_hinge_loss(
+            discriminator(fake, sampled_labels)
+        )
+        loss_g.backward()
+        opt_g.step()
+
+        discriminator.requires_grad_(True)
 
         batch_losses = torch.stack([loss_d, loss_g]).detach()
         loss_sums += batch_losses * batch_size
@@ -162,11 +172,6 @@ def train_epoch(
             progress_bar.update(1)
 
     return tuple(value / num_examples for value in loss_sums.tolist())
-
-
-def count_parameters(module):
-    """Count trainable parameters."""
-    return sum(parameter.numel() for parameter in module.parameters())
 
 
 def main():
@@ -216,11 +221,6 @@ def main():
         discriminator.parameters(),
         lr=LEARNING_RATE,
         betas=(0.0, 0.9),
-    )
-
-    print(
-        f"Generator parameters: {count_parameters(generator):,}; "
-        f"discriminator parameters: {count_parameters(discriminator):,}."
     )
 
     fixed_labels = torch.arange(NUM_CLASSES, device=device).repeat_interleave(

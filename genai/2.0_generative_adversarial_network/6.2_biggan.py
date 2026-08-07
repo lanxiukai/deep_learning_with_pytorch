@@ -19,6 +19,14 @@ Outputs:
     output/biggan/training/epoch_*.png: titled fixed class samples
     output/biggan/generator.pth
     output/biggan/loss_curves.png: separate total and component panels
+
+Training data — CIFAR-10:
+Training images:         50,000
+Samples per epoch:       49,984 (781 full batches; drop_last=True)
+
+Generator:                0.98 M params
+Discriminator:            1.23 M params
+Total:                    2.21 M params
 """
 
 import torch
@@ -186,11 +194,6 @@ def train_epoch(
     return tuple(value / num_examples for value in loss_sums.tolist())
 
 
-def count_parameters(module):
-    """Count trainable parameters."""
-    return sum(parameter.numel() for parameter in module.parameters())
-
-
 def main():
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
@@ -239,11 +242,6 @@ def main():
         discriminator.parameters(),
         lr=DISCRIMINATOR_LR,
         betas=(0.0, 0.999),
-    )
-
-    print(
-        f"Generator parameters: {count_parameters(generator):,}; "
-        f"discriminator parameters: {count_parameters(discriminator):,}."
     )
 
     fixed_labels = torch.arange(NUM_CLASSES, device=device).repeat_interleave(
