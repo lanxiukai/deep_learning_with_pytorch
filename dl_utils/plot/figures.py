@@ -339,6 +339,80 @@ def save_loss_curves(
     _plt.close(fig)
 
 
+def save_loss_panels(
+    x: Sequence[float],
+    panels: Mapping[str, Mapping[str, Sequence[float]]],
+    path: str | PathLike[str],
+    *,
+    xlabel: str = "epoch",
+    ylabel: str = "loss",
+) -> None:
+    """Save related loss groups on vertically stacked independent-y panels.
+
+    ``panels`` maps each subplot title to one or more labelled curves. Every
+    curve must have the same number of values as ``x``.
+    """
+    x_values = list(map(float, x))
+    if not x_values:
+        raise ValueError("save_loss_panels: x is empty.")
+    if not panels:
+        raise ValueError("save_loss_panels: panels are empty.")
+
+    normalized_panels = {}
+    for title, curves in panels.items():
+        if not curves:
+            raise ValueError(
+                f"save_loss_panels: panel '{title}' has no curves."
+            )
+        normalized_curves = {}
+        for label, values in curves.items():
+            normalized_values = list(map(float, values))
+            if len(normalized_values) != len(x_values):
+                raise ValueError(
+                    f"save_loss_panels: curve '{label}' in panel "
+                    f"'{title}' does not match x."
+                )
+            normalized_curves[label] = normalized_values
+        normalized_panels[title] = normalized_curves
+
+    path_str = os.fspath(path)
+    parent = os.path.dirname(path_str)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    num_panels = len(normalized_panels)
+    fig, axes = _plt.subplots(
+        num_panels,
+        1,
+        figsize=(7, 3 * num_panels),
+        sharex=True,
+        sharey=False,
+        squeeze=False,
+    )
+    axes = axes[:, 0]
+    colors = ("tab:blue", "tab:orange", "tab:green", "tab:red")
+    line_styles = ("-", "--", "-.", ":")
+
+    for axis, (title, curves) in zip(axes, normalized_panels.items()):
+        for index, (label, values) in enumerate(curves.items()):
+            axis.plot(
+                x_values,
+                values,
+                color=colors[index % len(colors)],
+                linestyle=line_styles[index % len(line_styles)],
+                label=label,
+            )
+        axis.set_title(title)
+        axis.set_ylabel(ylabel)
+        axis.legend()
+        axis.grid(alpha=0.3)
+
+    axes[-1].set_xlabel(xlabel)
+    fig.tight_layout()
+    fig.savefig(path_str, dpi=300)
+    _plt.close(fig)
+
+
 def maybe_save_curve(
     x: Sequence[float],
     metrics: MetricHistory,

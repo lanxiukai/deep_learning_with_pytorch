@@ -77,21 +77,41 @@ def save_grid(
     _plt.close()
 
 
-def save_image_row_grid(image_rows, row_labels, output_path) -> None:
-    """Save labelled rows of ``C x H x W`` tensors normalized to [-1, 1]."""
+def save_image_row_grid(
+    image_rows,
+    row_labels,
+    output_path,
+    *,
+    title=None,
+    column_labels=None,
+    dpi=300,
+) -> None:
+    """Save a titled row grid of ``C x H x W`` tensors in [-1, 1]."""
     if len(image_rows) == 0 or len(image_rows[0]) == 0:
-        raise ValueError("image_rows must contain at least one image")
+        raise ValueError("image_rows must contain at least one image.")
     if len(image_rows) != len(row_labels):
-        raise ValueError("image_rows and row_labels must have the same length")
+        raise ValueError(
+            "image_rows and row_labels must have the same length."
+        )
 
     num_columns = len(image_rows[0])
     if any(len(images) != num_columns for images in image_rows):
-        raise ValueError("all image rows must have the same length")
+        raise ValueError("All image rows must have the same length.")
+    if column_labels is not None and len(column_labels) != num_columns:
+        raise ValueError(
+            "column_labels must have one label for every image column."
+        )
 
+    has_decorations = title is not None or column_labels is not None
+    figure_height = (
+        2.0 * len(image_rows) + 0.5
+        if has_decorations
+        else 2.1 * len(image_rows)
+    )
     fig, axes = _plt.subplots(
         len(image_rows),
         num_columns,
-        figsize=(1.8 * num_columns, 2.1 * len(image_rows)),
+        figsize=(1.8 * num_columns, figure_height),
         squeeze=False,
     )
     for row_index, (images, label) in enumerate(zip(image_rows, row_labels)):
@@ -115,9 +135,24 @@ def save_image_row_grid(image_rows, row_labels, output_path) -> None:
             axes[row_index, column_index].imshow(display_image)
             axes[row_index, column_index].set_xticks([])
             axes[row_index, column_index].set_yticks([])
+            if has_decorations:
+                for spine in axes[row_index, column_index].spines.values():
+                    spine.set_visible(False)
+            if row_index == 0 and column_labels is not None:
+                axes[row_index, column_index].set_title(
+                    column_labels[column_index],
+                    fontsize=10,
+                )
 
-    fig.subplots_adjust(wspace=0.02, hspace=0.08)
-    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    if title is not None:
+        fig.suptitle(title, fontsize=14)
+    if has_decorations:
+        top = 0.94 if title is not None else 0.98
+        fig.tight_layout(rect=(0, 0, 1, top), pad=0.6)
+        fig.subplots_adjust(wspace=0.03, hspace=0.12)
+    else:
+        fig.subplots_adjust(wspace=0.02, hspace=0.08)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     _plt.close(fig)
 
 

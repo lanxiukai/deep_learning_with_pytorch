@@ -81,11 +81,13 @@ dl_utils/
 │
 ├── genai/
 │   ├── __init__.py
+│   ├── biggan.py
 │   ├── cyclegan.py
 │   ├── ddpm.py
 │   ├── gan.py
 │   ├── pix2pix.py
-│   ├── sagan_biggan.py
+│   ├── sagan.py
+│   ├── sn_gan.py
 │   ├── stylegan2.py
 │   └── vae.py
 │
@@ -329,6 +331,14 @@ Runnable project scripts use this helper to anchor `data/` and `output/` paths i
 Dependencies: none.
 Public entries: none (docstring-only package marker, documents the generative-model submodules).
 
+### dl_utils/genai/biggan.py
+
+Dependencies: torch, torch.nn.functional (as F), torch (nn), torch.nn.utils
+(spectral_norm), dl_utils.genai.sagan (SAGANDiscriminator, SelfAttention).
+Public entries: ConditionalBatchNorm2d, BigGANGeneratorResidualBlock,
+CompactBigGANGenerator, BigGANDiscriminator,
+modified_orthogonal_regularization, truncated_normal.
+
 ### dl_utils/genai/cyclegan.py
 
 Dependencies: os, matplotlib.pyplot, torch, numpy, torch.nn, torch.utils.data
@@ -359,11 +369,19 @@ Public entries: build_paired_transform, CelebAColorizationDataset, DownBlock,
 UpBlock, UNetGenerator, ConditionalPatchDiscriminator, initialize_weights,
 denormalize.
 
-### dl_utils/genai/sagan_biggan.py
+### dl_utils/genai/sagan.py
+
+Dependencies: torch, torch (nn), torch.nn.utils (spectral_norm),
+dl_utils.genai.sn_gan (ProjectionSNDiscriminator, SNGenerator).
+Public entries: SelfAttention, SAGANGenerator, SAGANDiscriminator.
+
+### dl_utils/genai/sn_gan.py
 
 Dependencies: torch, torch.nn.functional (as F), torch (nn), torch.nn.utils
 (spectral_norm).
-Public entries: SelfAttention, ConditionalBatchNorm2d, GeneratorResidualBlock, ConditionalGenerator, DiscriminatorResidualBlock, ProjectionDiscriminator, truncated_normal, denormalize.
+Public entries: SNGeneratorResidualBlock, SNDiscriminatorResidualBlock,
+CIFAR10_CLASS_NAMES, SNGenerator, ProjectionSNDiscriminator,
+discriminator_hinge_loss, generator_hinge_loss, denormalize.
 
 ### dl_utils/genai/stylegan2.py
 
@@ -388,15 +406,19 @@ Public entries: none.
 ### dl_utils/plot/figures.py
 
 Dependencies: csv, os, collections.abc (Mapping, Sequence), os (PathLike), typing (Any), dl_utils.plot._backend, matplotlib_inline.backend_inline, matplotlib.pyplot, dl_utils.training.metrics (MetricHistory, as_list, has_any_finite).
-Public entries: use_svg_display, set_figsize, set_axes, plot, annotate, Animator, heatmap, trace2d, seq_len_hist, save_curve, save_loss_curves, maybe_save_curve.
+Public entries: use_svg_display, set_figsize, set_axes, plot, annotate, Animator, heatmap, trace2d, seq_len_hist, save_curve, save_loss_curves, save_loss_panels, maybe_save_curve.
 `save_loss_curves` writes total discriminator loss, total generator loss,
 generator adversarial components, and weighted reconstruction components as
 four vertically stacked plots with independent y-axes.
+`save_loss_panels` accepts an ordered mapping of arbitrary loss groups and
+writes each group on its own independent-y subplot.
 
 ### dl_utils/plot/images.py
 
 Dependencies: math, os, pathlib (Path), typing (Any), dl_utils.plot._backend, numpy, torch, torchvision, matplotlib.pyplot.
 Public entries: show_images, save_grid, save_image_row_grid, vae_sample_grid.
+`save_image_row_grid` supports an optional figure title, column labels, and
+output DPI while retaining labelled image rows.
 
 ### dl_utils/training/__init__.py
 
