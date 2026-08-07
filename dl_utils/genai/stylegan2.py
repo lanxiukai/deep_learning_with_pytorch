@@ -1,4 +1,4 @@
-"""Model blocks shared by the compact StyleGAN2 lesson."""
+"""Compact 32x32 StyleGAN2 without progressive growing or AdaIN."""
 
 import math
 import random
@@ -7,49 +7,26 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-
-class PixelNorm(nn.Module):
-    def forward(self, inputs):
-        return inputs * torch.rsqrt(
-            inputs.square().mean(dim=1, keepdim=True) + 1e-8
-        )
-
-
-class EqualizedLinear(nn.Module):
-    def __init__(
-        self,
-        in_features,
-        out_features,
-        bias=True,
-        bias_init=0.0,
-        learning_rate_multiplier=1.0,
-    ):
-        super().__init__()
-        self.weight = nn.Parameter(
-            torch.randn(out_features, in_features) / learning_rate_multiplier
-        )
-        self.bias = (
-            nn.Parameter(torch.full((out_features,), bias_init))
-            if bias
-            else None
-        )
-        self.scale = learning_rate_multiplier / math.sqrt(in_features)
-        self.learning_rate_multiplier = learning_rate_multiplier
-
-    def forward(self, inputs):
-        bias = (
-            self.bias * self.learning_rate_multiplier
-            if self.bias is not None
-            else None
-        )
-        return F.linear(inputs, self.weight * self.scale, bias)
+from dl_utils.genai.stylegan_common import (
+    RESOLUTIONS,
+    EqualizedConv2d,
+    EqualizedLinear,
+    MinibatchStandardDeviation,
+    NoiseInjection,
+    PixelNorm,
+    denormalize,
+    filtered_downsample2d,
+    filtered_upsample2d,
+)
 
 
 class MappingNetwork(nn.Module):
-    """Map normalized z vectors into the intermediate W space."""
+    """Map normalized Z vectors into StyleGAN2's intermediate W space."""
 
     def __init__(self, z_dim, style_dim, layers=4):
         super().__init__()
+        if layers <= 0:
+            raise ValueError("mapping network must contain at least one layer.")
         modules = [PixelNorm()]
         in_features = z_dim
         for _ in range(layers):
@@ -66,12 +43,12 @@ class MappingNetwork(nn.Module):
             in_features = style_dim
         self.net = nn.Sequential(*modules)
 
-    def forward(self, noise):
-        return self.net(noise)
+    def forward(self, z):
+        return self.net(z)
 
 
 class ModulatedConv2d(nn.Module):
-    """Per-sample convolution with StyleGAN2 weight demodulation."""
+    """Apply per-sample weight modulation and optional demodulation."""
 
     def __init__(
         self,
@@ -79,26 +56,33 @@ class ModulatedConv2d(nn.Module):
         out_channels,
         kernel_size,
         style_dim,
+        *,
         demodulate=True,
         upsample=False,
     ):
         super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
-        self.demodulate = demodulate
-        self.upsample = upsample
-        self.padding = kernel_size // 2
+        self.in_channels = int(in_channels)
+        self.out_channels = int(out_channels)
+        self.kernel_size = int(kernel_size)
+        self.demodulate = bool(demodulate)
+        self.upsample = bool(upsample)
+        self.padding = self.kernel_size // 2
         self.weight = nn.Parameter(
             torch.randn(
-                1, out_channels, in_channels, kernel_size, kernel_size
+                1,
+                self.out_channels,
+                self.in_channels,
+                self.kernel_size,
+                self.kernel_size,
             )
         )
         self.weight_scale = 1 / math.sqrt(
-            in_channels * kernel_size * kernel_size
+            self.in_channels * self.kernel_size * self.kernel_size
         )
         self.modulation = EqualizedLinear(
-            style_dim, in_channels, bias_init=1.0
+            style_dim,
+            self.in_channels,
+            bias_init=1.0,
         )
 
     def forward(self, inputs, style):
@@ -107,17 +91,27 @@ class ModulatedConv2d(nn.Module):
             raise ValueError(
                 f"expected {self.in_channels} input channels, got {channels}"
             )
+        if style.ndim != 2 or style.shape[0] != batch:
+            raise ValueError("style must be a [B, style_dim] tensor.")
 
-        style = self.modulation(style).view(
-            batch, 1, self.in_channels, 1, 1
+        style_scale = self.modulation(style).view(
+            batch,
+            1,
+            self.in_channels,
+            1,
+            1,
         )
-        weight = self.weight * self.weight_scale * style
+        weight = self.weight * self.weight_scale * style_scale
         if self.demodulate:
-            scale = torch.rsqrt(
+            demodulation = torch.rsqrt(
                 weight.square().sum(dim=(2, 3, 4)) + 1e-8
             )
-            weight = weight * scale.view(
-                batch, self.out_channels, 1, 1, 1
+            weight = weight * demodulation.view(
+                batch,
+                self.out_channels,
+                1,
+                1,
+                1,
             )
         weight = weight.view(
             batch * self.out_channels,
@@ -127,40 +121,41 @@ class ModulatedConv2d(nn.Module):
         )
 
         if self.upsample:
-            inputs = F.interpolate(inputs, scale_factor=2, mode="nearest")
+            inputs = filtered_upsample2d(inputs)
             height, width = height * 2, width * 2
-        inputs = inputs.reshape(
-            1, batch * self.in_channels, height, width
+        grouped_inputs = inputs.reshape(
+            1,
+            batch * self.in_channels,
+            height,
+            width,
         )
         outputs = F.conv2d(
-            inputs, weight, padding=self.padding, groups=batch
+            grouped_inputs,
+            weight,
+            padding=self.padding,
+            groups=batch,
         )
         return outputs.view(
-            batch, self.out_channels, outputs.shape[-2], outputs.shape[-1]
+            batch,
+            self.out_channels,
+            outputs.shape[-2],
+            outputs.shape[-1],
         )
-
-
-class NoiseInjection(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.weight = nn.Parameter(torch.zeros(1, channels, 1, 1))
-
-    def forward(self, inputs, noise=None, randomize=True):
-        if not randomize:
-            return inputs
-        if noise is None:
-            noise = torch.randn(
-                inputs.shape[0],
-                1,
-                inputs.shape[2],
-                inputs.shape[3],
-                device=inputs.device,
-            )
-        return inputs + self.weight * noise
 
 
 class StyledConv(nn.Module):
-    def __init__(self, in_channels, out_channels, style_dim, upsample=False):
+    """StyleGAN2 modulated convolution followed by noise and activation."""
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        style_dim,
+        resolution,
+        fixed_noise_seed,
+        *,
+        upsample=False,
+    ):
         super().__init__()
         self.convolution = ModulatedConv2d(
             in_channels,
@@ -170,20 +165,30 @@ class StyledConv(nn.Module):
             demodulate=True,
             upsample=upsample,
         )
-        self.noise = NoiseInjection(out_channels)
+        self.noise = NoiseInjection(
+            out_channels,
+            resolution,
+            fixed_noise_seed,
+        )
         self.bias = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
 
-    def forward(self, inputs, style, randomize_noise=True):
+    def forward(self, inputs, style, noise_mode="random"):
         hidden = self.convolution(inputs, style)
-        hidden = self.noise(hidden, randomize=randomize_noise)
-        return F.leaky_relu(hidden + self.bias, 0.2, inplace=True)
+        hidden = self.noise(hidden, noise_mode)
+        return F.leaky_relu(hidden + self.bias, 0.2)
 
 
 class ToRGB(nn.Module):
+    """Convert features to RGB with modulation but no demodulation."""
+
     def __init__(self, in_channels, style_dim):
         super().__init__()
         self.convolution = ModulatedConv2d(
-            in_channels, 3, 1, style_dim, demodulate=False
+            in_channels,
+            3,
+            1,
+            style_dim,
+            demodulate=False,
         )
         self.bias = nn.Parameter(torch.zeros(1, 3, 1, 1))
 
@@ -192,28 +197,47 @@ class ToRGB(nn.Module):
 
 
 class SynthesisBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, style_dim, first=False):
+    """Two modulated convolutions plus a skip-connected RGB output."""
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        style_dim,
+        resolution,
+        fixed_noise_seed,
+        *,
+        first=False,
+    ):
         super().__init__()
         self.conv1 = StyledConv(
-            in_channels, out_channels, style_dim, upsample=not first
+            in_channels,
+            out_channels,
+            style_dim,
+            resolution,
+            fixed_noise_seed,
+            upsample=not first,
         )
-        self.conv2 = StyledConv(out_channels, out_channels, style_dim)
+        self.conv2 = StyledConv(
+            out_channels,
+            out_channels,
+            style_dim,
+            resolution,
+            fixed_noise_seed + 1,
+        )
         self.to_rgb = ToRGB(out_channels, style_dim)
 
-    def forward(self, inputs, styles, rgb, randomize_noise=True):
-        hidden = self.conv1(inputs, styles[:, 0], randomize_noise)
-        hidden = self.conv2(hidden, styles[:, 1], randomize_noise)
+    def forward(self, inputs, styles, rgb, noise_mode="random"):
+        hidden = self.conv1(inputs, styles[:, 0], noise_mode)
+        hidden = self.conv2(hidden, styles[:, 1], noise_mode)
         new_rgb = self.to_rgb(hidden, styles[:, 2])
         if rgb is not None:
-            rgb = F.interpolate(
-                rgb, scale_factor=2, mode="bilinear", align_corners=False
-            )
-            new_rgb = new_rgb + rgb
+            new_rgb = new_rgb + filtered_upsample2d(rgb)
         return hidden, new_rgb
 
 
 class StyleGenerator(nn.Module):
-    """32x32 mapping-and-synthesis generator with 12 style inputs."""
+    """Full-resolution StyleGAN2 generator with skip RGB connections."""
 
     def __init__(
         self,
@@ -221,61 +245,124 @@ class StyleGenerator(nn.Module):
         style_dim=128,
         base_channels=32,
         mapping_layers=4,
+        w_avg_beta=0.995,
     ):
         super().__init__()
-        self.z_dim = z_dim
-        self.style_dim = style_dim
-        self.mapping = MappingNetwork(z_dim, style_dim, mapping_layers)
+        if not 0.0 <= w_avg_beta < 1.0:
+            raise ValueError("w_avg_beta must be in [0, 1).")
+        self.z_dim = int(z_dim)
+        self.style_dim = int(style_dim)
+        self.base_channels = int(base_channels)
+        self.w_avg_beta = float(w_avg_beta)
+        self.mapping = MappingNetwork(
+            self.z_dim,
+            self.style_dim,
+            mapping_layers,
+        )
+        self.register_buffer("w_avg", torch.zeros(self.style_dim))
+        self.resolutions = RESOLUTIONS
+        self.styles_per_block = 3
+        self.num_ws = len(self.resolutions) * self.styles_per_block
         channels = {
-            4: base_channels * 8,
-            8: base_channels * 8,
-            16: base_channels * 4,
-            32: base_channels * 2,
+            4: self.base_channels * 8,
+            8: self.base_channels * 8,
+            16: self.base_channels * 4,
+            32: self.base_channels * 2,
         }
         self.constant = nn.Parameter(torch.randn(1, channels[4], 4, 4))
         self.blocks = nn.ModuleList(
             [
                 SynthesisBlock(
-                    channels[4], channels[4], style_dim, first=True
-                ),
-                SynthesisBlock(channels[4], channels[8], style_dim),
-                SynthesisBlock(channels[8], channels[16], style_dim),
-                SynthesisBlock(channels[16], channels[32], style_dim),
+                    channels[resolution // 2]
+                    if resolution > 4
+                    else channels[4],
+                    channels[resolution],
+                    self.style_dim,
+                    resolution,
+                    fixed_noise_seed=2 * index,
+                    first=resolution == 4,
+                )
+                for index, resolution in enumerate(self.resolutions)
             ]
         )
-        self.num_ws = len(self.blocks) * 3
 
-    def make_ws(self, z, mixing_z=None, mixing_cutoff=None):
+    def make_ws(
+        self,
+        z,
+        mixing_z=None,
+        mixing_cutoff=None,
+        *,
+        update_w_avg=False,
+        truncation_psi=1.0,
+        truncation_cutoff=None,
+    ):
+        if z.ndim != 2 or z.shape[1] != self.z_dim:
+            raise ValueError(
+                f"expected z shape [B, {self.z_dim}], got {tuple(z.shape)}"
+            )
         first_w = self.mapping(z)
+        if update_w_avg:
+            with torch.no_grad():
+                batch_average = first_w.detach().mean(dim=0)
+                self.w_avg.lerp_(batch_average, 1.0 - self.w_avg_beta)
         ws = first_w[:, None, :].repeat(1, self.num_ws, 1)
+
         if mixing_z is not None:
+            if mixing_z.shape != z.shape:
+                raise ValueError("mixing_z must have the same shape as z.")
             second_w = self.mapping(mixing_z)
             if mixing_cutoff is None:
                 mixing_cutoff = random.randint(1, self.num_ws - 1)
             if not 0 < mixing_cutoff < self.num_ws:
-                raise ValueError("mixing_cutoff must be inside the style stack")
+                raise ValueError(
+                    "mixing_cutoff must be inside the style stack"
+                )
             ws = torch.cat(
                 [
                     ws[:, :mixing_cutoff],
                     second_w[:, None, :].repeat(
-                        1, self.num_ws - mixing_cutoff, 1
+                        1,
+                        self.num_ws - mixing_cutoff,
+                        1,
                     ),
                 ],
                 dim=1,
             )
+
+        truncation_psi = float(truncation_psi)
+        if truncation_psi < 0:
+            raise ValueError("truncation_psi must be non-negative.")
+        if truncation_cutoff is None:
+            truncation_cutoff = self.num_ws
+        if not 0 <= truncation_cutoff <= self.num_ws:
+            raise ValueError("truncation_cutoff is outside the style stack.")
+        if truncation_psi != 1.0 and truncation_cutoff > 0:
+            truncated = torch.lerp(
+                self.w_avg.view(1, 1, -1),
+                ws[:, :truncation_cutoff],
+                truncation_psi,
+            )
+            ws = torch.cat([truncated, ws[:, truncation_cutoff:]], dim=1)
         return ws
 
-    def synthesize(self, ws, randomize_noise=True):
-        if ws.shape[1:] != (self.num_ws, self.style_dim):
+    def synthesize(self, ws, noise_mode="random"):
+        if ws.ndim != 3 or ws.shape[1:] != (
+            self.num_ws,
+            self.style_dim,
+        ):
             raise ValueError(
                 f"expected ws shape [B, {self.num_ws}, {self.style_dim}]"
             )
         hidden = self.constant.expand(ws.shape[0], -1, -1, -1)
         rgb = None
         for index, block in enumerate(self.blocks):
-            block_styles = ws[:, 3 * index : 3 * index + 3]
+            start = self.styles_per_block * index
+            block_styles = ws[:, start : start + self.styles_per_block]
             hidden, rgb = block(
-                hidden, block_styles, rgb, randomize_noise
+                hidden,
+                block_styles,
+                rgb,
+                noise_mode,
             )
         assert rgb is not None
         return rgb
@@ -286,79 +373,112 @@ class StyleGenerator(nn.Module):
         mixing_z=None,
         mixing_cutoff=None,
         return_ws=False,
-        randomize_noise=True,
+        noise_mode="random",
+        *,
+        update_w_avg=False,
+        truncation_psi=1.0,
+        truncation_cutoff=None,
     ):
-        ws = self.make_ws(z, mixing_z, mixing_cutoff)
-        image = self.synthesize(ws, randomize_noise)
+        ws = self.make_ws(
+            z,
+            mixing_z,
+            mixing_cutoff,
+            update_w_avg=update_w_avg,
+            truncation_psi=truncation_psi,
+            truncation_cutoff=truncation_cutoff,
+        )
+        image = self.synthesize(ws, noise_mode)
         return (image, ws) if return_ws else image
 
 
 class DiscriminatorResidualBlock(nn.Module):
+    """StyleGAN2 residual downsampling block with a filtered skip path."""
+
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, in_channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.skip = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.conv1 = EqualizedConv2d(
+            in_channels,
+            in_channels,
+            3,
+            padding=1,
+        )
+        self.conv2 = EqualizedConv2d(
+            in_channels,
+            out_channels,
+            3,
+            padding=1,
+        )
+        self.skip = EqualizedConv2d(
+            in_channels,
+            out_channels,
+            1,
+            bias=False,
+            gain=1.0,
+        )
         self.scale = 1 / math.sqrt(2)
 
     def forward(self, inputs):
-        residual = F.avg_pool2d(self.skip(inputs), 2)
-        hidden = F.leaky_relu(self.conv1(inputs), 0.2, inplace=False)
-        hidden = F.leaky_relu(self.conv2(hidden), 0.2, inplace=False)
-        hidden = F.avg_pool2d(hidden, 2)
+        residual = filtered_downsample2d(self.skip(inputs))
+        hidden = F.leaky_relu(self.conv1(inputs), 0.2)
+        hidden = F.leaky_relu(self.conv2(hidden), 0.2)
+        hidden = filtered_downsample2d(hidden)
         return (hidden + residual) * self.scale
 
 
-class MinibatchStandardDeviation(nn.Module):
-    def __init__(self, maximum_group=4):
-        super().__init__()
-        self.maximum_group = maximum_group
-
-    def forward(self, inputs):
-        batch, channels, height, width = inputs.shape
-        group = min(batch, self.maximum_group)
-        while batch % group:
-            group -= 1
-        grouped = inputs.view(group, -1, channels, height, width)
-        deviation = torch.sqrt(grouped.var(dim=0, unbiased=False) + 1e-8)
-        feature = deviation.mean(dim=(1, 2, 3), keepdim=True)
-        feature = feature.repeat(group, 1, height, width)
-        return torch.cat([inputs, feature], dim=1)
-
-
 class StyleDiscriminator(nn.Module):
+    """Full 32x32 residual discriminator used by compact StyleGAN2."""
+
     def __init__(self, base_channels=32):
         super().__init__()
+        self.base_channels = int(base_channels)
         channels = {
-            32: base_channels * 2,
-            16: base_channels * 4,
-            8: base_channels * 8,
-            4: base_channels * 8,
+            32: self.base_channels * 2,
+            16: self.base_channels * 4,
+            8: self.base_channels * 8,
+            4: self.base_channels * 8,
         }
-        self.from_rgb = nn.Conv2d(3, channels[32], 1)
+        self.from_rgb = EqualizedConv2d(3, channels[32], 1)
         self.blocks = nn.Sequential(
             DiscriminatorResidualBlock(channels[32], channels[16]),
             DiscriminatorResidualBlock(channels[16], channels[8]),
             DiscriminatorResidualBlock(channels[8], channels[4]),
         )
         self.minibatch_std = MinibatchStandardDeviation()
-        self.final_conv = nn.Conv2d(
-            channels[4] + 1, channels[4], 3, padding=1
+        self.final_conv = EqualizedConv2d(
+            channels[4] + 1,
+            channels[4],
+            3,
+            padding=1,
         )
         self.final = nn.Sequential(
             nn.Flatten(),
-            EqualizedLinear(channels[4] * 4 * 4, channels[4]),
+            EqualizedLinear(
+                channels[4] * 4 * 4,
+                channels[4],
+                gain=math.sqrt(2),
+            ),
             nn.LeakyReLU(0.2, inplace=True),
             EqualizedLinear(channels[4], 1),
         )
 
     def forward(self, images):
-        hidden = F.leaky_relu(self.from_rgb(images), 0.2, inplace=False)
+        if images.ndim != 4 or images.shape[1:] != (3, 32, 32):
+            raise ValueError("StyleDiscriminator expects [B, 3, 32, 32].")
+        hidden = F.leaky_relu(self.from_rgb(images), 0.2)
         hidden = self.blocks(hidden)
         hidden = self.minibatch_std(hidden)
-        hidden = F.leaky_relu(self.final_conv(hidden), 0.2, inplace=False)
+        hidden = F.leaky_relu(self.final_conv(hidden), 0.2)
         return self.final(hidden).squeeze(1)
 
 
-def denormalize(images):
-    return images.mul(0.5).add(0.5).clamp(0, 1)
+__all__ = [
+    "DiscriminatorResidualBlock",
+    "MappingNetwork",
+    "ModulatedConv2d",
+    "StyleDiscriminator",
+    "StyleGenerator",
+    "StyledConv",
+    "SynthesisBlock",
+    "ToRGB",
+    "denormalize",
+]

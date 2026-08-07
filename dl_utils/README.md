@@ -86,9 +86,12 @@ dl_utils/
 │   ├── ddpm.py
 │   ├── gan.py
 │   ├── pix2pix.py
+│   ├── progan.py
 │   ├── sagan.py
 │   ├── sn_gan.py
+│   ├── stylegan.py
 │   ├── stylegan2.py
+│   ├── stylegan_common.py
 │   └── vae.py
 │
 ├── plot/
@@ -383,10 +386,37 @@ Public entries: SNGeneratorResidualBlock, SNDiscriminatorResidualBlock,
 CIFAR10_CLASS_NAMES, SNGenerator, ProjectionSNDiscriminator,
 discriminator_hinge_loss, generator_hinge_loss, denormalize.
 
+### dl_utils/genai/stylegan_common.py
+
+Dependencies: math, collections.abc (Sequence), torch,
+torch.nn.functional (as F), torch (nn).
+Public entries: RESOLUTIONS, NOISE_MODES, validate_resolution, validate_alpha,
+PixelNorm, EqualizedLinear, EqualizedConv2d, MinibatchStandardDeviation,
+NoiseInjection, filter2d, filtered_upsample2d, filtered_downsample2d,
+denormalize.
+
+### dl_utils/genai/progan.py
+
+Dependencies: math, torch, torch.nn.functional (as F), torch (nn),
+dl_utils.genai.stylegan_common.
+Public entries: GeneratorInputBlock, GeneratorBlock, ProGANGenerator,
+DiscriminatorBlock, ProGANDiscriminator, denormalize.
+
+### dl_utils/genai/stylegan.py
+
+Dependencies: math, random, torch, torch.nn.functional (as F), torch (nn),
+dl_utils.genai.stylegan_common.
+Public entries: MappingNetwork, AdaptiveInstanceNorm, StyledActivation,
+SynthesisBlock, StyleGANGenerator, DiscriminatorBlock,
+StyleGANDiscriminator, denormalize.
+
 ### dl_utils/genai/stylegan2.py
 
-Dependencies: math, random, torch, torch.nn.functional (as F), torch (nn).
-Public entries: PixelNorm, EqualizedLinear, MappingNetwork, ModulatedConv2d, NoiseInjection, StyledConv, ToRGB, SynthesisBlock, StyleGenerator, DiscriminatorResidualBlock, MinibatchStandardDeviation, StyleDiscriminator, denormalize.
+Dependencies: math, random, torch, torch.nn.functional (as F), torch (nn),
+dl_utils.genai.stylegan_common.
+Public entries: MappingNetwork, ModulatedConv2d, StyledConv, ToRGB,
+SynthesisBlock, StyleGenerator, DiscriminatorResidualBlock,
+StyleDiscriminator, denormalize.
 
 ### dl_utils/genai/vae.py
 

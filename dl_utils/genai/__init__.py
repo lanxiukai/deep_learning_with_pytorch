@@ -12,6 +12,10 @@ Submodules:
               discriminator.
     biggan:   Conditional BatchNorm, hierarchical latent conditioning,
               orthogonal regularization, and truncated sampling.
-    stylegan2: Mapping/synthesis blocks, modulated convolutions, stochastic
-               noise, and the residual discriminator.
+    stylegan_common: Equalized layers, noise control, minibatch statistics,
+                     and pure PyTorch filtered resampling.
+    progan:    Progressive-growing generator and critic blocks.
+    stylegan:  Progressive AdaIN synthesis, W-space styles, and truncation.
+    stylegan2: Modulated/demodulated synthesis, skip RGB generation, and the
+               residual discriminator.
 """
