@@ -24,7 +24,6 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
-from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
@@ -47,7 +46,7 @@ TRAINING_DIR = OUT_DIR / "training"
 
 NUM_EPOCHS = 100
 BATCH_SIZE = 64
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
 Z_DIM = 120
@@ -178,7 +177,6 @@ def main():
         )
 
     reset_dir(str(TRAINING_DIR))
-    set_seed(42)
     device = try_gpu()
 
     dataset = datasets.CIFAR10(
