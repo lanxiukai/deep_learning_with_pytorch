@@ -1,7 +1,7 @@
 """Train a compact class-conditional BigGAN-style model on CIFAR-10.
 
-This third lesson keeps the SAGAN discriminator and adds the main generator
-ideas that fit a small teaching model:
+This third lesson keeps the SAGAN discriminator, uses CIFAR-10's native 32x32
+resolution, and adds the main generator ideas that fit a small teaching model:
     - one class embedding shared across all generator blocks;
     - conditional BatchNorm in every generator residual block;
     - hierarchical latent chunks delivered to successive blocks;
@@ -66,6 +66,7 @@ SAMPLES_PER_CLASS = 8
 Z_DIM = 120
 BASE_CHANNELS = 32
 CLASS_EMBEDDING_DIM = 128
+IMAGE_SIZE = 32
 GENERATOR_LR = 1e-4
 DISCRIMINATOR_LR = 4e-4
 ORTHOGONAL_REGULARIZATION_STRENGTH = 1e-4
@@ -76,6 +77,7 @@ MODEL_CONFIG = {
     "num_classes": NUM_CLASSES,
     "base_channels": BASE_CHANNELS,
     "class_embedding_dim": CLASS_EMBEDDING_DIM,
+    "image_size": IMAGE_SIZE,
 }
 
 
@@ -182,7 +184,7 @@ def main():
         download=False,
         transform=transforms.Compose(
             [
-                transforms.Resize(64),
+                transforms.Resize(IMAGE_SIZE),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5] * 3, [0.5] * 3),

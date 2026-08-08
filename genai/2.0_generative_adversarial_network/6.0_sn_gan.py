@@ -121,7 +121,6 @@ def train_epoch(
         noise = torch.randn(batch_size, Z_DIM, device=device)
 
         discriminator.requires_grad_(False)
-        discriminator.eval()
 
         opt_g.zero_grad(set_to_none=True)
         fake = generator(noise, sampled_labels)
@@ -129,7 +128,6 @@ def train_epoch(
             discriminator(fake, sampled_labels)
         )
         loss_g.backward()
-        discriminator.train()
         opt_g.step()
 
         discriminator.requires_grad_(True)

@@ -60,9 +60,7 @@ class BigGANGeneratorResidualBlock(nn.Module):
 
 
 class CompactBigGANGenerator(nn.Module):
-    """64x64 BigGAN-style generator with hierarchical latent conditioning."""
-
-    num_generator_blocks = 4
+    """32x32 or 64x64 BigGAN-style generator with latent conditioning."""
 
     def __init__(
         self,
@@ -70,8 +68,13 @@ class CompactBigGANGenerator(nn.Module):
         num_classes=10,
         base_channels=32,
         class_embedding_dim=128,
+        image_size=32,
     ):
         super().__init__()
+        if image_size not in (32, 64):
+            raise ValueError("image_size must be 32 or 64.")
+        self.image_size = image_size
+        self.num_generator_blocks = 3 if image_size == 32 else 4
         num_latent_chunks = self.num_generator_blocks + 1
         if z_dim % num_latent_chunks != 0:
             raise ValueError(
@@ -108,10 +111,14 @@ class CompactBigGANGenerator(nn.Module):
             base_channels,
             condition_dim,
         )
-        self.block4 = BigGANGeneratorResidualBlock(
-            base_channels,
-            base_channels,
-            condition_dim,
+        self.block4 = (
+            BigGANGeneratorResidualBlock(
+                base_channels,
+                base_channels,
+                condition_dim,
+            )
+            if image_size == 64
+            else nn.Identity()
         )
         self.output_norm = nn.BatchNorm2d(base_channels)
         self.output = spectral_norm(nn.Conv2d(base_channels, 3, 3, padding=1))
@@ -136,7 +143,8 @@ class CompactBigGANGenerator(nn.Module):
         hidden = self.block2(hidden, block_conditions[1])
         hidden = self.attention(hidden)
         hidden = self.block3(hidden, block_conditions[2])
-        hidden = self.block4(hidden, block_conditions[3])
+        if self.image_size == 64:
+            hidden = self.block4(hidden, block_conditions[3])
         hidden = F.relu(self.output_norm(hidden), inplace=True)
         return torch.tanh(self.output(hidden))
 

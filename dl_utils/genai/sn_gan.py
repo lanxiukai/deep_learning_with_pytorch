@@ -94,7 +94,7 @@ class SNGenerator(nn.Module):
         num_classes=10,
         base_channels=32,
         condition_dim=128,
-        image_size=64,
+        image_size=32,
     ):
         super().__init__()
         if image_size not in (32, 64):

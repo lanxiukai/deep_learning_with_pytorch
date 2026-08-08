@@ -1,10 +1,10 @@
 """Train a compact class-conditional SAGAN on CIFAR-10.
 
-This attention-focused lesson retains the compact 64x64 backbone shared with
-the BigGAN example. It replaces the middle identity mappings with
-self-attention on 16x16 feature maps. The learnable residual scales start at
-zero, so training decides how strongly to use non-local cues. The native-32x32
-SN-GAN in ``6.0_sn_gan.py`` remains the simpler reference baseline.
+This attention-focused lesson uses CIFAR-10's native 32x32 resolution. It
+replaces the middle identity mappings with self-attention on middle feature
+maps. The learnable residual scales start at zero, so training decides how
+strongly to use non-local cues. The SN-GAN in ``6.0_sn_gan.py`` remains the
+simpler reference baseline.
 
 Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.
@@ -18,9 +18,9 @@ Training data — CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
 
-Generator:                1.68 M params
+Generator:                1.66 M params
 Discriminator:            1.23 M params
-Total:                    2.90 M params
+Total:                    2.89 M params
 """
 
 import torch
@@ -56,6 +56,7 @@ SAMPLES_PER_CLASS = 8
 Z_DIM = 120
 BASE_CHANNELS = 32
 CONDITION_DIM = 128
+IMAGE_SIZE = 32
 LEARNING_RATE = 2e-4
 SAMPLE_EVERY_EPOCHS = 5
 
@@ -64,6 +65,7 @@ MODEL_CONFIG = {
     "num_classes": NUM_CLASSES,
     "base_channels": BASE_CHANNELS,
     "condition_dim": CONDITION_DIM,
+    "image_size": IMAGE_SIZE,
 }
 
 
@@ -156,7 +158,7 @@ def main():
         download=False,
         transform=transforms.Compose(
             [
-                transforms.Resize(64),
+                transforms.Resize(IMAGE_SIZE),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5] * 3, [0.5] * 3),

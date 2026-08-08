@@ -1,9 +1,9 @@
 """Compare trained SN-GAN, SAGAN, and compact BigGAN generators.
 
 All three models receive the same class labels and standard-normal latent
-vectors. SN-GAN produces native 32x32 images; SAGAN and compact BigGAN produce
-64x64 images. BigGAN is additionally sampled with two truncation thresholds
-to show the fidelity-diversity control introduced by truncated sampling.
+vectors and produce native 32x32 images. BigGAN is additionally sampled with
+two truncation thresholds to show the fidelity-diversity control introduced by
+truncated sampling.
 
 Inputs:
     output/sn_gan/generator.pth, created by 6.0_sn_gan.py
@@ -31,6 +31,7 @@ PROJECT_ROOT = infer_project_root()
 OUT_DIR = PROJECT_ROOT / "output" / "sn_sagan_biggan_evaluation"
 
 NUM_CLASSES = 10
+IMAGE_SIZE = 32
 SEED = 42
 
 DISPLAY_NAMES = {
@@ -89,6 +90,12 @@ def load_generator(model_name, model_class, checkpoint_path, script_name, device
     if not isinstance(model_config, dict) or not isinstance(state_dict, dict):
         raise ValueError(
             f"Checkpoint metadata is incomplete: {checkpoint_path}."
+        )
+    if model_config.get("image_size") != IMAGE_SIZE:
+        raise ValueError(
+            f"Expected a {IMAGE_SIZE}x{IMAGE_SIZE} checkpoint at "
+            f"{checkpoint_path}. Retrain {script_name} with its default "
+            f"IMAGE_SIZE setting."
         )
 
     generator = model_class(**model_config).to(device)

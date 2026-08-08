@@ -36,7 +36,7 @@ class SelfAttention(nn.Module):
 
 
 class SAGANGenerator(SNGenerator):
-    """SN-GAN generator with self-attention on 16x16 features."""
+    """SN-GAN generator with self-attention on middle feature maps."""
 
     def __init__(
         self,
@@ -44,18 +44,20 @@ class SAGANGenerator(SNGenerator):
         num_classes=10,
         base_channels=32,
         condition_dim=128,
+        image_size=32,
     ):
         super().__init__(
             z_dim=z_dim,
             num_classes=num_classes,
             base_channels=base_channels,
             condition_dim=condition_dim,
+            image_size=image_size,
         )
         self.attention = SelfAttention(base_channels * 2)
 
 
 class SAGANDiscriminator(ProjectionSNDiscriminator):
-    """Projection SN-GAN discriminator with attention on 16x16 features."""
+    """Projection SN-GAN discriminator with attention on middle features."""
 
     def __init__(self, num_classes=10, base_channels=32):
         super().__init__(
