@@ -124,17 +124,23 @@ class SNGenerator(nn.Module):
         self.output = spectral_norm(nn.Conv2d(base_channels, 3, 3, padding=1))
 
     def forward(self, noise, labels):
-        # noise shape: (B, 120), labels shape: (B,)
-        condition = self.class_embedding(labels)
-        hidden = self.input(torch.cat([noise, condition], dim=1))
-        hidden = hidden.view(noise.shape[0], -1, 4, 4)  # (B, 256, 4, 4)
-        hidden = self.block1(hidden)     # (B, 128, 8, 8)
-        hidden = self.block2(hidden)     # (B, 64, 16, 16)
-        hidden = self.attention(hidden)  # (B, 64, 16, 16)
-        hidden = self.block3(hidden)     # (B, 32, 32, 32)
-        hidden = self.block4(hidden)     # (B, 32, image_size, image_size)
-        hidden = F.relu(self.output_norm(hidden), inplace=True)
-        return torch.tanh(self.output(hidden))  # (B, 3, image_size, image_size)
+        # B: batch size, C: base_channels, H: image_size.
+        # noise: (B, z_dim), labels: (B,)
+        condition = self.class_embedding(labels)  # (B, condition_dim)
+        conditioned_noise = torch.cat(
+            [noise, condition], dim=1
+        )  # (B, z_dim + condition_dim)
+        hidden = self.input(conditioned_noise)  # (B, 8C * 4 * 4)
+        hidden = hidden.view(noise.shape[0], -1, 4, 4)  # (B, 8C, 4, 4)
+        hidden = self.block1(hidden)  # (B, 4C, 8, 8)
+        hidden = self.block2(hidden)  # (B, 2C, 16, 16)
+        hidden = self.attention(hidden)  # (B, 2C, 16, 16)
+        hidden = self.block3(hidden)  # (B, C, 32, 32)
+        hidden = self.block4(hidden)  # (B, C, H, H)
+        hidden = self.output_norm(hidden)  # (B, C, H, H)
+        hidden = F.relu(hidden, inplace=True)  # (B, C, H, H)
+        images = torch.tanh(self.output(hidden))  # (B, 3, H, H)
+        return images
 
 
 class ProjectionSNDiscriminator(nn.Module):
@@ -160,17 +166,22 @@ class ProjectionSNDiscriminator(nn.Module):
         )
 
     def forward(self, images, labels):
-        hidden = self.block1(images)
-        hidden = self.block2(hidden)
-        hidden = self.attention(hidden)
-        hidden = self.block3(hidden)
-        hidden = self.block4(hidden)
-        hidden = F.relu(hidden, inplace=True).sum(dim=(2, 3))
+        # B: batch size, C: base_channels, H: input height and width.
+        # images: (B, 3, H, H), labels: (B,)
+        hidden = self.block1(images)  # (B, C, H/2, H/2)
+        hidden = self.block2(hidden)  # (B, 2C, H/4, H/4)
+        hidden = self.attention(hidden)  # (B, 2C, H/4, H/4)
+        hidden = self.block3(hidden)  # (B, 4C, H/8, H/8)
+        hidden = self.block4(hidden)  # (B, 8C, H/16, H/16)
+        hidden = F.relu(hidden, inplace=True)  # (B, 8C, H/16, H/16)
+        hidden = hidden.sum(dim=(2, 3))  # (B, 8C)
 
-        unconditional = self.output(hidden).squeeze(1)
+        unconditional = self.output(hidden).squeeze(1)  # (B,)
         # Projection discriminator: D(x, y) = f(h(x)) + <e(y), h(x)>.
-        projection = (self.class_embedding(labels) * hidden).sum(dim=1)
-        return unconditional + projection  # (B,)
+        class_features = self.class_embedding(labels)  # (B, 8C)
+        projection = (class_features * hidden).sum(dim=1)  # (B,)
+        scores = unconditional + projection  # (B,)
+        return scores
 
 
 def discriminator_hinge_loss(real_scores, fake_scores):

@@ -38,7 +38,7 @@ from dl_utils.genai.sn_gan import (
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
-from dl_utils.plot.figures import save_loss_panels
+from dl_utils.plot.figures import Animator, save_loss_panels
 from dl_utils.plot.images import save_training_samples
 from dl_utils.training.timing import Timer, format_epoch_timing
 
@@ -158,7 +158,6 @@ def main():
         download=False,
         transform=transforms.Compose(
             [
-                transforms.Resize(IMAGE_SIZE),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5] * 3, [0.5] * 3),
@@ -198,6 +197,13 @@ def main():
     loss_steps = []
     discriminator_losses = []
     generator_losses = []
+    animator = Animator(
+        xlabel="epoch",
+        ylabel="loss",
+        xlim=[1, NUM_EPOCHS],
+        legend=["D hinge loss", "G adversarial loss"],
+        figsize=(6, 4),
+    )
 
     timer = Timer()
     with tqdm(
@@ -225,6 +231,7 @@ def main():
             loss_steps.append(epoch)
             discriminator_losses.append(loss_d)
             generator_losses.append(loss_g)
+            animator.add(epoch, (loss_d, loss_g))
             if epoch == 1 or epoch % SAMPLE_EVERY_EPOCHS == 0:
                 save_training_samples(
                     generator,
@@ -234,12 +241,6 @@ def main():
                     class_names=CIFAR10_CLASS_NAMES[:NUM_CLASSES],
                     title=f"SAGAN fixed class samples - epoch {epoch:03d}",
                 )
-            progress_bar.write(
-                f"epoch {epoch:03d}: D={loss_d:.3f}, G={loss_g:.3f}, "
-                f"gamma_G={generator.attention.gamma.item():.3f}, "
-                f"gamma_D={discriminator.attention.gamma.item():.3f}"
-            )
-
     print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
     torch.save(
         {

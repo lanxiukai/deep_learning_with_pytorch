@@ -11,6 +11,10 @@ desktop.ini
 *.swo
 *~
 
+# Local AI-agent configuration
+/.agents/
+/.codex/
+
 # Secrets and local environment variables
 .env
 .env.*

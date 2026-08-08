@@ -48,7 +48,7 @@ from dl_utils.genai.sn_gan import (
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
-from dl_utils.plot.figures import save_loss_panels
+from dl_utils.plot.figures import Animator, save_loss_panels
 from dl_utils.plot.images import save_training_samples
 from dl_utils.training.timing import Timer, format_epoch_timing
 
@@ -184,7 +184,6 @@ def main():
         download=False,
         transform=transforms.Compose(
             [
-                transforms.Resize(IMAGE_SIZE),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5] * 3, [0.5] * 3),
@@ -226,6 +225,18 @@ def main():
     generator_losses = []
     generator_adversarial_losses = []
     generator_regularization_losses = []
+    animator = Animator(
+        xlabel="epoch",
+        ylabel="loss",
+        xlim=[1, NUM_EPOCHS],
+        legend=[
+            "D hinge loss",
+            "G total loss",
+            "G adversarial loss",
+            "G orthogonal penalty",
+        ],
+        figsize=(7, 4),
+    )
 
     timer = Timer()
     with tqdm(
@@ -260,6 +271,15 @@ def main():
             generator_losses.append(loss_g)
             generator_adversarial_losses.append(loss_g_adversarial)
             generator_regularization_losses.append(loss_g_regularization)
+            animator.add(
+                epoch,
+                (
+                    loss_d,
+                    loss_g,
+                    loss_g_adversarial,
+                    loss_g_regularization,
+                ),
+            )
             if epoch == 1 or epoch % SAMPLE_EVERY_EPOCHS == 0:
                 save_training_samples(
                     generator,
@@ -272,14 +292,6 @@ def main():
                         f"epoch {epoch:03d}"
                     ),
                 )
-            progress_bar.write(
-                f"epoch {epoch:03d}: D={loss_d:.3f}, G={loss_g:.3f}, "
-                f"GAN={loss_g_adversarial:.3f}, "
-                f"ortho={loss_g_regularization:.5f}, "
-                f"gamma_G={generator.attention.gamma.item():.3f}, "
-                f"gamma_D={discriminator.attention.gamma.item():.3f}"
-            )
-
     print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
     torch.save(
         {
