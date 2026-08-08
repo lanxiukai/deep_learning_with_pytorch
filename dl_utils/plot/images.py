@@ -174,8 +174,6 @@ def save_training_samples(
     class_names,
     title,
     dpi=200,
-    amp_enabled=False,
-    amp_dtype=None,
     shared_latents_across_classes=False,
 ) -> None:
     """Generate and save fixed class-conditional samples grouped by class."""
@@ -183,14 +181,7 @@ def save_training_samples(
     was_training = generator.training
     generator.eval()
     try:
-        with (
-            torch.inference_mode(),
-            torch.amp.autocast(
-                noise.device.type,
-                dtype=amp_dtype,
-                enabled=amp_enabled,
-            ),
-        ):
+        with torch.inference_mode():
             samples = generator(noise, labels).float().cpu()
     finally:
         generator.train(was_training)

@@ -23,11 +23,6 @@ Samples per epoch:       49,984 (781 full batches; drop_last=True)
 Generator:                1.17 M params
 Discriminator:            1.22 M params
 Total:                    2.39 M params
-
-Precision:
-    USE_AMP=True uses FP32 plus AMP_DTYPE for training and sample inference.
-    Set USE_AMP=False for pure FP32, or choose torch.float16 instead of the
-    default torch.bfloat16. FP16 automatically uses gradient scaling.
 """
 
 import time
@@ -73,9 +68,6 @@ IMAGE_SIZE = 32
 GENERATOR_LR = 1e-4
 DISCRIMINATOR_LR = 2e-4
 SAMPLE_EVERY_EPOCHS = 5
-# BF16 has FP32-like range and native Tensor Core support on Ampere/Ada GPUs.
-USE_AMP = True
-AMP_DTYPE = torch.bfloat16  # torch.bfloat16 (default) or torch.float16
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
@@ -93,10 +85,6 @@ def train_epoch(
     opt_g,
     opt_d,
     device,
-    scaler_g,
-    scaler_d,
-    amp_enabled,
-    amp_dtype,
     progress_bar=None,
 ):
     """Train one epoch and report batch progress."""
@@ -121,24 +109,19 @@ def train_epoch(
         noise = torch.randn(batch_size, Z_DIM, device=device)
         if is_last_batch:
             discriminator.attention.capture_next_attention_entropy()
-        with torch.amp.autocast(
-            device.type,
-            dtype=amp_dtype,
-            enabled=amp_enabled,
-        ):
-            with torch.no_grad():
-                fake = generator(noise, labels)
-            (
-                real_scores,
-                correct_projection,
-                mismatched_projection,
-            ) = discriminator.forward_with_projection_diagnostics(
-                real,
-                labels,
-                mismatched_labels,
-            )
-            fake_scores = discriminator(fake, labels)
-            loss_d = discriminator_hinge_loss(real_scores, fake_scores)
+        with torch.no_grad():
+            fake = generator(noise, labels)
+        (
+            real_scores,
+            correct_projection,
+            mismatched_projection,
+        ) = discriminator.forward_with_projection_diagnostics(
+            real,
+            labels,
+            mismatched_labels,
+        )
+        fake_scores = discriminator(fake, labels)
+        loss_d = discriminator_hinge_loss(real_scores, fake_scores)
         diagnostic_sums += discriminator_diagnostic_sums(
             real_scores,
             fake_scores,
@@ -146,9 +129,8 @@ def train_epoch(
             mismatched_projection,
         )
         opt_d.zero_grad(set_to_none=True)
-        scaler_d.scale(loss_d).backward()
-        scaler_d.step(opt_d)
-        scaler_d.update()
+        loss_d.backward()
+        opt_d.step()
 
         sampled_labels = torch.randint(
             NUM_CLASSES, (batch_size,), device=device
@@ -159,18 +141,12 @@ def train_epoch(
             opt_g.zero_grad(set_to_none=True)
             if is_last_batch:
                 generator.attention.capture_next_attention_entropy()
-            with torch.amp.autocast(
-                device.type,
-                dtype=amp_dtype,
-                enabled=amp_enabled,
-            ):
-                fake = generator(noise, sampled_labels)
-                loss_g = generator_hinge_loss(
-                    discriminator(fake, sampled_labels)
-                )
-            scaler_g.scale(loss_g).backward()
-            scaler_g.step(opt_g)
-            scaler_g.update()
+            fake = generator(noise, sampled_labels)
+            loss_g = generator_hinge_loss(
+                discriminator(fake, sampled_labels)
+            )
+            loss_g.backward()
+            opt_g.step()
         finally:
             discriminator.requires_grad_(True)
 
@@ -208,18 +184,6 @@ def main():
     reset_dir(str(TRAINING_DIR))
     set_seed(42)
     device = try_gpu()
-    amp_enabled = USE_AMP and device.type == "cuda"
-    if amp_enabled and AMP_DTYPE not in (torch.float16, torch.bfloat16):
-        raise ValueError("AMP_DTYPE must be torch.float16 or torch.bfloat16.")
-    if (
-        amp_enabled
-        and AMP_DTYPE == torch.bfloat16
-        and not torch.cuda.is_bf16_supported()
-    ):
-        raise RuntimeError(
-            "This CUDA device does not support BF16. Set AMP_DTYPE to "
-            "torch.float16 or disable USE_AMP."
-        )
 
     dataset = datasets.CIFAR10(
         DATA_DIR,
@@ -266,15 +230,6 @@ def main():
         discriminator.parameters(),
         lr=DISCRIMINATOR_LR,
         betas=(0.0, 0.9),
-    )
-    scaler_enabled = amp_enabled and AMP_DTYPE == torch.float16
-    scaler_g = torch.amp.GradScaler(
-        device.type,
-        enabled=scaler_enabled,
-    )
-    scaler_d = torch.amp.GradScaler(
-        device.type,
-        enabled=scaler_enabled,
     )
 
     fixed_noise, fixed_labels = make_fixed_class_latent_grid(
@@ -336,10 +291,6 @@ def main():
                 opt_g,
                 opt_d,
                 device,
-                scaler_g,
-                scaler_d,
-                amp_enabled,
-                AMP_DTYPE,
                 progress_bar=progress_bar,
             )
             if device.type == "cuda":
@@ -391,8 +342,6 @@ def main():
                     TRAINING_DIR / f"epoch_{epoch:03d}.png",
                     class_names=CIFAR10_CLASS_NAMES[:NUM_CLASSES],
                     title=f"SAGAN fixed class samples - epoch {epoch:03d}",
-                    amp_enabled=amp_enabled,
-                    amp_dtype=AMP_DTYPE,
                     shared_latents_across_classes=True,
                 )
     print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
@@ -401,11 +350,6 @@ def main():
             "model_name": "sagan",
             "model_config": MODEL_CONFIG,
             "sn_layer_counts": sn_layer_counts,
-            "training_precision": (
-                str(AMP_DTYPE).removeprefix("torch.")
-                if amp_enabled
-                else "float32"
-            ),
             "state_dict": generator.state_dict(),
         },
         OUT_DIR / "generator.pth",
