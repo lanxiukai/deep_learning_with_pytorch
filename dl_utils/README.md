@@ -375,7 +375,7 @@ denormalize.
 
 ### dl_utils/genai/sagan.py
 
-Dependencies: torch, torch (nn), torch.nn.utils (spectral_norm),
+Dependencies: math, torch, torch (nn), torch.nn.utils (spectral_norm),
 dl_utils.genai.sn_gan (ProjectionSNDiscriminator, SNGenerator).
 Public entries: SelfAttention, SAGANGenerator, SAGANDiscriminator.
 
@@ -383,9 +383,12 @@ Public entries: SelfAttention, SAGANGenerator, SAGANDiscriminator.
 
 Dependencies: torch, torch.nn.functional (as F), torch (nn), torch.nn.utils
 (spectral_norm).
-Public entries: SNGeneratorResidualBlock, SNDiscriminatorResidualBlock,
-CIFAR10_CLASS_NAMES, SNGenerator, ProjectionSNDiscriminator,
-discriminator_hinge_loss, generator_hinge_loss, denormalize,
+Public entries: SNConditionalBatchNorm2d, SNGeneratorResidualBlock,
+SNDiscriminatorResidualBlock, CIFAR10_CLASS_NAMES, SNGenerator,
+ProjectionSNDiscriminator, make_fixed_class_latent_grid,
+cyclically_mismatched_labels, count_spectral_norm_layers,
+discriminator_diagnostic_sums, discriminator_hinge_loss,
+generator_hinge_loss, denormalize,
 init_spectral_norm_state, spectral_norm_scratch_minimal.
 
 ### dl_utils/genai/stylegan_common.py
@@ -453,7 +456,9 @@ save_training_samples, vae_sample_grid.
 `save_image_row_grid` supports an optional figure title, column labels, and
 output DPI while retaining labelled image rows.
 `save_training_samples` preserves the generator's current training mode while
-rendering fixed class-conditional samples as labelled image rows.
+rendering fixed class-conditional samples as labelled image rows. Its optional
+AMP settings apply autocast to sample inference and convert the result back to
+FP32 before rendering.
 
 ### dl_utils/training/__init__.py
 

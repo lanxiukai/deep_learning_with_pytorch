@@ -2,11 +2,12 @@
 
 This third lesson keeps the SAGAN discriminator, uses CIFAR-10's native 32x32
 resolution, and adds the main generator ideas that fit a small teaching model:
-    - one class embedding shared across all generator blocks;
-    - conditional BatchNorm in every generator residual block;
-    - hierarchical latent chunks delivered to successive blocks;
+    - one class embedding shared across all generator blocks, replacing the
+      block-local SAGAN embeddings;
+    - hierarchical latent chunks joined to successive conditional BatchNorm
+      inputs;
     - modified orthogonal regularization;
-    - two-time-scale learning rates.
+    - the same two-time-scale learning rates as the SN-GAN/SAGAN baseline.
 
 The truncation trick is intentionally reserved for evaluation in 6.3. This is
 a compact BigGAN-style model, not a reproduction of large-scale ImageNet
@@ -24,9 +25,14 @@ Training data — CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
 
-Generator:                0.98 M params
-Discriminator:            1.23 M params
-Total:                    2.21 M params
+Generator:                0.84 M params
+Discriminator:            1.22 M params
+Total:                    2.06 M params
+
+Precision:
+    USE_AMP=True uses FP32 plus AMP_DTYPE for training and sample inference.
+    Set USE_AMP=False for pure FP32, or choose torch.float16 instead of the
+    default torch.bfloat16. FP16 automatically uses gradient scaling.
 """
 
 import torch
@@ -60,17 +66,20 @@ TRAINING_DIR = OUT_DIR / "training"
 
 NUM_EPOCHS = 100
 BATCH_SIZE = 64
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
 Z_DIM = 120
 BASE_CHANNELS = 32
-CLASS_EMBEDDING_DIM = 128
+CLASS_EMBEDDING_DIM = 32
 IMAGE_SIZE = 32
 GENERATOR_LR = 1e-4
-DISCRIMINATOR_LR = 4e-4
+DISCRIMINATOR_LR = 2e-4
 ORTHOGONAL_REGULARIZATION_STRENGTH = 1e-4
 SAMPLE_EVERY_EPOCHS = 5
+# BF16 has FP32-like range and native Tensor Core support on Ampere/Ada GPUs.
+USE_AMP = True
+AMP_DTYPE = torch.bfloat16  # torch.bfloat16 (default) or torch.float16
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
@@ -88,6 +97,10 @@ def train_epoch(
     opt_g,
     opt_d,
     device,
+    scaler_g,
+    scaler_d,
+    amp_enabled,
+    amp_dtype,
     progress_bar=None,
 ):
     """Train one epoch and report batch progress."""
@@ -105,14 +118,20 @@ def train_epoch(
         batch_size = real.shape[0]
 
         noise = torch.randn(batch_size, Z_DIM, device=device)
-        with torch.no_grad():
-            fake = generator(noise, labels)
-        real_scores = discriminator(real, labels)
-        fake_scores = discriminator(fake, labels)
-        loss_d = discriminator_hinge_loss(real_scores, fake_scores)
+        with torch.amp.autocast(
+            device.type,
+            dtype=amp_dtype,
+            enabled=amp_enabled,
+        ):
+            with torch.no_grad():
+                fake = generator(noise, labels)
+            real_scores = discriminator(real, labels)
+            fake_scores = discriminator(fake, labels)
+            loss_d = discriminator_hinge_loss(real_scores, fake_scores)
         opt_d.zero_grad(set_to_none=True)
-        loss_d.backward()
-        opt_d.step()
+        scaler_d.scale(loss_d).backward()
+        scaler_d.step(opt_d)
+        scaler_d.update()
 
         sampled_labels = torch.randint(
             NUM_CLASSES, (batch_size,), device=device
@@ -121,17 +140,26 @@ def train_epoch(
         discriminator.requires_grad_(False)
         try:
             opt_g.zero_grad(set_to_none=True)
-            fake = generator(noise, sampled_labels)
-            loss_g_adversarial = generator_hinge_loss(
-                discriminator(fake, sampled_labels)
-            )
+            with torch.amp.autocast(
+                device.type,
+                dtype=amp_dtype,
+                enabled=amp_enabled,
+            ):
+                fake = generator(noise, sampled_labels)
+                loss_g_adversarial = generator_hinge_loss(
+                    discriminator(fake, sampled_labels)
+                )
+            # Keep the Gram-matrix penalty in FP32 for numerical stability.
             loss_g_regularization = modified_orthogonal_regularization(
                 generator,
                 strength=ORTHOGONAL_REGULARIZATION_STRENGTH,
             )
-            loss_g_total = loss_g_adversarial + loss_g_regularization
-            loss_g_total.backward()
-            opt_g.step()
+            loss_g_total = (
+                loss_g_adversarial.float() + loss_g_regularization
+            )
+            scaler_g.scale(loss_g_total).backward()
+            scaler_g.step(opt_g)
+            scaler_g.update()
         finally:
             discriminator.requires_grad_(True)
 
@@ -177,6 +205,18 @@ def main():
     reset_dir(str(TRAINING_DIR))
     set_seed(42)
     device = try_gpu()
+    amp_enabled = USE_AMP and device.type == "cuda"
+    if amp_enabled and AMP_DTYPE not in (torch.float16, torch.bfloat16):
+        raise ValueError("AMP_DTYPE must be torch.float16 or torch.bfloat16.")
+    if (
+        amp_enabled
+        and AMP_DTYPE == torch.bfloat16
+        and not torch.cuda.is_bf16_supported()
+    ):
+        raise RuntimeError(
+            "This CUDA device does not support BF16. Set AMP_DTYPE to "
+            "torch.float16 or disable USE_AMP."
+        )
 
     dataset = datasets.CIFAR10(
         DATA_DIR,
@@ -214,6 +254,15 @@ def main():
         discriminator.parameters(),
         lr=DISCRIMINATOR_LR,
         betas=(0.0, 0.999),
+    )
+    scaler_enabled = amp_enabled and AMP_DTYPE == torch.float16
+    scaler_g = torch.amp.GradScaler(
+        device.type,
+        enabled=scaler_enabled,
+    )
+    scaler_d = torch.amp.GradScaler(
+        device.type,
+        enabled=scaler_enabled,
     )
 
     fixed_labels = torch.arange(NUM_CLASSES, device=device).repeat_interleave(
@@ -264,6 +313,10 @@ def main():
                 opt_g,
                 opt_d,
                 device,
+                scaler_g,
+                scaler_d,
+                amp_enabled,
+                AMP_DTYPE,
                 progress_bar=progress_bar,
             )
             loss_steps.append(epoch)
@@ -291,12 +344,19 @@ def main():
                         "Compact BigGAN fixed class samples - "
                         f"epoch {epoch:03d}"
                     ),
+                    amp_enabled=amp_enabled,
+                    amp_dtype=AMP_DTYPE,
                 )
     print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
     torch.save(
         {
             "model_name": "biggan",
             "model_config": MODEL_CONFIG,
+            "training_precision": (
+                str(AMP_DTYPE).removeprefix("torch.")
+                if amp_enabled
+                else "float32"
+            ),
             "state_dict": generator.state_dict(),
         },
         OUT_DIR / "generator.pth",

@@ -1,9 +1,10 @@
 """Compare trained SN-GAN, SAGAN, and compact BigGAN generators.
 
-All three models receive the same class labels and standard-normal latent
-vectors and produce native 32x32 images. BigGAN is additionally sampled with
-two truncation thresholds to show the fidelity-diversity control introduced by
-truncated sampling.
+All three models receive the same class labels and one standard-normal latent
+vector repeated across the class columns, so each row isolates the response to
+changing ``y`` at fixed ``z``. BigGAN is additionally sampled with two
+truncation thresholds; each truncation row likewise repeats one latent vector
+across classes.
 
 Inputs:
     output/sn_gan/generator.pth, created by 6.0_sn_gan.py
@@ -23,7 +24,12 @@ from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.biggan import CompactBigGANGenerator, truncated_normal
 from dl_utils.genai.sagan import SAGANGenerator
-from dl_utils.genai.sn_gan import CIFAR10_CLASS_NAMES, SNGenerator
+from dl_utils.genai.sn_gan import (
+    CIFAR10_CLASS_NAMES,
+    SNGenerator,
+    count_spectral_norm_layers,
+    make_fixed_class_latent_grid,
+)
 from dl_utils.plot.images import save_image_row_grid
 
 
@@ -120,6 +126,10 @@ def main():
         )
         generators[model_name] = generator
         configurations[model_name] = model_config
+        print(
+            f"{DISPLAY_NAMES[model_name]} spectral-normalized generator "
+            f"layers: {count_spectral_norm_layers(generator)}"
+        )
 
     latent_dimensions = {
         model_config["z_dim"] for model_config in configurations.values()
@@ -143,9 +153,13 @@ def main():
 
     reset_dir(str(OUT_DIR))
 
-    labels = torch.arange(NUM_CLASSES, device=device)
     torch.manual_seed(SEED)
-    fixed_noise = torch.randn(NUM_CLASSES, z_dim, device=device)
+    fixed_noise, labels = make_fixed_class_latent_grid(
+        NUM_CLASSES,
+        1,
+        z_dim,
+        device,
+    )
     image_rows = []
     row_labels = []
 
@@ -158,10 +172,17 @@ def main():
         biggan = generators["biggan"]
         for truncation in (1.0, 0.5):
             torch.manual_seed(SEED)
-            noise = truncated_normal(
-                (NUM_CLASSES, z_dim),
+            base_noise = truncated_normal(
+                (1, z_dim),
                 truncation,
                 device,
+            )
+            noise, _ = make_fixed_class_latent_grid(
+                NUM_CLASSES,
+                1,
+                z_dim,
+                device,
+                base_noise=base_noise,
             )
             image_rows.append(biggan(noise, labels).cpu())
             row_labels.append(f"BigGAN truncation {truncation:.1f}")
@@ -170,7 +191,7 @@ def main():
         image_rows,
         row_labels,
         OUT_DIR / "sn_sagan_biggan_evaluation.png",
-        title="CIFAR-10 conditional generation - SN-GAN to Compact BigGAN",
+        title="CIFAR-10 conditional response at fixed per-row z",
         column_labels=[
             name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
         ],

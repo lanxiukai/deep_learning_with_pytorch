@@ -108,52 +108,61 @@ def save_image_row_grid(
         if has_decorations
         else 2.1 * len(image_rows)
     )
-    fig, axes = _plt.subplots(
-        len(image_rows),
-        num_columns,
-        figsize=(1.8 * num_columns, figure_height),
-        squeeze=False,
-    )
-    for row_index, (images, label) in enumerate(zip(image_rows, row_labels)):
-        axes[row_index, 0].set_ylabel(
-            label,
-            rotation=0,
-            ha="right",
-            va="center",
-            fontsize=12,
+    # ``Animator`` enables pyplot's global interactive mode.  Temporarily turn
+    # it off so this save-only figure never creates a visible GUI window.
+    with _plt.ioff():
+        fig, axes = _plt.subplots(
+            len(image_rows),
+            num_columns,
+            figsize=(1.8 * num_columns, figure_height),
+            squeeze=False,
         )
-        for column_index, image in enumerate(images):
-            display_image = (
-                image.detach()
-                .cpu()
-                .mul(0.5)
-                .add(0.5)
-                .clamp(0, 1)
-                .permute(1, 2, 0)
-                .numpy()
-            )
-            axes[row_index, column_index].imshow(display_image)
-            axes[row_index, column_index].set_xticks([])
-            axes[row_index, column_index].set_yticks([])
-            if has_decorations:
-                for spine in axes[row_index, column_index].spines.values():
-                    spine.set_visible(False)
-            if row_index == 0 and column_labels is not None:
-                axes[row_index, column_index].set_title(
-                    column_labels[column_index],
-                    fontsize=10,
+        try:
+            for row_index, (images, label) in enumerate(
+                zip(image_rows, row_labels)
+            ):
+                axes[row_index, 0].set_ylabel(
+                    label,
+                    rotation=0,
+                    ha="right",
+                    va="center",
+                    fontsize=12,
                 )
+                for column_index, image in enumerate(images):
+                    display_image = (
+                        image.detach()
+                        .cpu()
+                        .mul(0.5)
+                        .add(0.5)
+                        .clamp(0, 1)
+                        .permute(1, 2, 0)
+                        .numpy()
+                    )
+                    axes[row_index, column_index].imshow(display_image)
+                    axes[row_index, column_index].set_xticks([])
+                    axes[row_index, column_index].set_yticks([])
+                    if has_decorations:
+                        for spine in (
+                            axes[row_index, column_index].spines.values()
+                        ):
+                            spine.set_visible(False)
+                    if row_index == 0 and column_labels is not None:
+                        axes[row_index, column_index].set_title(
+                            column_labels[column_index],
+                            fontsize=10,
+                        )
 
-    if title is not None:
-        fig.suptitle(title, fontsize=14)
-    if has_decorations:
-        top = 0.94 if title is not None else 0.98
-        fig.tight_layout(rect=(0, 0, 1, top), pad=0.6)
-        fig.subplots_adjust(wspace=0.03, hspace=0.12)
-    else:
-        fig.subplots_adjust(wspace=0.02, hspace=0.08)
-    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
-    _plt.close(fig)
+            if title is not None:
+                fig.suptitle(title, fontsize=14)
+            if has_decorations:
+                top = 0.94 if title is not None else 0.98
+                fig.tight_layout(rect=(0, 0, 1, top), pad=0.6)
+                fig.subplots_adjust(wspace=0.03, hspace=0.12)
+            else:
+                fig.subplots_adjust(wspace=0.02, hspace=0.08)
+            fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        finally:
+            _plt.close(fig)
 
 
 def save_training_samples(
@@ -165,14 +174,24 @@ def save_training_samples(
     class_names,
     title,
     dpi=200,
+    amp_enabled=False,
+    amp_dtype=None,
+    shared_latents_across_classes=False,
 ) -> None:
     """Generate and save fixed class-conditional samples grouped by class."""
     class_names = tuple(class_names)
     was_training = generator.training
     generator.eval()
     try:
-        with torch.inference_mode():
-            samples = generator(noise, labels).cpu()
+        with (
+            torch.inference_mode(),
+            torch.amp.autocast(
+                noise.device.type,
+                dtype=amp_dtype,
+                enabled=amp_enabled,
+            ),
+        ):
+            samples = generator(noise, labels).float().cpu()
     finally:
         generator.train(was_training)
 
@@ -187,7 +206,11 @@ def save_training_samples(
         output_path,
         title=title,
         column_labels=[
-            f"Sample {index + 1}"
+            (
+                f"Shared z {index + 1}"
+                if shared_latents_across_classes
+                else f"Sample {index + 1}"
+            )
             for index in range(len(image_rows[0]) if image_rows else 0)
         ],
         dpi=dpi,
