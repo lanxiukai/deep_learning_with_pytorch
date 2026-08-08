@@ -1,8 +1,9 @@
 """Compare trained SN-GAN, SAGAN, and compact BigGAN generators.
 
 All three models receive the same class labels and standard-normal latent
-vectors. BigGAN is additionally sampled with two truncation thresholds to
-show the fidelity-diversity control introduced by truncated sampling.
+vectors. SN-GAN produces native 32x32 images; SAGAN and compact BigGAN produce
+64x64 images. BigGAN is additionally sampled with two truncation thresholds
+to show the fidelity-diversity control introduced by truncated sampling.
 
 Inputs:
     output/sn_gan/generator.pth, created by 6.0_sn_gan.py

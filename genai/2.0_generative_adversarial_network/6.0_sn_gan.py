@@ -1,4 +1,4 @@
-"""Train a compact class-conditional SN-GAN on CIFAR-10.
+"""Train a native-resolution class-conditional SN-GAN on CIFAR-10.
 
 This first lesson establishes the shared baseline for the next two scripts:
     - residual generator and discriminator blocks;
@@ -8,7 +8,11 @@ This first lesson establishes the shared baseline for the next two scripts:
     - hinge adversarial losses.
 
 The model intentionally has no self-attention or conditional BatchNorm. It is
-a compact conditional teaching baseline, not an exact paper reproduction.
+a compact teaching baseline rather than an exact paper reproduction. A small
+class embedding keeps the label condition from overwhelming the latent noise,
+and a slightly lower generator learning rate gives the discriminator time to
+learn a useful margin. CIFAR-10 stays at its original 32x32 resolution, so the
+generator uses three rather than four upsampling blocks.
 
 Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.
@@ -22,9 +26,9 @@ Training data — CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
 
-Generator:                1.67 M params
+Generator:                1.25 M params
 Discriminator:            1.22 M params
-Total:                    2.89 M params
+Total:                    2.47 M params
 """
 
 import torch
@@ -32,6 +36,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
+from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
@@ -59,15 +64,20 @@ NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
 Z_DIM = 120
 BASE_CHANNELS = 32
-CONDITION_DIM = 128
-LEARNING_RATE = 2e-4
+IMAGE_SIZE = 32
+# The old 128-dimensional condition was as large as z and dominated it.
+CONDITION_DIM = 32
+GENERATOR_LR = 1e-4
+DISCRIMINATOR_LR = 2e-4
 SAMPLE_EVERY_EPOCHS = 5
+SEED = 42
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
     "num_classes": NUM_CLASSES,
     "base_channels": BASE_CHANNELS,
     "condition_dim": CONDITION_DIM,
+    "image_size": IMAGE_SIZE,
 }
 
 
@@ -111,6 +121,7 @@ def train_epoch(
         noise = torch.randn(batch_size, Z_DIM, device=device)
 
         discriminator.requires_grad_(False)
+        discriminator.eval()
 
         opt_g.zero_grad(set_to_none=True)
         fake = generator(noise, sampled_labels)
@@ -118,6 +129,7 @@ def train_epoch(
             discriminator(fake, sampled_labels)
         )
         loss_g.backward()
+        discriminator.train()
         opt_g.step()
 
         discriminator.requires_grad_(True)
@@ -153,6 +165,7 @@ def main():
         )
 
     reset_dir(str(TRAINING_DIR))
+    set_seed(SEED)
     device = try_gpu()
 
     dataset = datasets.CIFAR10(
@@ -161,7 +174,6 @@ def main():
         download=False,
         transform=transforms.Compose(
             [
-                transforms.Resize(64),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5] * 3, [0.5] * 3),
@@ -185,12 +197,12 @@ def main():
     ).to(device)
     opt_g = torch.optim.Adam(
         generator.parameters(),
-        lr=LEARNING_RATE,
+        lr=GENERATOR_LR,
         betas=(0.0, 0.9),
     )
     opt_d = torch.optim.Adam(
         discriminator.parameters(),
-        lr=LEARNING_RATE,
+        lr=DISCRIMINATOR_LR,
         betas=(0.0, 0.9),
     )
 

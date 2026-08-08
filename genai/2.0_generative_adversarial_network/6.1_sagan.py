@@ -1,9 +1,10 @@
 """Train a compact class-conditional SAGAN on CIFAR-10.
 
-This second lesson keeps the SN-GAN data pipeline, conditioning, losses, and
-optimizer settings unchanged. Its only architectural change is self-attention
-on the generator and discriminator 16x16 feature maps. The learnable residual
-scales start at zero, so training decides how strongly to use non-local cues.
+This attention-focused lesson retains the compact 64x64 backbone shared with
+the BigGAN example. It replaces the middle identity mappings with
+self-attention on 16x16 feature maps. The learnable residual scales start at
+zero, so training decides how strongly to use non-local cues. The native-32x32
+SN-GAN in ``6.0_sn_gan.py`` remains the simpler reference baseline.
 
 Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.

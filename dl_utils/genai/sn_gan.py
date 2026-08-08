@@ -80,11 +80,12 @@ class SNDiscriminatorResidualBlock(nn.Module):
 
 
 class SNGenerator(nn.Module):
-    """Compact 64x64 conditional SN-GAN generator.
+    """Compact 32x32 or 64x64 conditional SN-GAN generator.
 
     Class information enters once at the generator input. The ``attention``
     attribute is an identity layer so the SAGAN lesson can replace exactly one
-    component without changing this forward method.
+    component without changing this forward method. For 32x32 output, the
+    fourth upsampling block becomes an identity mapping.
     """
 
     def __init__(
@@ -93,9 +94,13 @@ class SNGenerator(nn.Module):
         num_classes=10,
         base_channels=32,
         condition_dim=128,
+        image_size=64,
     ):
         super().__init__()
+        if image_size not in (32, 64):
+            raise ValueError("image_size must be 32 or 64.")
         self.z_dim = z_dim
+        self.image_size = image_size
         self.class_embedding = nn.Embedding(num_classes, condition_dim)
         self.input = spectral_norm(
             nn.Linear(z_dim + condition_dim, base_channels * 8 * 4 * 4)
@@ -110,26 +115,30 @@ class SNGenerator(nn.Module):
         self.block3 = SNGeneratorResidualBlock(
             base_channels * 2, base_channels
         )
-        self.block4 = SNGeneratorResidualBlock(base_channels, base_channels)
+        self.block4 = (
+            SNGeneratorResidualBlock(base_channels, base_channels)
+            if image_size == 64
+            else nn.Identity()
+        )
         self.output_norm = nn.BatchNorm2d(base_channels)
         self.output = spectral_norm(nn.Conv2d(base_channels, 3, 3, padding=1))
 
     def forward(self, noise, labels):
         # noise shape: (B, 120), labels shape: (B,)
-        condition = self.class_embedding(labels)  # (B, 128)
-        hidden = self.input(torch.cat([noise, condition], dim=1))  # (B, 248) -> (B, 4096)
+        condition = self.class_embedding(labels)
+        hidden = self.input(torch.cat([noise, condition], dim=1))
         hidden = hidden.view(noise.shape[0], -1, 4, 4)  # (B, 256, 4, 4)
         hidden = self.block1(hidden)     # (B, 128, 8, 8)
         hidden = self.block2(hidden)     # (B, 64, 16, 16)
         hidden = self.attention(hidden)  # (B, 64, 16, 16)
         hidden = self.block3(hidden)     # (B, 32, 32, 32)
-        hidden = self.block4(hidden)     # (B, 32, 64, 64)
+        hidden = self.block4(hidden)     # (B, 32, image_size, image_size)
         hidden = F.relu(self.output_norm(hidden), inplace=True)
-        return torch.tanh(self.output(hidden))  # (B, 3, 64, 64)
+        return torch.tanh(self.output(hidden))  # (B, 3, image_size, image_size)
 
 
 class ProjectionSNDiscriminator(nn.Module):
-    """Compact 64x64 SN-GAN discriminator with projection conditioning."""
+    """Projection discriminator for compact 32x32 or 64x64 SN-GANs."""
 
     def __init__(self, num_classes=10, base_channels=32):
         super().__init__()
@@ -151,13 +160,12 @@ class ProjectionSNDiscriminator(nn.Module):
         )
 
     def forward(self, images, labels):
-        # images shape: (B, 3, 64, 64)，labels shape: (B,)
-        hidden = self.block1(images)     # (B, 32, 32, 32)
-        hidden = self.block2(hidden)     # (B, 64, 16, 16)
-        hidden = self.attention(hidden)  # (B, 64, 16, 16)
-        hidden = self.block3(hidden)     # (B, 128, 8, 8)
-        hidden = self.block4(hidden)     # (B, 256, 4, 4)
-        hidden = F.relu(hidden, inplace=True).sum(dim=(2, 3))  # (B, 256)
+        hidden = self.block1(images)
+        hidden = self.block2(hidden)
+        hidden = self.attention(hidden)
+        hidden = self.block3(hidden)
+        hidden = self.block4(hidden)
+        hidden = F.relu(hidden, inplace=True).sum(dim=(2, 3))
 
         unconditional = self.output(hidden).squeeze(1)
         # Projection discriminator: D(x, y) = f(h(x)) + <e(y), h(x)>.
@@ -183,21 +191,26 @@ def denormalize(images):
 def init_spectral_norm_state(weight_orig, eps=1e-12):
     """Initialize unit vectors for the minimal spectral-normalization lesson.
 
-    This helper accepts only a two-dimensional ``Linear`` weight and belongs
-    to a pure-function teaching example. It is not a replacement for
+    Accepts 2D ``Linear`` weights and higher-dimensional tensors (e.g. ``Conv2d``
+    weights of shape ``[C_out, C_in, kH, kW]``).  For ``ndim > 2`` the weight
+    is flattened to ``[dim0, dim1 * … * dim(n-1)]`` before power iteration, so
+    ``u`` is always ``[dim0]`` and ``v`` is always ``[prod(remaining dims)]``.
+
+    This is a pure-function teaching example, not a replacement for
     :func:`torch.nn.utils.spectral_norm`. Callers must retain the returned
     ``u`` and ``v`` across training steps.
     """
-    if weight_orig.ndim != 2:
+    if weight_orig.ndim < 2:
         raise ValueError(
-            "init_spectral_norm_state requires a two-dimensional Linear "
-            f"weight, but got {weight_orig.ndim} dimensions"
+            "init_spectral_norm_state requires at least two-dimensional weight, "
+            f"but got {weight_orig.ndim} dimensions"
         )
 
     with torch.no_grad():
-        height, width = weight_orig.shape
-        u = F.normalize(weight_orig.new_empty(height).normal_(), dim=0, eps=eps)
-        v = F.normalize(weight_orig.new_empty(width).normal_(), dim=0, eps=eps)
+        out_features = weight_orig.size(0)
+        in_features = weight_orig[0].numel()
+        u = F.normalize(weight_orig.new_empty(out_features).normal_(), dim=0, eps=eps)
+        v = F.normalize(weight_orig.new_empty(in_features).normal_(), dim=0, eps=eps)
     return u, v
 
 
@@ -208,36 +221,44 @@ def spectral_norm_scratch_minimal(
     training,
     eps=1e-12,
 ):
-    """Run one teaching-only power iteration for a 2D ``Linear`` weight.
+    """Run one teaching-only power iteration for a weight tensor.
 
-    This is a two-dimensional, pure-function teaching implementation, not a
-    replacement for :func:`torch.nn.utils.spectral_norm`. Callers must retain
-    the returned ``u`` and ``v`` across training steps; this function owns no
-    persistent state.
+    Supports 2D ``Linear`` weights as well as higher-dimensional tensors
+    (e.g. ``Conv2d`` weights of shape ``[C_out, C_in, kH, kW]``).  For
+    ``ndim > 2`` the weight is flattened to ``[dim0, dim1 * … * dim(n-1)]``
+    before power iteration and ``normalized_weight`` keeps the original shape.
+
+    This is a pure-function teaching implementation, not a replacement for
+    :func:`torch.nn.utils.spectral_norm`. Callers must retain the returned
+    ``u`` and ``v`` across training steps; this function owns no persistent
+    state.
 
     Returns:
         ``(normalized_weight, next_u, next_v, sigma)``.
     """
-    if weight_orig.ndim != 2:
+    if weight_orig.ndim < 2:
         raise ValueError(
-            "spectral_norm_scratch_minimal requires a two-dimensional Linear "
+            "spectral_norm_scratch_minimal requires at least two-dimensional "
             f"weight, but got {weight_orig.ndim} dimensions"
         )
+
+    # Flatten to 2D for matrix–vector operations.
+    weight_2d = weight_orig.view(weight_orig.size(0), -1)
 
     if training:
         # Singular-vector state follows the weight without joining autograd.
         with torch.no_grad():
             next_v = F.normalize(
-                torch.mv(weight_orig.t(), u.detach()), dim=0, eps=eps
+                torch.mv(weight_2d.t(), u.detach()), dim=0, eps=eps
             )
             next_u = F.normalize(
-                torch.mv(weight_orig, next_v), dim=0, eps=eps
+                torch.mv(weight_2d, next_v), dim=0, eps=eps
             )
     else:
         next_u = u.detach()
         next_v = v.detach()
 
     # Recompute sigma with grad enabled so weight_orig receives gradients.
-    sigma = torch.dot(next_u, torch.mv(weight_orig, next_v))
+    sigma = torch.dot(next_u, torch.mv(weight_2d, next_v))
     normalized_weight = weight_orig / sigma
     return normalized_weight, next_u, next_v, sigma
