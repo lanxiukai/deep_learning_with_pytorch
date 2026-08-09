@@ -240,14 +240,13 @@ class SNDiscriminatorResidualBlock(nn.Module):
 
 
 class SNGenerator(nn.Module):
-    """Compact 32x32 or 64x64 conditional SN-GAN generator.
+    """Compact 32x32 conditional SN-GAN generator.
 
     Noise initializes the 4x4 feature map. Each residual block owns a class
     embedding that conditions its BatchNorm affine parameters; optional latent
     reinjection also supplies the complete z vector to those affine maps. The
     ``attention`` attribute is an identity layer so the SAGAN lesson can
-    replace exactly one component without changing this forward method. For
-    32x32 output, the fourth upsampling block is omitted.
+    replace exactly one component without changing this forward method.
     """
 
     def __init__(
@@ -260,11 +259,9 @@ class SNGenerator(nn.Module):
         latent_reinjection=False,
     ):
         super().__init__()
-        if image_size not in (32, 64):
-            raise ValueError("image_size must be 32 or 64.")
+        if image_size != 32:
+            raise ValueError("image_size must be 32.")
         self.z_dim = z_dim
-        self.image_size = image_size
-        self.latent_reinjection = latent_reinjection
         block_z_dim = z_dim if latent_reinjection else None
         self.input = spectral_norm(
             nn.Linear(z_dim, base_channels * 8 * 4 * 4)
@@ -291,17 +288,6 @@ class SNGenerator(nn.Module):
             condition_dim,
             block_z_dim,
         )
-        self.block4 = (
-            SNGeneratorResidualBlock(
-                base_channels,
-                base_channels,
-                num_classes,
-                condition_dim,
-                block_z_dim,
-            )
-            if image_size == 64
-            else nn.Identity()
-        )
         self.output_norm = nn.BatchNorm2d(base_channels)
         self.output = spectral_norm(nn.Conv2d(base_channels, 3, 3, padding=1))
 
@@ -319,11 +305,9 @@ class SNGenerator(nn.Module):
         hidden = self.block2(hidden, labels, noise)  # (B, 2C, 16, 16)
         hidden = self.attention(hidden)  # (B, 2C, 16, 16)
         hidden = self.block3(hidden, labels, noise)  # (B, C, 32, 32)
-        if self.image_size == 64:
-            hidden = self.block4(hidden, labels, noise)  # (B, C, 64, 64)
-        hidden = self.output_norm(hidden)  # (B, C, H, H)
-        hidden = F.relu(hidden, inplace=True)  # (B, C, H, H)
-        images = torch.tanh(self.output(hidden))  # (B, 3, H, H)
+        hidden = self.output_norm(hidden)  # (B, C, 32, 32)
+        hidden = F.relu(hidden, inplace=True)  # (B, C, 32, 32)
+        images = torch.tanh(self.output(hidden))  # (B, 3, 32, 32)
         return images
 
 
@@ -408,195 +392,158 @@ class ProjectionSNDiscriminator(nn.Module):
 
 
 @torch.no_grad()
-def class_conditional_diversity_metrics(images, pool_size=8):
-    """Measure within-class diversity for ``[class, sample, C, H, W]`` images.
-
-    These inexpensive diagnostics are intentionally not named FID or KID. The
-    expected pairwise RMSE detects near-duplicate outputs, while effective rank
-    measures the dimensionality of centered, spatially pooled samples. The
-    class-centroid/within-class ratio exposes label templates dominating
-    sample-level variation.
-    """
-    if images.ndim != 5:
-        raise ValueError(
-            "images must have shape (classes, samples, channels, height, width)."
-        )
-    num_classes, samples_per_class = images.shape[:2]
-    if num_classes < 2 or samples_per_class < 2:
-        raise ValueError("At least two classes and two samples are required.")
-    if not 1 <= pool_size <= min(images.shape[-2:]):
-        raise ValueError("pool_size must fit inside the image dimensions.")
-
-    values = images.detach().float()
-    per_class_variance = values.var(dim=1, correction=1)
-    pairwise_rmse = (2 * per_class_variance.flatten(1).mean(dim=1)).sqrt()
-
-    pooled = F.adaptive_avg_pool2d(
-        values.flatten(0, 1), (pool_size, pool_size)
-    ).reshape(num_classes, samples_per_class, -1)
-    centered = pooled - pooled.mean(dim=1, keepdim=True)
-    effective_ranks = []
-    for class_features in centered:
-        spectrum = torch.linalg.svdvals(class_features).square()
-        spectrum_sum = spectrum.sum()
-        if spectrum_sum <= torch.finfo(spectrum.dtype).eps:
-            effective_ranks.append(spectrum.new_zeros(()))
-            continue
-        probabilities = spectrum / spectrum_sum
-        minimum_probability = torch.finfo(probabilities.dtype).tiny
-        entropy = -(
-            probabilities
-            * probabilities.clamp_min(minimum_probability).log()
-        ).sum()
-        effective_ranks.append(entropy.exp())
-    effective_ranks = torch.stack(effective_ranks)
-
-    centroids = pooled.mean(dim=1)
-    between_variance = centroids.var(dim=0, correction=1).mean()
-    within_variance = pooled.var(dim=1, correction=1).mean()
-    centroid_to_within_ratio = (
-        between_variance / within_variance.clamp_min(1e-12)
-    ).sqrt()
-
-    return {
-        "pairwise_rmse": pairwise_rmse.mean().item(),
-        "pooled_effective_rank": effective_ranks.mean().item(),
-        "class_centroid_to_within_ratio": centroid_to_within_ratio.item(),
-        "pairwise_rmse_per_class": pairwise_rmse.cpu().tolist(),
-        "pooled_effective_rank_per_class": effective_ranks.cpu().tolist(),
-    }
-
-
-@torch.no_grad()
-def conditional_effect_metrics(images):
-    """Compare changing labels at fixed z with changing z at fixed labels."""
-    if images.ndim != 5:
-        raise ValueError(
-            "images must have shape (classes, samples, channels, height, width)."
-        )
-    if images.shape[0] < 2 or images.shape[1] < 2:
-        raise ValueError("At least two classes and two samples are required.")
-
-    values = images.detach().float()
-    label_effect = values.var(dim=0, correction=1).mean().sqrt()
-    latent_effect = values.var(dim=1, correction=1).mean().sqrt()
-    return {
-        "label_effect_rmse": label_effect.item(),
-        "latent_effect_rmse": latent_effect.item(),
-        "label_to_latent_effect_ratio": (
-            label_effect / latent_effect.clamp_min(1e-12)
-        ).item(),
-    }
-
-
-@torch.no_grad()
-def class_conditional_reference_metrics(
+def evaluate_class_conditional_images(
     generated_images,
     real_images,
     pool_size=8,
 ):
-    """Compare generated and real distributions in pooled pixel features.
+    """Return aggregate and per-class collapse diagnostics against real data.
 
-    The returned Fréchet and nearest-neighbor values are dependency-free
-    diagnostics in 8x8 pooled RGB space. They cover distribution alignment,
-    generated-to-real fidelity, and real-to-generated coverage, but they are
-    not replacements for Inception-feature FID/KID.
+    Images must be shaped ``[class, sample, channel, height, width]``. The
+    pooled Fréchet and nearest-neighbor values are dependency-free diagnostics,
+    not Inception-feature FID/KID.
     """
     if generated_images.shape != real_images.shape:
-        raise ValueError(
-            "generated_images and real_images must have identical shapes."
-        )
+        raise ValueError("Generated and real images must have identical shapes.")
     if generated_images.ndim != 5:
         raise ValueError(
-            "images must have shape (classes, samples, channels, height, width)."
+            "Images must have shape (classes, samples, channels, height, width)."
         )
-    if generated_images.shape[0] < 2 or generated_images.shape[1] < 2:
+    num_classes, samples_per_class = generated_images.shape[:2]
+    if num_classes < 2 or samples_per_class < 2:
         raise ValueError("At least two classes and two samples are required.")
     if not 1 <= pool_size <= min(generated_images.shape[-2:]):
         raise ValueError("pool_size must fit inside the image dimensions.")
 
-    num_classes, samples_per_class = generated_images.shape[:2]
+    generated = generated_images.detach().float().cpu()
+    real = real_images.detach().float().cpu()
 
-    def pooled_features(images):
+    def pool(images):
         return F.adaptive_avg_pool2d(
-            images.detach().float().flatten(0, 1),
-            (pool_size, pool_size),
+            images.flatten(0, 1), (pool_size, pool_size)
         ).reshape(num_classes, samples_per_class, -1)
 
+    def diversity(images, features):
+        pairwise_rmse = (
+            2 * images.var(dim=1, correction=1).flatten(1).mean(dim=1)
+        ).sqrt()
+        centered = features - features.mean(dim=1, keepdim=True)
+        ranks = []
+        for class_features in centered:
+            spectrum = torch.linalg.svdvals(class_features).square()
+            if spectrum.sum() <= torch.finfo(spectrum.dtype).eps:
+                ranks.append(spectrum.new_zeros(()))
+                continue
+            probabilities = spectrum / spectrum.sum()
+            entropy = -(
+                probabilities
+                * probabilities.clamp_min(
+                    torch.finfo(probabilities.dtype).tiny
+                ).log()
+            ).sum()
+            ranks.append(entropy.exp())
+        ranks = torch.stack(ranks)
+        between = features.mean(dim=1).var(dim=0, correction=1).mean()
+        within = features.var(dim=1, correction=1).mean()
+        centroid_ratio = (between / within.clamp_min(1e-12)).sqrt()
+        return pairwise_rmse, ranks, centroid_ratio
+
     def frechet_distance(first, second):
-        first = first.to(device="cpu", dtype=torch.float64)
-        second = second.to(device="cpu", dtype=torch.float64)
+        first = first.to(torch.float64)
+        second = second.to(torch.float64)
         first_mean = first.mean(dim=0)
         second_mean = second.mean(dim=0)
         first_centered = first - first_mean
         second_centered = second - second_mean
         first_covariance = (
-            first_centered.transpose(0, 1) @ first_centered
-        ) / (first.shape[0] - 1)
+            first_centered.T @ first_centered / (first.shape[0] - 1)
+        )
         second_covariance = (
-            second_centered.transpose(0, 1) @ second_centered
-        ) / (second.shape[0] - 1)
-
+            second_centered.T @ second_centered / (second.shape[0] - 1)
+        )
         eigenvalues, eigenvectors = torch.linalg.eigh(first_covariance)
         covariance_root = (
             eigenvectors * eigenvalues.clamp_min(0).sqrt().unsqueeze(0)
-        ) @ eigenvectors.transpose(0, 1)
-        covariance_product = (
-            covariance_root @ second_covariance @ covariance_root
-        )
-        covariance_product = (
-            covariance_product + covariance_product.transpose(0, 1)
-        ) * 0.5
-        root_trace = torch.linalg.eigvalsh(covariance_product).clamp_min(
-            0
-        ).sqrt().sum()
-        distance = (
+        ) @ eigenvectors.T
+        product = covariance_root @ second_covariance @ covariance_root
+        product = (product + product.T) * 0.5
+        root_trace = torch.linalg.eigvalsh(product).clamp_min(0).sqrt().sum()
+        return (
             (first_mean - second_mean).square().sum()
             + torch.trace(first_covariance)
             + torch.trace(second_covariance)
             - 2 * root_trace
-        )
-        return distance.clamp_min(0)
+        ).clamp_min(0)
 
-    generated_features = pooled_features(generated_images).cpu()
-    real_features = pooled_features(real_images).cpu()
-    feature_dim = generated_features.shape[-1]
-    distances = torch.cdist(generated_features, real_features) / math.sqrt(
-        feature_dim
+    generated_features = pool(generated)
+    real_features = pool(real)
+    generated_pairwise, generated_ranks, generated_centroid_ratio = diversity(
+        generated, generated_features
     )
-    generated_to_real = distances.amin(dim=2).mean(dim=1)
-    real_to_generated = distances.amin(dim=1).mean(dim=1)
-    class_frechet_distances = torch.stack(
+    real_pairwise, real_ranks, real_centroid_ratio = diversity(
+        real, real_features
+    )
+
+    feature_distances = torch.cdist(
+        generated_features, real_features
+    ) / math.sqrt(generated_features.shape[-1])
+    generated_to_real = feature_distances.amin(dim=2).mean(dim=1)
+    real_to_generated = feature_distances.amin(dim=1).mean(dim=1)
+    class_frechet = torch.stack(
         [
-            frechet_distance(
-                generated_features[class_index],
-                real_features[class_index],
-            )
-            for class_index in range(num_classes)
+            frechet_distance(generated_features[index], real_features[index])
+            for index in range(num_classes)
         ]
     )
-    global_frechet_distance = frechet_distance(
-        generated_features.flatten(0, 1),
-        real_features.flatten(0, 1),
+    global_frechet = frechet_distance(
+        generated_features.flatten(0, 1), real_features.flatten(0, 1)
     )
+    label_effect = generated.var(dim=0, correction=1).mean().sqrt()
+    latent_effect = generated.var(dim=1, correction=1).mean().sqrt()
 
-    return {
-        "pooled_frechet_distance": global_frechet_distance.item(),
-        "class_conditional_pooled_frechet_distance": (
-            class_frechet_distances.mean().item()
+    aggregate = {
+        "generated_pairwise_rmse": generated_pairwise.mean().item(),
+        "real_pairwise_rmse": real_pairwise.mean().item(),
+        "pairwise_rmse_real_ratio": (
+            generated_pairwise.mean() / real_pairwise.mean().clamp_min(1e-12)
+        ).item(),
+        "generated_effective_rank_8x8": generated_ranks.mean().item(),
+        "real_effective_rank_8x8": real_ranks.mean().item(),
+        "effective_rank_real_ratio": (
+            generated_ranks.mean() / real_ranks.mean().clamp_min(1e-12)
+        ).item(),
+        "generated_class_centroid_within_ratio": (
+            generated_centroid_ratio.item()
         ),
+        "real_class_centroid_within_ratio": real_centroid_ratio.item(),
+        "label_effect_rmse": label_effect.item(),
+        "latent_effect_rmse": latent_effect.item(),
+        "label_to_latent_effect_ratio": (
+            label_effect / latent_effect.clamp_min(1e-12)
+        ).item(),
+        "pooled_frechet_distance": global_frechet.item(),
+        "class_conditional_pooled_frechet_distance": class_frechet.mean().item(),
         "generated_to_real_nearest_rmse": generated_to_real.mean().item(),
         "real_to_generated_nearest_rmse": real_to_generated.mean().item(),
-        "pooled_frechet_distance_per_class": (
-            class_frechet_distances.cpu().tolist()
-        ),
-        "generated_to_real_nearest_rmse_per_class": (
-            generated_to_real.cpu().tolist()
-        ),
-        "real_to_generated_nearest_rmse_per_class": (
-            real_to_generated.cpu().tolist()
-        ),
     }
+    per_class = [
+        {
+            "class_index": index,
+            "generated_pairwise_rmse": generated_pairwise[index].item(),
+            "real_pairwise_rmse": real_pairwise[index].item(),
+            "generated_effective_rank_8x8": generated_ranks[index].item(),
+            "real_effective_rank_8x8": real_ranks[index].item(),
+            "pooled_frechet_distance_8x8": class_frechet[index].item(),
+            "generated_to_real_nearest_rmse_8x8": (
+                generated_to_real[index].item()
+            ),
+            "real_to_generated_nearest_rmse_8x8": (
+                real_to_generated[index].item()
+            ),
+        }
+        for index in range(num_classes)
+    ]
+    return aggregate, per_class
 
 
 @torch.no_grad()
@@ -622,11 +569,6 @@ def discriminator_hinge_loss(real_scores, fake_scores):
 def generator_hinge_loss(fake_scores):
     """Return the non-saturating hinge objective used by the generator."""
     return -fake_scores.mean()
-
-
-def denormalize(images):
-    """Map images from [-1, 1] to [0, 1]."""
-    return images.mul(0.5).add(0.5).clamp(0, 1)
 
 
 def init_spectral_norm_state(weight_orig, eps=1e-12):

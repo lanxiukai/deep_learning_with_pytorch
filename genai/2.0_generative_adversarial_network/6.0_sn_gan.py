@@ -65,13 +65,11 @@ from dl_utils.genai.sn_gan import (
     CIFAR10_CLASS_NAMES,
     ProjectionSNDiscriminator,
     SNGenerator,
-    class_conditional_diversity_metrics,
-    class_conditional_reference_metrics,
-    conditional_effect_metrics,
     count_spectral_norm_layers,
     cyclically_mismatched_labels,
     discriminator_diagnostic_sums,
     discriminator_hinge_loss,
+    evaluate_class_conditional_images,
     generator_hinge_loss,
     make_fixed_class_latent_grid,
     update_ema,
@@ -180,115 +178,33 @@ def collect_real_class_samples(dataset, samples_per_class):
 
 
 @torch.inference_mode()
-def generate_evaluation_images(
-    generator,
-    noise,
-    labels,
-    samples_per_class,
-    batch_size,
-):
-    """Generate a class-major tensor while preserving module train/eval mode."""
-    if batch_size < 1:
-        raise ValueError("batch_size must be positive.")
-    was_training = generator.training
-    generator.eval()
-    try:
-        batches = [
-            generator(
-                noise[start : start + batch_size],
-                labels[start : start + batch_size],
-            )
-            .float()
-            .cpu()
-            for start in range(0, len(labels), batch_size)
-        ]
-    finally:
-        generator.train(was_training)
-    images = torch.cat(batches)
-    return images.reshape(NUM_CLASSES, samples_per_class, *images.shape[1:])
-
-
 def evaluate_generator(
     generator,
     evaluation_noise,
     evaluation_labels,
     real_images,
-    real_diversity,
 ):
     """Return collapse-sensitive aggregate and per-class generator metrics."""
-    generated_images = generate_evaluation_images(
-        generator,
-        evaluation_noise,
-        evaluation_labels,
-        EVALUATION_SAMPLES_PER_CLASS,
-        EVALUATION_BATCH_SIZE,
+    was_training = generator.training
+    generator.eval()
+    try:
+        generated_images = torch.cat(
+            [
+                generator(
+                    evaluation_noise[start : start + EVALUATION_BATCH_SIZE],
+                    evaluation_labels[start : start + EVALUATION_BATCH_SIZE],
+                ).float().cpu()
+                for start in range(
+                    0, len(evaluation_labels), EVALUATION_BATCH_SIZE
+                )
+            ]
+        )
+    finally:
+        generator.train(was_training)
+    generated_images = generated_images.reshape(
+        NUM_CLASSES, EVALUATION_SAMPLES_PER_CLASS, *generated_images.shape[1:]
     )
-    generated_diversity = class_conditional_diversity_metrics(
-        generated_images
-    )
-    controlled_effects = conditional_effect_metrics(generated_images)
-    reference_metrics = class_conditional_reference_metrics(
-        generated_images, real_images
-    )
-
-    aggregate = {
-        "generated_pairwise_rmse": generated_diversity["pairwise_rmse"],
-        "real_pairwise_rmse": real_diversity["pairwise_rmse"],
-        "pairwise_rmse_real_ratio": (
-            generated_diversity["pairwise_rmse"]
-            / max(real_diversity["pairwise_rmse"], 1e-12)
-        ),
-        "generated_effective_rank_8x8": generated_diversity[
-            "pooled_effective_rank"
-        ],
-        "real_effective_rank_8x8": real_diversity[
-            "pooled_effective_rank"
-        ],
-        "effective_rank_real_ratio": (
-            generated_diversity["pooled_effective_rank"]
-            / max(real_diversity["pooled_effective_rank"], 1e-12)
-        ),
-        "generated_class_centroid_within_ratio": generated_diversity[
-            "class_centroid_to_within_ratio"
-        ],
-        "real_class_centroid_within_ratio": real_diversity[
-            "class_centroid_to_within_ratio"
-        ],
-        **controlled_effects,
-        **{
-            name: value
-            for name, value in reference_metrics.items()
-            if not name.endswith("_per_class")
-        },
-    }
-    per_class = [
-        {
-            "class_index": class_index,
-            "generated_pairwise_rmse": generated_diversity[
-                "pairwise_rmse_per_class"
-            ][class_index],
-            "real_pairwise_rmse": real_diversity[
-                "pairwise_rmse_per_class"
-            ][class_index],
-            "generated_effective_rank_8x8": generated_diversity[
-                "pooled_effective_rank_per_class"
-            ][class_index],
-            "real_effective_rank_8x8": real_diversity[
-                "pooled_effective_rank_per_class"
-            ][class_index],
-            "pooled_frechet_distance_8x8": reference_metrics[
-                "pooled_frechet_distance_per_class"
-            ][class_index],
-            "generated_to_real_nearest_rmse_8x8": reference_metrics[
-                "generated_to_real_nearest_rmse_per_class"
-            ][class_index],
-            "real_to_generated_nearest_rmse_8x8": reference_metrics[
-                "real_to_generated_nearest_rmse_per_class"
-            ][class_index],
-        }
-        for class_index in range(NUM_CLASSES)
-    ]
-    return aggregate, per_class
+    return evaluate_class_conditional_images(generated_images, real_images)
 
 
 def save_atomic(payload, path):
@@ -479,9 +395,6 @@ def main():
     real_evaluation_images = collect_real_class_samples(
         dataset, EVALUATION_SAMPLES_PER_CLASS
     )
-    real_diversity = class_conditional_diversity_metrics(
-        real_evaluation_images
-    )
 
     generator = SNGenerator(**MODEL_CONFIG).to(device)
     discriminator = ProjectionSNDiscriminator(**DISCRIMINATOR_CONFIG).to(
@@ -510,11 +423,6 @@ def main():
         f"G={parameter_counts['generator'] / 1e6:.2f} M, "
         f"D={parameter_counts['discriminator'] / 1e6:.2f} M, "
         f"total={sum(parameter_counts.values()) / 1e6:.2f} M"
-    )
-    print(
-        "Real-data diversity reference: "
-        f"pairwise RMSE={real_diversity['pairwise_rmse']:.4f}, "
-        f"8x8 rank={real_diversity['pooled_effective_rank']:.2f}"
     )
     opt_g = torch.optim.Adam(
         generator.parameters(),
@@ -650,7 +558,6 @@ def main():
                     evaluation_noise,
                     evaluation_labels,
                     real_evaluation_images,
-                    real_diversity,
                 )
                 append_metric_row(
                     evaluation_history,
