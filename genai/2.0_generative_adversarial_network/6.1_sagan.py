@@ -21,8 +21,8 @@ Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
 
 Generator:                1.17 M params
-Discriminator:            1.22 M params
-Total:                    2.39 M params
+Discriminator:            1.05 M params
+Total:                    2.22 M params
 """
 
 import time

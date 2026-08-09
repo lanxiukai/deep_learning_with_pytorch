@@ -94,4 +94,4 @@ class SAGANDiscriminator(ProjectionSNDiscriminator):
             num_classes=num_classes,
             base_channels=base_channels,
         )
-        self.attention = SelfAttention(base_channels * 2)
+        self.attention = SelfAttention(self.feature_channels)
