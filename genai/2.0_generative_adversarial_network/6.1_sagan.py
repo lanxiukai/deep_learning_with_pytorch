@@ -1,10 +1,16 @@
 """Train a compact class-conditional SAGAN on CIFAR-10.
 
-This attention-focused lesson uses CIFAR-10's native 32x32 resolution. It
-replaces the middle identity mappings with self-attention on middle feature
-maps. The learnable residual scales start at zero, so training decides how
-strongly to use non-local cues. The SN-GAN in ``6.0_sn_gan.py`` remains the
-simpler reference baseline, including its block-local conditional BatchNorm.
+This is the first class-conditional lesson after the unconditional SN-GAN.
+It introduces the two conditioning mechanisms used by the original SAGAN:
+class-indexed conditional BatchNorm in G and projection conditioning in D.
+Self-attention is then applied to middle feature maps in both networks. The
+learnable residual scales start at zero, so training decides how strongly to
+use non-local cues.
+
+The original paper trains 128x128 ImageNet models. CIFAR-10 at 32x32 is a
+compact teaching adaptation, while projection, conditional BatchNorm,
+spectral normalization on both G and D, hinge loss, TTUR, and 1:1 updates
+preserve its main algorithmic choices.
 
 Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.
@@ -20,9 +26,9 @@ Training data — CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
 
-Generator:                1.17 M params
-Discriminator:            1.05 M params
-Total:                    2.22 M params
+Generator:                1.14 M params
+Discriminator:            1.06 M params
+Total:                    2.20 M params
 """
 
 import time
@@ -36,15 +42,18 @@ from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.sagan import SAGANDiscriminator, SAGANGenerator
-from dl_utils.genai.sn_gan import (
+from dl_utils.genai.sagan import (
     CIFAR10_CLASS_NAMES,
-    count_spectral_norm_layers,
+    SAGANDiscriminator,
+    SAGANGenerator,
     cyclically_mismatched_labels,
-    discriminator_diagnostic_sums,
+    make_fixed_class_latent_grid,
+    projection_diagnostic_sums,
+)
+from dl_utils.genai.sn_gan import (
+    count_spectral_norm_layers,
     discriminator_hinge_loss,
     generator_hinge_loss,
-    make_fixed_class_latent_grid,
 )
 from dl_utils.plot.figures import Animator, save_loss_panels
 from dl_utils.plot.images import save_training_samples
@@ -63,7 +72,6 @@ NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
 Z_DIM = 120
 BASE_CHANNELS = 32
-CONDITION_DIM = 32
 IMAGE_SIZE = 32
 GENERATOR_LR = 1e-4
 DISCRIMINATOR_LR = 2e-4
@@ -73,7 +81,6 @@ MODEL_CONFIG = {
     "z_dim": Z_DIM,
     "num_classes": NUM_CLASSES,
     "base_channels": BASE_CHANNELS,
-    "condition_dim": CONDITION_DIM,
     "image_size": IMAGE_SIZE,
 }
 
@@ -122,7 +129,7 @@ def train_epoch(
         )
         fake_scores = discriminator(fake, labels)
         loss_d = discriminator_hinge_loss(real_scores, fake_scores)
-        diagnostic_sums += discriminator_diagnostic_sums(
+        diagnostic_sums += projection_diagnostic_sums(
             real_scores,
             fake_scores,
             correct_projection,
@@ -347,7 +354,10 @@ def main():
     print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
     torch.save(
         {
+            "format_version": 2,
             "model_name": "sagan",
+            "conditioning": "class_conditional",
+            "discriminator_conditioning": "projection",
             "model_config": MODEL_CONFIG,
             "sn_layer_counts": sn_layer_counts,
             "state_dict": generator.state_dict(),

@@ -7,7 +7,8 @@ resolution, and adds the main generator ideas that fit a small teaching model:
     - hierarchical latent chunks joined to successive conditional BatchNorm
       inputs;
     - modified orthogonal regularization;
-    - the same two-time-scale learning rates as the SN-GAN/SAGAN baseline.
+    - the same projection conditioning and two-time-scale learning rates as
+      the SAGAN baseline.
 
 The truncation trick is intentionally reserved for evaluation in 6.3. This is
 a compact BigGAN-style model, not a reproduction of large-scale ImageNet
@@ -26,8 +27,8 @@ Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
 
 Generator:                0.84 M params
-Discriminator:            1.22 M params
-Total:                    2.06 M params
+Discriminator:            1.06 M params
+Total:                    1.90 M params
 """
 
 import torch
@@ -44,8 +45,8 @@ from dl_utils.genai.biggan import (
     CompactBigGANGenerator,
     modified_orthogonal_regularization,
 )
+from dl_utils.genai.sagan import CIFAR10_CLASS_NAMES
 from dl_utils.genai.sn_gan import (
-    CIFAR10_CLASS_NAMES,
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
@@ -296,7 +297,10 @@ def main():
     print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
     torch.save(
         {
+            "format_version": 2,
             "model_name": "biggan",
+            "conditioning": "class_conditional",
+            "discriminator_conditioning": "projection",
             "model_config": MODEL_CONFIG,
             "state_dict": generator.state_dict(),
         },

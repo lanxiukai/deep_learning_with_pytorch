@@ -1,19 +1,21 @@
-"""Compare trained SN-GAN, SAGAN, and compact BigGAN generators.
+"""Qualitatively compare SN-GAN, SAGAN, and compact BigGAN samples.
 
-All three models receive the same class labels and one standard-normal latent
-vector repeated across the class columns, so each row isolates the response to
-changing ``y`` at fixed ``z``. BigGAN is additionally sampled with two
-truncation thresholds; each truncation row likewise repeats one latent vector
-across classes.
+SN-GAN is unconditional, so its row contains ten independent fixed-z samples.
+SAGAN and BigGAN are class conditional: their columns hold z fixed while the
+CIFAR-10 label changes.  BigGAN is also shown at two truncation thresholds.
+
+The rows therefore compare the lessons' generation interfaces and visible
+sample quality; the unconditional row is not a controlled class-response
+experiment.  Quantitative diagnostics remain in the individual training
+scripts.
 
 Inputs:
     output/sn_gan/generator.pth, created by 6.0_sn_gan.py
     output/sagan/generator.pth, created by 6.1_sagan.py
     output/biggan/generator.pth, created by 6.2_biggan.py
 
-Outputs:
-    output/sn_sagan_biggan_evaluation/sn_sagan_biggan_evaluation.png:
-    one titled grid containing all model and truncation rows
+Output:
+    output/sn_sagan_biggan_evaluation/sn_sagan_biggan_evaluation.png
 """
 
 import torch
@@ -23,12 +25,14 @@ from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.biggan import CompactBigGANGenerator, truncated_normal
-from dl_utils.genai.sagan import SAGANGenerator
-from dl_utils.genai.sn_gan import (
+from dl_utils.genai.sagan import (
     CIFAR10_CLASS_NAMES,
+    SAGANGenerator,
+    make_fixed_class_latent_grid,
+)
+from dl_utils.genai.sn_gan import (
     SNGenerator,
     count_spectral_norm_layers,
-    make_fixed_class_latent_grid,
 )
 from dl_utils.plot.images import save_image_row_grid
 
@@ -41,7 +45,7 @@ IMAGE_SIZE = 32
 SEED = 42
 
 DISPLAY_NAMES = {
-    "sn_gan": "SN-GAN",
+    "sn_gan": "SN-GAN (unconditional)",
     "sagan": "SAGAN",
     "biggan": "Compact BigGAN",
 }
@@ -68,7 +72,13 @@ MODEL_SPECS = (
 )
 
 
-def load_generator(model_name, model_class, checkpoint_path, script_name, device):
+def load_generator(
+    model_name,
+    model_class,
+    checkpoint_path,
+    script_name,
+    device,
+):
     """Load one metadata-rich generator checkpoint."""
     if not checkpoint_path.is_file():
         raise FileNotFoundError(
@@ -90,6 +100,14 @@ def load_generator(model_name, model_class, checkpoint_path, script_name, device
             f"Expected a {model_name} checkpoint at {checkpoint_path}, "
             f"found {checkpoint.get('model_name')!r}."
         )
+    if (
+        model_name == "sn_gan"
+        and checkpoint.get("conditioning") != "unconditional"
+    ):
+        raise ValueError(
+            "The SN-GAN checkpoint predates the unconditional lesson. "
+            "Retrain it with 6.0_sn_gan.py."
+        )
 
     model_config = checkpoint.get("model_config")
     state_dict = checkpoint.get("state_dict")
@@ -97,11 +115,16 @@ def load_generator(model_name, model_class, checkpoint_path, script_name, device
         raise ValueError(
             f"Checkpoint metadata is incomplete: {checkpoint_path}."
         )
+    if model_name == "sagan" and "condition_dim" in model_config:
+        raise ValueError(
+            "The SAGAN checkpoint uses the former shared SN-GAN conditioning "
+            "path. Retrain it with 6.1_sagan.py."
+        )
     if model_config.get("image_size") != IMAGE_SIZE:
         raise ValueError(
             f"Expected a {IMAGE_SIZE}x{IMAGE_SIZE} checkpoint at "
             f"{checkpoint_path}. Retrain {script_name} with its default "
-            f"IMAGE_SIZE setting."
+            "IMAGE_SIZE setting."
         )
 
     generator = model_class(**model_config).to(device)
@@ -131,41 +154,48 @@ def main():
             f"layers: {count_spectral_norm_layers(generator)}"
         )
 
-    latent_dimensions = {
-        model_config["z_dim"] for model_config in configurations.values()
+    conditional_dimensions = {
+        configurations[name]["z_dim"] for name in ("sagan", "biggan")
     }
-    if len(latent_dimensions) != 1:
+    if len(conditional_dimensions) != 1:
         raise ValueError(
-            "The three checkpoints must use the same latent dimension for "
-            "a controlled comparison."
+            "SAGAN and BigGAN must use the same latent dimension for the "
+            "fixed-z class comparison."
         )
-    z_dim = latent_dimensions.pop()
-
+    conditional_z_dim = conditional_dimensions.pop()
     class_counts = {
-        model_config["num_classes"]
-        for model_config in configurations.values()
+        configurations[name]["num_classes"]
+        for name in ("sagan", "biggan")
     }
     if class_counts != {NUM_CLASSES}:
         raise ValueError(
-            f"All checkpoints must use {NUM_CLASSES} classes, "
+            f"Conditional checkpoints must use {NUM_CLASSES} classes, "
             f"found {sorted(class_counts)}."
         )
 
     reset_dir(str(OUT_DIR))
-
     torch.manual_seed(SEED)
-    fixed_noise, labels = make_fixed_class_latent_grid(
+    sn_noise = torch.randn(
+        NUM_CLASSES,
+        configurations["sn_gan"]["z_dim"],
+        device=device,
+    )
+    conditional_noise, labels = make_fixed_class_latent_grid(
         NUM_CLASSES,
         1,
-        z_dim,
+        conditional_z_dim,
         device,
     )
-    image_rows = []
-    row_labels = []
 
     with torch.inference_mode():
-        for model_name, _, _, _ in MODEL_SPECS:
-            samples = generators[model_name](fixed_noise, labels).cpu()
+        image_rows = [generators["sn_gan"](sn_noise).cpu()]
+        row_labels = [DISPLAY_NAMES["sn_gan"]]
+
+        for model_name in ("sagan", "biggan"):
+            samples = generators[model_name](
+                conditional_noise,
+                labels,
+            ).cpu()
             image_rows.append(samples)
             row_labels.append(DISPLAY_NAMES[model_name])
 
@@ -173,14 +203,14 @@ def main():
         for truncation in (1.0, 0.5):
             torch.manual_seed(SEED)
             base_noise = truncated_normal(
-                (1, z_dim),
+                (1, conditional_z_dim),
                 truncation,
                 device,
             )
             noise, _ = make_fixed_class_latent_grid(
                 NUM_CLASSES,
                 1,
-                z_dim,
+                conditional_z_dim,
                 device,
                 base_noise=base_noise,
             )
@@ -191,7 +221,10 @@ def main():
         image_rows,
         row_labels,
         OUT_DIR / "sn_sagan_biggan_evaluation.png",
-        title="CIFAR-10 conditional response at fixed per-row z",
+        title=(
+            "Unconditional SN-GAN samples and conditional fixed-z "
+            "CIFAR-10 response"
+        ),
         column_labels=[
             name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
         ],
