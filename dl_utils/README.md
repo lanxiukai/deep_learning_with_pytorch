@@ -381,14 +381,11 @@ Public entries: SelfAttention, SAGANGenerator, SAGANDiscriminator.
 
 ### dl_utils/genai/sn_gan.py
 
-Dependencies: torch, torch.nn.functional (as F), torch (nn), torch.nn.utils
-(spectral_norm).
-Public entries: SNConditionalBatchNorm2d, SNGeneratorResidualBlock,
-SNDiscriminatorResidualBlock, CIFAR10_CLASS_NAMES, SNGenerator,
-ProjectionSNDiscriminator, make_fixed_class_latent_grid,
-cyclically_mismatched_labels, count_spectral_norm_layers,
-discriminator_diagnostic_sums, discriminator_hinge_loss,
-generator_hinge_loss, denormalize,
+Dependencies: math, torch, torch.nn.functional (as F), torch (nn),
+torch.nn.utils (spectral_norm).
+Public entries: SNGeneratorResidualBlock, SNDiscriminatorResidualBlock,
+SNGenerator, SNDiscriminator, count_spectral_norm_layers,
+uniform_dequantize_uint8, discriminator_hinge_loss, generator_hinge_loss,
 init_spectral_norm_state, spectral_norm_scratch_minimal.
 
 ### dl_utils/genai/stylegan_common.py
@@ -452,9 +449,11 @@ writes each group on its own independent-y subplot.
 
 Dependencies: math, os, pathlib (Path), typing (Any), dl_utils.plot._backend, numpy, torch, torchvision, matplotlib.pyplot.
 Public entries: show_images, save_grid, save_image_row_grid,
-save_training_samples, vae_sample_grid.
+save_fixed_noise_samples, save_training_samples, vae_sample_grid.
 `save_image_row_grid` supports an optional figure title, column labels, and
 output DPI while retaining labelled image rows.
+`save_fixed_noise_samples` preserves an unconditional generator's mode while
+rendering a fixed latent batch as labelled rows.
 `save_training_samples` preserves the generator's current training mode while
 rendering fixed class-conditional samples as labelled image rows. Its optional
 AMP settings apply autocast to sample inference and convert the result back to
@@ -464,6 +463,27 @@ FP32 before rendering.
 
 Dependencies: none.
 Public entries: none (docstring-only package marker).
+
+### dl_utils/training/checkpoints.py
+
+Dependencies: random, tempfile, collections.abc (Mapping), os (PathLike),
+pathlib (Path), typing (Any), numpy, torch, torch (nn), torch.optim
+(Optimizer).
+Public entries (__all__): CHECKPOINT_FORMAT_VERSION, atomic_torch_save,
+capture_rng_state, load_training_checkpoint, make_training_checkpoint,
+restore_rng_state, save_model_weights, save_periodic_checkpoint.
+The helpers atomically save latest/archive checkpoints, restore named models,
+optimizers and RNG streams, and save metadata-rich final model weights.
+
+### dl_utils/training/session.py
+
+Dependencies: collections.abc (Mapping), os (PathLike), pathlib (Path),
+typing (Any), torch (nn), torch.optim (Optimizer),
+dl_utils.filesystem.directories (reset_dir),
+dl_utils.training.checkpoints.
+Public entries (__all__): TrainingSession.
+`TrainingSession` manages fresh/resumed output lifecycles, periodic full-state
+checkpoints, and final per-model weights without owning the training loop.
 
 ### dl_utils/training/metrics.py
 

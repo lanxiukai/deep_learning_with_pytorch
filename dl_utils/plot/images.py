@@ -165,6 +165,52 @@ def save_image_row_grid(
             _plt.close(fig)
 
 
+@torch.inference_mode()
+def save_fixed_noise_samples(
+    generator: torch.nn.Module,
+    noise: torch.Tensor,
+    output_path: str | Path,
+    *,
+    columns: int,
+    title: str = "Fixed-noise samples",
+    epoch: int | None = None,
+    dpi: int = 200,
+) -> None:
+    """Generate and save a fixed-noise grid for an unconditional model."""
+    if columns < 1:
+        raise ValueError("columns must be positive.")
+    if noise.ndim < 1 or len(noise) == 0:
+        raise ValueError("noise must contain at least one sample.")
+    if len(noise) % columns != 0:
+        raise ValueError("The number of noise samples must divide into rows.")
+
+    was_training = generator.training
+    generator.eval()
+    try:
+        samples = generator(noise).float().cpu()
+    finally:
+        generator.train(was_training)
+    if samples.ndim != 4 or len(samples) != len(noise):
+        raise ValueError("generator must return an N x C x H x W tensor.")
+
+    image_rows = samples.reshape(-1, columns, *samples.shape[1:])
+    row_labels = [
+        f"z {row * columns + 1:02d}-{(row + 1) * columns:02d}"
+        for row in range(len(image_rows))
+    ]
+    display_title = (
+        title if epoch is None else f"{title} - epoch {epoch:03d}"
+    )
+    save_image_row_grid(
+        image_rows,
+        row_labels,
+        output_path,
+        title=display_title,
+        column_labels=[f"Sample {index + 1}" for index in range(columns)],
+        dpi=dpi,
+    )
+
+
 def save_training_samples(
     generator,
     noise,
