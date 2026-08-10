@@ -1,21 +1,23 @@
-"""Qualitatively compare SN-GAN, SAGAN, and compact BigGAN samples.
+"""Qualitatively evaluate the SN-GAN to BigGAN lesson sequence.
 
-SN-GAN is unconditional, so its row contains ten independent fixed-z samples.
-SAGAN and BigGAN are class conditional: their columns hold z fixed while the
-CIFAR-10 label changes.  BigGAN is also shown at two truncation thresholds.
+The figures keep unlike comparisons separate:
+    - SN-GAN receives independent z samples and no class labels;
+    - SAGAN and BigGAN receive the same z while the CIFAR-10 label changes;
+    - BigGAN repeats the class sweep with progressively tighter truncation.
 
-The rows therefore compare the lessons' generation interfaces and visible
-sample quality; the unconditional row is not a controlled class-response
-experiment.  Quantitative diagnostics remain in the individual training
-scripts.
+This is a compact mechanism check rather than an FID reproduction.  Models are
+trained independently, so shared inputs fix sampling conditions but do not
+create semantic correspondence between generators.
 
 Inputs:
     output/sn_gan/generator.pth, created by 6.0_sn_gan.py
     output/sagan/generator.pth, created by 6.1_sagan.py
     output/biggan/generator.pth, created by 6.2_biggan.py
 
-Output:
-    output/sn_sagan_biggan_evaluation/sn_sagan_biggan_evaluation.png
+Outputs:
+    output/sn_sagan_biggan_evaluation/sn_gan_samples.png
+    output/sn_sagan_biggan_evaluation/conditional_class_sweep.png
+    output/sn_sagan_biggan_evaluation/biggan_truncation.png
 """
 
 import torch
@@ -41,33 +43,38 @@ PROJECT_ROOT = infer_project_root()
 OUT_DIR = PROJECT_ROOT / "output" / "sn_sagan_biggan_evaluation"
 
 NUM_CLASSES = 10
+NUM_UNCONDITIONAL_SAMPLES = 10
 IMAGE_SIZE = 32
+TRUNCATION_THRESHOLDS = (None, 1.0, 0.5)
 SEED = 42
-
-DISPLAY_NAMES = {
-    "sn_gan": "SN-GAN (unconditional)",
-    "sagan": "SAGAN",
-    "biggan": "Compact BigGAN",
-}
 
 MODEL_SPECS = (
     (
         "sn_gan",
+        "SN-GAN",
         SNGenerator,
         PROJECT_ROOT / "output" / "sn_gan" / "generator.pth",
         "6.0_sn_gan.py",
+        "unconditional",
+        None,
     ),
     (
         "sagan",
+        "SAGAN",
         SAGANGenerator,
         PROJECT_ROOT / "output" / "sagan" / "generator.pth",
         "6.1_sagan.py",
+        "class_conditional",
+        None,
     ),
     (
         "biggan",
+        "Compact BigGAN EMA",
         CompactBigGANGenerator,
         PROJECT_ROOT / "output" / "biggan" / "generator.pth",
         "6.2_biggan.py",
+        "class_conditional",
+        "ema",
     ),
 )
 
@@ -77,9 +84,11 @@ def load_generator(
     model_class,
     checkpoint_path,
     script_name,
+    expected_conditioning,
+    expected_weights,
     device,
 ):
-    """Load one metadata-rich generator checkpoint."""
+    """Load one generator produced by the current lesson scripts."""
     if not checkpoint_path.is_file():
         raise FileNotFoundError(
             f"{model_name} checkpoint not found: {checkpoint_path}. "
@@ -95,19 +104,19 @@ def load_generator(
         raise ValueError(
             f"Expected a metadata-rich checkpoint: {checkpoint_path}."
         )
-    if checkpoint.get("model_name") != model_name:
-        raise ValueError(
-            f"Expected a {model_name} checkpoint at {checkpoint_path}, "
-            f"found {checkpoint.get('model_name')!r}."
-        )
-    if (
-        model_name == "sn_gan"
-        and checkpoint.get("conditioning") != "unconditional"
-    ):
-        raise ValueError(
-            "The SN-GAN checkpoint predates the unconditional lesson. "
-            "Retrain it with 6.0_sn_gan.py."
-        )
+
+    expected_metadata = {
+        "model_name": model_name,
+        "conditioning": expected_conditioning,
+    }
+    if expected_weights is not None:
+        expected_metadata["weights"] = expected_weights
+    for key, expected in expected_metadata.items():
+        if checkpoint.get(key) != expected:
+            raise ValueError(
+                f"{checkpoint_path} has {key}={checkpoint.get(key)!r}; "
+                f"expected {expected!r}. Retrain it with {script_name}."
+            )
 
     model_config = checkpoint.get("model_config")
     state_dict = checkpoint.get("state_dict")
@@ -115,22 +124,124 @@ def load_generator(
         raise ValueError(
             f"Checkpoint metadata is incomplete: {checkpoint_path}."
         )
-    if model_name == "sagan" and "condition_dim" in model_config:
-        raise ValueError(
-            "The SAGAN checkpoint uses the former shared SN-GAN conditioning "
-            "path. Retrain it with 6.1_sagan.py."
-        )
     if model_config.get("image_size") != IMAGE_SIZE:
         raise ValueError(
             f"Expected a {IMAGE_SIZE}x{IMAGE_SIZE} checkpoint at "
-            f"{checkpoint_path}. Retrain {script_name} with its default "
-            "IMAGE_SIZE setting."
+            f"{checkpoint_path}."
         )
+    if expected_conditioning == "class_conditional":
+        if model_config.get("num_classes") != NUM_CLASSES:
+            raise ValueError(
+                f"Expected {NUM_CLASSES} classes at {checkpoint_path}."
+            )
 
     generator = model_class(**model_config).to(device)
-    generator.load_state_dict(state_dict)
-    generator.eval()
-    return generator, model_config
+    generator.load_state_dict(state_dict, strict=True)
+    return generator.eval(), model_config
+
+
+def validate_spectral_normalization(generators):
+    """Check the generator-side SN increment introduced by SAGAN."""
+    counts = {
+        name: count_spectral_norm_layers(generator)
+        for name, generator in generators.items()
+    }
+    if counts["sn_gan"] != 0:
+        raise RuntimeError("SN-GAN should keep spectral normalization out of G.")
+    if counts["sagan"] == 0 or counts["biggan"] == 0:
+        raise RuntimeError("SAGAN and BigGAN require spectral normalization in G.")
+    print(
+        "Spectral-normalized generator layers: "
+        f"SN-GAN={counts['sn_gan']}, "
+        f"SAGAN={counts['sagan']}, "
+        f"BigGAN={counts['biggan']}"
+    )
+
+
+@torch.inference_mode()
+def save_sn_gan_samples(generator, z_dim, device):
+    """Save unconditional samples without misleading class-column labels."""
+    torch.manual_seed(SEED)
+    z = torch.randn(NUM_UNCONDITIONAL_SAMPLES, z_dim, device=device)
+    samples = generator(z).cpu()
+    save_image_row_grid(
+        [samples],
+        ["SN-GAN"],
+        OUT_DIR / "sn_gan_samples.png",
+        title="Unconditional SN-GAN samples",
+        column_labels=[
+            f"Sample {index + 1}"
+            for index in range(NUM_UNCONDITIONAL_SAMPLES)
+        ],
+    )
+
+
+@torch.inference_mode()
+def save_conditional_class_sweep(
+    generators,
+    z_dim,
+    device,
+):
+    """Hold one z fixed while changing only the class label."""
+    torch.manual_seed(SEED + 1)
+    base_z = torch.randn(1, z_dim, device=device)
+    noise, labels = make_fixed_class_latent_grid(
+        NUM_CLASSES,
+        1,
+        z_dim,
+        device,
+        base_noise=base_z,
+    )
+    image_rows = [
+        generators[model_name](noise, labels).cpu()
+        for model_name in ("sagan", "biggan")
+    ]
+    save_image_row_grid(
+        image_rows,
+        ["SAGAN", "Compact BigGAN EMA"],
+        OUT_DIR / "conditional_class_sweep.png",
+        title="Fixed-z CIFAR-10 class response",
+        column_labels=[
+            name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
+        ],
+    )
+
+
+@torch.inference_mode()
+def save_biggan_truncation(generator, z_dim, device):
+    """Compare BigGAN class sweeps under three latent distributions."""
+    image_rows = []
+    row_labels = []
+    for threshold in TRUNCATION_THRESHOLDS:
+        torch.manual_seed(SEED + 2)
+        if threshold is None:
+            base_z = torch.randn(1, z_dim, device=device)
+            row_labels.append("Standard normal")
+        else:
+            base_z = truncated_normal(
+                (1, z_dim),
+                threshold,
+                device,
+            )
+            row_labels.append(f"Truncated |z| <= {threshold:.1f}")
+        noise, labels = make_fixed_class_latent_grid(
+            NUM_CLASSES,
+            1,
+            z_dim,
+            device,
+            base_noise=base_z,
+        )
+        image_rows.append(generator(noise, labels).cpu())
+
+    save_image_row_grid(
+        image_rows,
+        row_labels,
+        OUT_DIR / "biggan_truncation.png",
+        title="Compact BigGAN EMA truncation comparison",
+        column_labels=[
+            name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
+        ],
+    )
 
 
 def main():
@@ -139,95 +250,53 @@ def main():
 
     generators = {}
     configurations = {}
-    for model_name, model_class, checkpoint_path, script_name in MODEL_SPECS:
+    for (
+        model_name,
+        _,
+        model_class,
+        checkpoint_path,
+        script_name,
+        conditioning,
+        weights,
+    ) in MODEL_SPECS:
         generator, model_config = load_generator(
             model_name,
             model_class,
             checkpoint_path,
             script_name,
+            conditioning,
+            weights,
             device,
         )
         generators[model_name] = generator
         configurations[model_name] = model_config
-        print(
-            f"{DISPLAY_NAMES[model_name]} spectral-normalized generator "
-            f"layers: {count_spectral_norm_layers(generator)}"
-        )
 
-    conditional_dimensions = {
-        configurations[name]["z_dim"] for name in ("sagan", "biggan")
-    }
-    if len(conditional_dimensions) != 1:
-        raise ValueError(
-            "SAGAN and BigGAN must use the same latent dimension for the "
-            "fixed-z class comparison."
-        )
-    conditional_z_dim = conditional_dimensions.pop()
-    class_counts = {
-        configurations[name]["num_classes"]
+    validate_spectral_normalization(generators)
+    conditional_z_dims = {
+        int(configurations[name]["z_dim"])
         for name in ("sagan", "biggan")
     }
-    if class_counts != {NUM_CLASSES}:
+    if len(conditional_z_dims) != 1:
         raise ValueError(
-            f"Conditional checkpoints must use {NUM_CLASSES} classes, "
-            f"found {sorted(class_counts)}."
+            "SAGAN and BigGAN need the same z_dim for the fixed-z class sweep."
         )
+    conditional_z_dim = conditional_z_dims.pop()
 
     reset_dir(str(OUT_DIR))
-    torch.manual_seed(SEED)
-    sn_noise = torch.randn(
-        NUM_CLASSES,
-        configurations["sn_gan"]["z_dim"],
-        device=device,
+    save_sn_gan_samples(
+        generators["sn_gan"],
+        int(configurations["sn_gan"]["z_dim"]),
+        device,
     )
-    conditional_noise, labels = make_fixed_class_latent_grid(
-        NUM_CLASSES,
-        1,
+    save_conditional_class_sweep(
+        generators,
         conditional_z_dim,
         device,
     )
-
-    with torch.inference_mode():
-        image_rows = [generators["sn_gan"](sn_noise).cpu()]
-        row_labels = [DISPLAY_NAMES["sn_gan"]]
-
-        for model_name in ("sagan", "biggan"):
-            samples = generators[model_name](
-                conditional_noise,
-                labels,
-            ).cpu()
-            image_rows.append(samples)
-            row_labels.append(DISPLAY_NAMES[model_name])
-
-        biggan = generators["biggan"]
-        for truncation in (1.0, 0.5):
-            torch.manual_seed(SEED)
-            base_noise = truncated_normal(
-                (1, conditional_z_dim),
-                truncation,
-                device,
-            )
-            noise, _ = make_fixed_class_latent_grid(
-                NUM_CLASSES,
-                1,
-                conditional_z_dim,
-                device,
-                base_noise=base_noise,
-            )
-            image_rows.append(biggan(noise, labels).cpu())
-            row_labels.append(f"BigGAN truncation {truncation:.1f}")
-
-    save_image_row_grid(
-        image_rows,
-        row_labels,
-        OUT_DIR / "sn_sagan_biggan_evaluation.png",
-        title=(
-            "Unconditional SN-GAN samples and conditional fixed-z "
-            "CIFAR-10 response"
-        ),
-        column_labels=[
-            name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
-        ],
+    save_biggan_truncation(
+        generators["biggan"],
+        conditional_z_dim,
+        device,
     )
 
 

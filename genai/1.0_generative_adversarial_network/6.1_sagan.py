@@ -1,37 +1,47 @@
-"""Train a compact class-conditional SAGAN on CIFAR-10.
+"""Train a compact, paper-oriented class-conditional SAGAN on CIFAR-10.
 
-This is the first class-conditional lesson after the unconditional SN-GAN.
-It introduces the two conditioning mechanisms used by the original SAGAN:
-class-indexed conditional BatchNorm in G and projection conditioning in D.
-Self-attention is then applied to middle feature maps in both networks. The
-learnable residual scales start at zero, so training decides how strongly to
-use non-local cues.
+This lesson starts from the ResNet hinge-GAN training in ``6.0_sn_gan.py``
+and presents SAGAN's algorithmic additions:
+    - class-indexed conditional BatchNorm in G;
+    - projection conditioning in D;
+    - non-local self-attention with a zero-initialized residual gate in G/D;
+    - spectral normalization in both G and D;
+    - TTUR with one D update per G update.
 
-The original paper trains 128x128 ImageNet models. CIFAR-10 at 32x32 is a
-compact teaching adaptation, while projection, conditional BatchNorm,
-spectral normalization on both G and D, hinge loss, TTUR, and 1:1 updates
-preserve its main algorithmic choices.
+The original paper trains 128x128 ImageNet models.  Here the same ideas are
+kept in a three-block 32x32 CIFAR-10 model with ordinary single-device
+BatchNorm.  Random horizontal flips are retained as a small, useful image
+augmentation.  Loss curves, fixed class samples, and full checkpoints are
+training conveniences and do not alter the adversarial updates.
 
 Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.
 
 Outputs:
-    output/sagan/training/epoch_*.png: titled fixed class samples
-    output/sagan/generator.pth
+    output/sagan/training/epoch_*.png: fixed-z samples grouped by class
+    output/sagan/checkpoints/latest.pth: full recoverable training state
+    output/sagan/checkpoints/epoch_*.pth: sparse full-state archives
+    output/sagan/generator.pth: final generator and configuration
+    output/sagan/discriminator.pth: final discriminator and configuration
     output/sagan/loss_curves.png: separate D and G loss panels
-    output/sagan/mechanism_diagnostics.png: hinge activity and projection gap
-    output/sagan/attention_diagnostics.png: gates, entropy, and cost signals
 
-Training data — CIFAR-10:
+Resume an interrupted run:
+    python genai/1.0_generative_adversarial_network/6.1_sagan.py \
+        --resume-from output/sagan/checkpoints/latest.pth
+
+Training data -- CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
+Training epochs:         100
+Optimizer updates:       78,100 D / 78,100 G (1:1)
 
 Generator:                1.14 M params
 Discriminator:            1.06 M params
 Total:                    2.20 M params
 """
 
-import time
+import argparse
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -40,24 +50,21 @@ from tqdm import tqdm
 
 from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
-from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.sagan import (
     CIFAR10_CLASS_NAMES,
     SAGANDiscriminator,
     SAGANGenerator,
-    cyclically_mismatched_labels,
     make_fixed_class_latent_grid,
-    projection_diagnostic_sums,
 )
 from dl_utils.genai.sn_gan import (
     count_spectral_norm_layers,
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
-from dl_utils.plot.figures import Animator, save_loss_panels
+from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_training_samples
-from dl_utils.training.timing import Timer, format_epoch_timing
+from dl_utils.training.session import TrainingSession
 
 
 PROJECT_ROOT = infer_project_root()
@@ -74,14 +81,23 @@ Z_DIM = 120
 BASE_CHANNELS = 32
 IMAGE_SIZE = 32
 GENERATOR_LR = 1e-4
-DISCRIMINATOR_LR = 2e-4
+DISCRIMINATOR_LR = 4e-4
+SAMPLES_TO_DISPLAY = NUM_CLASSES * SAMPLES_PER_CLASS
 SAMPLE_EVERY_EPOCHS = 5
+CHECKPOINT_EVERY_EPOCHS = 5
+ARCHIVE_EVERY_EPOCHS = 25
+SEED = 42
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
     "num_classes": NUM_CLASSES,
     "base_channels": BASE_CHANNELS,
     "image_size": IMAGE_SIZE,
+}
+
+DISCRIMINATOR_CONFIG = {
+    "num_classes": NUM_CLASSES,
+    "base_channels": BASE_CHANNELS,
 }
 
 
@@ -94,60 +110,38 @@ def train_epoch(
     device,
     progress_bar=None,
 ):
-    """Train one epoch and report batch progress."""
-    loop = (
-        loader
-        if progress_bar is not None
-        else tqdm(loader, leave=True, mininterval=1.0)
-    )
-    loss_sums = torch.zeros(2, device=device)
-    diagnostic_sums = torch.zeros(3, device=device)
+    """Train one epoch with SAGAN's balanced D/G hinge updates."""
+    discriminator_loss_sum = torch.zeros((), device=device)
+    generator_loss_sum = torch.zeros((), device=device)
     num_examples = 0
 
-    for batch_index, (real, labels) in enumerate(loop):
+    for real, labels in loader:
         real = real.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         batch_size = real.shape[0]
-        is_last_batch = batch_index + 1 == len(loader)
-        mismatched_labels = cyclically_mismatched_labels(
-            labels, NUM_CLASSES
-        )
 
+        # D learns both realism and whether each image matches its label.
         noise = torch.randn(batch_size, Z_DIM, device=device)
-        if is_last_batch:
-            discriminator.attention.capture_next_attention_entropy()
         with torch.no_grad():
             fake = generator(noise, labels)
-        (
-            real_scores,
-            correct_projection,
-            mismatched_projection,
-        ) = discriminator.forward_with_projection_diagnostics(
-            real,
-            labels,
-            mismatched_labels,
-        )
+        real_scores = discriminator(real, labels)
         fake_scores = discriminator(fake, labels)
         loss_d = discriminator_hinge_loss(real_scores, fake_scores)
-        diagnostic_sums += projection_diagnostic_sums(
-            real_scores,
-            fake_scores,
-            correct_projection,
-            mismatched_projection,
-        )
         opt_d.zero_grad(set_to_none=True)
         loss_d.backward()
         opt_d.step()
 
+        # G receives the class signal through conditional BatchNorm and D's
+        # projection term.  Freezing D avoids computing unused D gradients.
         sampled_labels = torch.randint(
-            NUM_CLASSES, (batch_size,), device=device
+            NUM_CLASSES,
+            (batch_size,),
+            device=device,
         )
         noise = torch.randn(batch_size, Z_DIM, device=device)
         discriminator.requires_grad_(False)
         try:
             opt_g.zero_grad(set_to_none=True)
-            if is_last_batch:
-                generator.attention.capture_next_attention_entropy()
             fake = generator(noise, sampled_labels)
             loss_g = generator_hinge_loss(
                 discriminator(fake, sampled_labels)
@@ -157,41 +151,28 @@ def train_epoch(
         finally:
             discriminator.requires_grad_(True)
 
-        batch_losses = torch.stack([loss_d, loss_g]).detach()
-        loss_sums += batch_losses * batch_size
+        discriminator_loss_sum += loss_d.detach() * batch_size
+        generator_loss_sum += loss_g.detach() * batch_size
         num_examples += batch_size
-        batch_loss_values = batch_losses.tolist()
-        loss_d_value, loss_g_value = batch_loss_values
 
-        if progress_bar is None:
-            loop.set_postfix(
-                loss_D=loss_d_value,
-                loss_G=loss_g_value,
-                refresh=False,
-            )
-        else:
-            progress_bar.set_postfix(
-                loss_D=loss_d_value,
-                loss_G=loss_g_value,
-                refresh=False,
-            )
+        if progress_bar is not None:
             progress_bar.update(1)
 
-    epoch_sums = torch.cat([loss_sums, diagnostic_sums]).tolist()
-    return tuple(value / num_examples for value in epoch_sums)
+    return (
+        (discriminator_loss_sum / num_examples).item(),
+        (generator_loss_sum / num_examples).item(),
+    )
 
 
-def main():
+def main(resume_from=None):
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
             f"CIFAR-10 data not found: {DATA_DIR}. "
             "Run tool_scripts/download_dataset_test.py first."
         )
 
-    reset_dir(str(TRAINING_DIR))
-    set_seed(42)
+    set_seed(SEED)
     device = try_gpu()
-
     dataset = datasets.CIFAR10(
         DATA_DIR,
         train=True,
@@ -215,19 +196,14 @@ def main():
     )
 
     generator = SAGANGenerator(**MODEL_CONFIG).to(device)
-    discriminator = SAGANDiscriminator(
-        num_classes=NUM_CLASSES,
-        base_channels=BASE_CHANNELS,
-    ).to(device)
-    sn_layer_counts = {
-        "generator": count_spectral_norm_layers(generator),
-        "discriminator": count_spectral_norm_layers(discriminator),
-    }
-    print(
-        "Spectral-normalized layers: "
-        f"G={sn_layer_counts['generator']}, "
-        f"D={sn_layer_counts['discriminator']}"
+    discriminator = SAGANDiscriminator(**DISCRIMINATOR_CONFIG).to(device)
+    sn_layer_counts = (
+        count_spectral_norm_layers(generator),
+        count_spectral_norm_layers(discriminator),
     )
+    if sn_layer_counts[0] == 0 or sn_layer_counts[1] == 0:
+        raise RuntimeError("SAGAN requires spectral norm in both G and D.")
+
     opt_g = torch.optim.Adam(
         generator.parameters(),
         lr=GENERATOR_LR,
@@ -239,59 +215,83 @@ def main():
         betas=(0.0, 0.9),
     )
 
+    session = TrainingSession(
+        OUT_DIR,
+        total_epochs=NUM_EPOCHS,
+        models={"generator": generator, "discriminator": discriminator},
+        optimizers={"generator": opt_g, "discriminator": opt_d},
+        checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
+        archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
+        metadata={
+            "format_version": 5,
+            "conditioning": "class_conditional",
+            "discriminator_conditioning": "projection",
+            "update_ratio": 1,
+        },
+        model_metadata={
+            "generator": {
+                "model_name": "sagan",
+                "model_config": MODEL_CONFIG,
+            },
+            "discriminator": {
+                "model_name": "sagan_discriminator",
+                "model_config": DISCRIMINATOR_CONFIG,
+            },
+        },
+    )
     fixed_noise, fixed_labels = make_fixed_class_latent_grid(
         NUM_CLASSES,
         SAMPLES_PER_CLASS,
         Z_DIM,
         device,
     )
-    loss_steps = []
-    discriminator_losses = []
-    generator_losses = []
-    real_hinge_active_fractions = []
-    fake_hinge_active_fractions = []
-    projection_score_gaps = []
-    generator_gammas = []
-    discriminator_gammas = []
-    generator_attention_entropies = []
-    discriminator_attention_entropies = []
-    training_throughputs = []
-    peak_memory_megabytes = []
-    samples_per_epoch = len(loader) * BATCH_SIZE
-    animator = Animator(
-        xlabel="epoch",
-        ylabel="loss",
-        xlim=[1, NUM_EPOCHS],
-        legend=["D hinge loss", "G adversarial loss"],
-        figsize=(6, 4),
+    start_epoch, state = session.start(
+        resume_from,
+        initial_state={
+            "loss_history": {
+                "epoch": [],
+                "discriminator": [],
+                "generator": [],
+            },
+            "fixed_noise": fixed_noise.cpu(),
+            "fixed_labels": fixed_labels.cpu(),
+        },
     )
+    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
+    loss_history = state["loss_history"]
+    fixed_noise = state["fixed_noise"].to(device)
+    fixed_labels = state["fixed_labels"].to(device)
 
-    timer = Timer()
+    if loss_history["epoch"] != list(range(1, start_epoch)):
+        raise ValueError("Checkpoint loss history does not match its epoch.")
+    expected_shape = (SAMPLES_TO_DISPLAY, Z_DIM)
+    if tuple(fixed_noise.shape) != expected_shape:
+        raise ValueError("Checkpoint fixed noise has an unexpected shape.")
+    if tuple(fixed_labels.shape) != (SAMPLES_TO_DISPLAY,):
+        raise ValueError("Checkpoint fixed labels have an unexpected shape.")
+    if fixed_labels.dtype != torch.long:
+        raise ValueError("Checkpoint fixed labels must use torch.long.")
+    if resume_from is not None:
+        print(f"Resumed training from epoch {start_epoch - 1}: {resume_from}")
+
+    planned_updates = NUM_EPOCHS * len(loader)
+    completed_updates = (start_epoch - 1) * len(loader)
+    print(f"Planned optimizer updates: D={planned_updates:,}, G={planned_updates:,}")
     with tqdm(
-        total=NUM_EPOCHS * len(loader),
-        desc=f"Epoch 1/{NUM_EPOCHS}",
+        total=planned_updates,
+        initial=completed_updates,
+        desc=f"Epoch {min(start_epoch, NUM_EPOCHS)}/{NUM_EPOCHS}",
         unit="batch",
         dynamic_ncols=True,
         mininterval=1.0,
     ) as progress_bar:
-        for epoch in range(1, NUM_EPOCHS + 1):
+        for epoch in range(start_epoch, NUM_EPOCHS + 1):
             progress_bar.set_description(
                 f"Epoch {epoch}/{NUM_EPOCHS}",
                 refresh=False,
             )
 
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-                torch.cuda.reset_peak_memory_stats(device)
-            epoch_start = time.perf_counter()
-
-            (
-                loss_d,
-                loss_g,
-                real_hinge_active,
-                fake_hinge_active,
-                projection_score_gap,
-            ) = train_epoch(
+            loss_d, loss_g = train_epoch(
                 generator,
                 discriminator,
                 loader,
@@ -300,47 +300,10 @@ def main():
                 device,
                 progress_bar=progress_bar,
             )
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            epoch_seconds = time.perf_counter() - epoch_start
+            loss_history["epoch"].append(epoch)
+            loss_history["discriminator"].append(loss_d)
+            loss_history["generator"].append(loss_g)
 
-            generator_gamma = generator.attention.gamma.detach().item()
-            discriminator_gamma = discriminator.attention.gamma.detach().item()
-            generator_entropy = generator.attention.last_attention_entropy
-            discriminator_entropy = (
-                discriminator.attention.last_attention_entropy
-            )
-            if generator_entropy is None or discriminator_entropy is None:
-                raise RuntimeError("Attention entropy probe did not run.")
-
-            loss_steps.append(epoch)
-            discriminator_losses.append(loss_d)
-            generator_losses.append(loss_g)
-            real_hinge_active_fractions.append(real_hinge_active)
-            fake_hinge_active_fractions.append(fake_hinge_active)
-            projection_score_gaps.append(projection_score_gap)
-            generator_gammas.append(generator_gamma)
-            discriminator_gammas.append(discriminator_gamma)
-            generator_attention_entropies.append(generator_entropy)
-            discriminator_attention_entropies.append(discriminator_entropy)
-            training_throughputs.append(samples_per_epoch / epoch_seconds)
-            if device.type == "cuda":
-                peak_memory_megabytes.append(
-                    torch.cuda.max_memory_allocated(device) / (1024**2)
-                )
-            animator.add(epoch, (loss_d, loss_g))
-            progress_bar.set_postfix(
-                loss_D=loss_d,
-                loss_G=loss_g,
-                gamma_G=generator_gamma,
-                gamma_D=discriminator_gamma,
-                entropy_G=generator_entropy,
-                entropy_D=discriminator_entropy,
-                hinge_real=real_hinge_active,
-                hinge_fake=fake_hinge_active,
-                projection_gap=projection_score_gap,
-                refresh=False,
-            )
             if epoch == 1 or epoch % SAMPLE_EVERY_EPOCHS == 0:
                 save_training_samples(
                     generator,
@@ -351,69 +314,32 @@ def main():
                     title=f"SAGAN fixed class samples - epoch {epoch:03d}",
                     shared_latents_across_classes=True,
                 )
-    print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
-    torch.save(
-        {
-            "format_version": 2,
-            "model_name": "sagan",
-            "conditioning": "class_conditional",
-            "discriminator_conditioning": "projection",
-            "model_config": MODEL_CONFIG,
-            "sn_layer_counts": sn_layer_counts,
-            "state_dict": generator.state_dict(),
-        },
-        OUT_DIR / "generator.pth",
-    )
+
+            session.checkpoint(epoch, state)
+
+    session.finish()
     save_loss_panels(
-        loss_steps,
+        loss_history["epoch"],
         {
             "Discriminator hinge loss": {
-                "D hinge loss": discriminator_losses,
+                "D hinge loss": loss_history["discriminator"],
             },
             "Generator adversarial loss": {
-                "G adversarial loss": generator_losses,
+                "G adversarial loss": loss_history["generator"],
             },
         },
         OUT_DIR / "loss_curves.png",
     )
-    save_loss_panels(
-        loss_steps,
-        {
-            "Active hinge-margin fraction": {
-                "Real: D(x, y) < 1": real_hinge_active_fractions,
-                "Fake: D(G(z), y) > -1": fake_hinge_active_fractions,
-            },
-            "Projection score gap": {
-                "Correct - mismatched label": projection_score_gaps,
-            },
-        },
-        OUT_DIR / "mechanism_diagnostics.png",
-        ylabel="value",
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train the class-conditional CIFAR-10 SAGAN."
     )
-    diagnostic_panels = {
-        "Attention residual gates": {
-            "Generator gamma": generator_gammas,
-            "Discriminator gamma": discriminator_gammas,
-        },
-        "Normalized attention entropy": {
-            "Generator entropy": generator_attention_entropies,
-            "Discriminator entropy": discriminator_attention_entropies,
-        },
-        "Training throughput (samples/s)": {
-            "Training throughput": training_throughputs,
-        },
-    }
-    if peak_memory_megabytes:
-        diagnostic_panels["Peak CUDA memory (MiB)"] = {
-            "Peak allocated memory": peak_memory_megabytes,
-        }
-    save_loss_panels(
-        loss_steps,
-        diagnostic_panels,
-        OUT_DIR / "attention_diagnostics.png",
-        ylabel="value",
-    )
+    parser.add_argument("--resume-from", type=Path, metavar="CHECKPOINT")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(resume_from=args.resume_from)
