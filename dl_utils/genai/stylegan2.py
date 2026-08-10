@@ -1,4 +1,10 @@
-"""Compact 32x32 StyleGAN2 without progressive growing or AdaIN."""
+"""Compact 32x32 StyleGAN2 without progressive growing or AdaIN.
+
+The generator keeps weight modulation/demodulation, per-layer stochastic
+noise, skip-connected RGB outputs, style mixing, truncation, and the original
+overlapping W-slot indexing. The discriminator keeps residual filtered
+downsampling and a minibatch-standard-deviation feature.
+"""
 
 import math
 import random
@@ -17,6 +23,7 @@ from dl_utils.genai.stylegan_common import (
     denormalize,
     filtered_downsample2d,
     filtered_upsample2d,
+    validate_resolution,
 )
 
 
@@ -27,6 +34,8 @@ class MappingNetwork(nn.Module):
         super().__init__()
         if layers <= 0:
             raise ValueError("mapping network must contain at least one layer.")
+        if z_dim <= 0 or style_dim <= 0:
+            raise ValueError("z_dim and style_dim must be positive.")
         modules = [PixelNorm()]
         in_features = z_dim
         for _ in range(layers):
@@ -36,6 +45,7 @@ class MappingNetwork(nn.Module):
                         in_features,
                         style_dim,
                         learning_rate_multiplier=0.01,
+                        gain=math.sqrt(2),
                     ),
                     nn.LeakyReLU(0.2, inplace=True),
                 ]
@@ -64,6 +74,16 @@ class ModulatedConv2d(nn.Module):
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
         self.kernel_size = int(kernel_size)
+        self.style_dim = int(style_dim)
+        if min(
+            self.in_channels,
+            self.out_channels,
+            self.kernel_size,
+            self.style_dim,
+        ) <= 0:
+            raise ValueError("convolution dimensions must be positive.")
+        if self.kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd.")
         self.demodulate = bool(demodulate)
         self.upsample = bool(upsample)
         self.padding = self.kernel_size // 2
@@ -91,7 +111,7 @@ class ModulatedConv2d(nn.Module):
             raise ValueError(
                 f"expected {self.in_channels} input channels, got {channels}"
             )
-        if style.ndim != 2 or style.shape[0] != batch:
+        if style.ndim != 2 or style.shape != (batch, self.style_dim):
             raise ValueError("style must be a [B, style_dim] tensor.")
 
         style_scale = self.modulation(style).view(
@@ -169,13 +189,14 @@ class StyledConv(nn.Module):
             out_channels,
             resolution,
             fixed_noise_seed,
+            per_channel=False,
         )
         self.bias = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
 
     def forward(self, inputs, style, noise_mode="random"):
         hidden = self.convolution(inputs, style)
         hidden = self.noise(hidden, noise_mode)
-        return F.leaky_relu(hidden + self.bias, 0.2)
+        return F.leaky_relu(hidden + self.bias, 0.2) * math.sqrt(2)
 
 
 class ToRGB(nn.Module):
@@ -197,7 +218,7 @@ class ToRGB(nn.Module):
 
 
 class SynthesisBlock(nn.Module):
-    """Two modulated convolutions plus a skip-connected RGB output."""
+    """One StyleGAN2 resolution block plus a skip-connected RGB output."""
 
     def __init__(
         self,
@@ -210,27 +231,42 @@ class SynthesisBlock(nn.Module):
         first=False,
     ):
         super().__init__()
+        self.first = bool(first)
+        self.num_ws = 2 if self.first else 3
         self.conv1 = StyledConv(
             in_channels,
             out_channels,
             style_dim,
             resolution,
             fixed_noise_seed,
-            upsample=not first,
+            upsample=not self.first,
         )
-        self.conv2 = StyledConv(
-            out_channels,
-            out_channels,
-            style_dim,
-            resolution,
-            fixed_noise_seed + 1,
+        self.conv2 = (
+            None
+            if self.first
+            else StyledConv(
+                out_channels,
+                out_channels,
+                style_dim,
+                resolution,
+                fixed_noise_seed + 1,
+            )
         )
         self.to_rgb = ToRGB(out_channels, style_dim)
 
     def forward(self, inputs, styles, rgb, noise_mode="random"):
+        if styles.ndim != 3 or styles.shape[1] != self.num_ws:
+            raise ValueError(
+                f"expected {self.num_ws} W inputs for this synthesis block."
+            )
         hidden = self.conv1(inputs, styles[:, 0], noise_mode)
-        hidden = self.conv2(hidden, styles[:, 1], noise_mode)
-        new_rgb = self.to_rgb(hidden, styles[:, 2])
+        if self.first:
+            rgb_style = styles[:, 1]
+        else:
+            assert self.conv2 is not None
+            hidden = self.conv2(hidden, styles[:, 1], noise_mode)
+            rgb_style = styles[:, 2]
+        new_rgb = self.to_rgb(hidden, rgb_style)
         if rgb is not None:
             new_rgb = new_rgb + filtered_upsample2d(rgb)
         return hidden, new_rgb
@@ -253,6 +289,10 @@ class StyleGenerator(nn.Module):
         self.z_dim = int(z_dim)
         self.style_dim = int(style_dim)
         self.base_channels = int(base_channels)
+        if min(self.z_dim, self.style_dim, self.base_channels) <= 0:
+            raise ValueError(
+                "z_dim, style_dim, and base_channels must be positive."
+            )
         self.w_avg_beta = float(w_avg_beta)
         self.mapping = MappingNetwork(
             self.z_dim,
@@ -261,7 +301,9 @@ class StyleGenerator(nn.Module):
         )
         self.register_buffer("w_avg", torch.zeros(self.style_dim))
         self.resolutions = RESOLUTIONS
-        self.styles_per_block = 3
+        # Every new resolution contributes two W slots. ToRGB consumes the
+        # next slot, which is also reused by the following block's first conv.
+        self.styles_per_block = 2
         self.num_ws = len(self.resolutions) * self.styles_per_block
         channels = {
             4: self.base_channels * 8,
@@ -279,12 +321,19 @@ class StyleGenerator(nn.Module):
                     channels[resolution],
                     self.style_dim,
                     resolution,
-                    fixed_noise_seed=2 * index,
+                    fixed_noise_seed=max(0, 2 * index - 1),
                     first=resolution == 4,
                 )
                 for index, resolution in enumerate(self.resolutions)
             ]
         )
+
+    def num_ws_for_resolution(self, resolution):
+        """Return the cumulative W slots through one synthesis resolution."""
+        resolution = validate_resolution(resolution, self.resolutions)
+        return (
+            self.resolutions.index(resolution) + 1
+        ) * self.styles_per_block
 
     def make_ws(
         self,
@@ -356,8 +405,8 @@ class StyleGenerator(nn.Module):
         hidden = self.constant.expand(ws.shape[0], -1, -1, -1)
         rgb = None
         for index, block in enumerate(self.blocks):
-            start = self.styles_per_block * index
-            block_styles = ws[:, start : start + self.styles_per_block]
+            start = 0 if index == 0 else 2 * index - 1
+            block_styles = ws[:, start : start + block.num_ws]
             hidden, rgb = block(
                 hidden,
                 block_styles,
@@ -431,6 +480,8 @@ class StyleDiscriminator(nn.Module):
     def __init__(self, base_channels=32):
         super().__init__()
         self.base_channels = int(base_channels)
+        if self.base_channels <= 0:
+            raise ValueError("base_channels must be positive.")
         channels = {
             32: self.base_channels * 2,
             16: self.base_channels * 4,

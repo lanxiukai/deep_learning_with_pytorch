@@ -1,4 +1,9 @@
-"""Compact 4x4-to-32x32 ProGAN models for the progressive-growing lesson."""
+"""Compact 4x4-to-32x32 ProGAN models for progressive-growing study.
+
+The module keeps the paper's equalized learning rate, pixel normalization,
+minibatch-standard-deviation feature, filtered resolution transitions, and
+real/fake fade-in paths without reproducing its large training system.
+"""
 
 import math
 
@@ -21,6 +26,8 @@ from dl_utils.genai.stylegan_common import (
 
 
 def _channel_map(base_channels):
+    if base_channels <= 0:
+        raise ValueError("base_channels must be positive.")
     return {
         4: base_channels * 8,
         8: base_channels * 8,
@@ -88,6 +95,8 @@ class ProGANGenerator(nn.Module):
         super().__init__()
         self.z_dim = int(z_dim)
         self.base_channels = int(base_channels)
+        if self.z_dim <= 0:
+            raise ValueError("z_dim must be positive.")
         self.resolutions = RESOLUTIONS
         self.channels = _channel_map(self.base_channels)
         self.input_block = GeneratorInputBlock(

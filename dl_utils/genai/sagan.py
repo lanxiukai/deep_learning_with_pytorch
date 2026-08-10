@@ -6,8 +6,6 @@ Keeping those mechanisms here makes the preceding SN-GAN lesson genuinely
 unconditional while allowing BigGAN to inherit the same conditional baseline.
 """
 
-import math
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -60,83 +58,46 @@ def make_fixed_class_latent_grid(
     return noise, labels
 
 
-def cyclically_mismatched_labels(labels, num_classes):
-    """Map every class to a guaranteed-different diagnostic class."""
-    if num_classes < 2:
-        raise ValueError("num_classes must be at least 2 for mismatched labels.")
-    return (labels + 1) % num_classes
-
-
-def projection_diagnostic_sums(
-    real_scores,
-    fake_scores,
-    correct_projection,
-    mismatched_projection,
-):
-    """Return hinge activity and correct-minus-wrong projection batch sums."""
-    return torch.stack(
-        [
-            (real_scores.detach().float() < 1).sum(dtype=torch.float32),
-            (fake_scores.detach().float() > -1).sum(dtype=torch.float32),
-            (
-                correct_projection.detach().float()
-                - mismatched_projection.detach().float()
-            ).sum(),
-        ]
-    )
-
-
 class SelfAttention(nn.Module):
-    """SAGAN non-local attention with a zero-initialized residual gate."""
+    """SAGAN non-local attention with pooled keys and values.
+
+    The query keeps the full spatial grid, while the key and value branches
+    are pooled by two. This preserves the paper's non-local interaction while
+    keeping the quadratic attention matrix practical for image features.
+    """
 
     def __init__(self, channels):
         super().__init__()
-        attention_channels = max(1, channels // 8)
+        if channels <= 0:
+            raise ValueError("channels must be positive.")
+        key_channels = max(1, channels // 8)
+        value_channels = max(1, channels // 2)
         self.query = spectral_norm(
-            nn.Conv2d(channels, attention_channels, 1)
+            nn.Conv2d(channels, key_channels, 1)
         )
         self.key = spectral_norm(
-            nn.Conv2d(channels, attention_channels, 1)
+            nn.Conv2d(channels, key_channels, 1)
         )
         self.value = spectral_norm(
-            nn.Conv2d(channels, attention_channels, 1)
+            nn.Conv2d(channels, value_channels, 1)
         )
         self.output = spectral_norm(
-            nn.Conv2d(attention_channels, channels, 1)
+            nn.Conv2d(value_channels, channels, 1)
         )
         self.gamma = nn.Parameter(torch.zeros(()))
-        self._capture_attention_entropy = False
-        self.last_attention_entropy = None
-
-    def capture_next_attention_entropy(self):
-        """Capture normalized entropy from the next attention forward pass."""
-        self.last_attention_entropy = None
-        self._capture_attention_entropy = True
 
     def forward(self, inputs):
+        if inputs.ndim != 4:
+            raise ValueError("SelfAttention expects an NCHW tensor.")
         batch, _, height, width = inputs.shape
+        if min(height, width) < 2:
+            raise ValueError("SelfAttention needs spatial dimensions >= 2.")
+
         query = self.query(inputs).flatten(2).transpose(1, 2)
-        key = self.key(inputs).flatten(2)
+        key = F.max_pool2d(self.key(inputs), 2).flatten(2)
         attention = torch.softmax(query @ key, dim=-1)
 
-        if self._capture_attention_entropy:
-            self._capture_attention_entropy = False
-            probabilities = attention.detach().to(
-                device="cpu", dtype=torch.float32
-            )
-            probabilities = probabilities.clamp_min(1e-12)
-            entropy = -(probabilities * probabilities.log()).sum(dim=-1)
-            maximum_entropy = math.log(probabilities.shape[-1])
-            normalized_entropy = (
-                entropy.mean() / maximum_entropy
-                if maximum_entropy > 0
-                else entropy.new_zeros(())
-            )
-            self.last_attention_entropy = normalized_entropy.clamp(
-                0, 1
-            ).item()
-
-        value = self.value(inputs).flatten(2)
+        value = F.max_pool2d(self.value(inputs), 2).flatten(2)
         attended = value @ attention.transpose(1, 2)
         attended = attended.view(batch, -1, height, width)
         return inputs + self.gamma * self.output(attended)
@@ -288,24 +249,13 @@ class SAGANDiscriminator(nn.Module):
         projection = (self.class_embedding(labels) * hidden).sum(dim=1)
         return unconditional + projection
 
-    def forward_with_projection_diagnostics(
-        self,
-        images,
-        labels,
-        mismatched_labels,
-    ):
-        """Score images and compare correct with deliberately wrong labels."""
-        if labels.shape != mismatched_labels.shape:
-            raise ValueError(
-                "labels and mismatched_labels must have the same shape."
-            )
-        hidden = self.extract_features(images)
-        unconditional = self.output(hidden).squeeze(1)
-        paired_labels = torch.cat([labels, mismatched_labels])
-        correct_features, mismatched_features = self.class_embedding(
-            paired_labels
-        ).chunk(2, dim=0)
-        correct_projection = (correct_features * hidden).sum(dim=1)
-        mismatched_projection = (mismatched_features * hidden).sum(dim=1)
-        scores = unconditional + correct_projection
-        return scores, correct_projection, mismatched_projection
+
+__all__ = [
+    "CIFAR10_CLASS_NAMES",
+    "ConditionalBatchNorm2d",
+    "SAGANDiscriminator",
+    "SAGANGenerator",
+    "SAGANGeneratorResidualBlock",
+    "SelfAttention",
+    "make_fixed_class_latent_grid",
+]

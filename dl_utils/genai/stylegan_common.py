@@ -133,24 +133,44 @@ class MinibatchStandardDeviation(nn.Module):
         self.maximum_group = int(maximum_group)
 
     def forward(self, inputs):
+        if inputs.ndim != 4 or inputs.shape[0] == 0:
+            raise ValueError(
+                "MinibatchStandardDeviation expects a non-empty NCHW tensor."
+            )
         batch, channels, height, width = inputs.shape
         group = min(batch, self.maximum_group)
         while batch % group:
             group -= 1
-        grouped = inputs.view(group, -1, channels, height, width)
+        grouped = inputs.float().view(
+            group,
+            -1,
+            channels,
+            height,
+            width,
+        )
         deviation = torch.sqrt(grouped.var(dim=0, unbiased=False) + 1e-8)
         feature = deviation.mean(dim=(1, 2, 3), keepdim=True)
-        feature = feature.repeat(group, 1, height, width)
+        feature = feature.repeat(group, 1, height, width).to(inputs.dtype)
         return torch.cat([inputs, feature], dim=1)
 
 
 class NoiseInjection(nn.Module):
     """Add learned-strength random, deterministic, or disabled spatial noise."""
 
-    def __init__(self, channels, resolution, fixed_noise_seed):
+    def __init__(
+        self,
+        channels,
+        resolution,
+        fixed_noise_seed,
+        *,
+        per_channel=True,
+    ):
         super().__init__()
+        if channels <= 0 or resolution <= 0:
+            raise ValueError("channels and resolution must be positive.")
         self.resolution = int(resolution)
-        self.weight = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        weight_shape = (1, channels, 1, 1) if per_channel else ()
+        self.weight = nn.Parameter(torch.zeros(weight_shape))
         generator = torch.Generator().manual_seed(int(fixed_noise_seed))
         fixed_noise = torch.randn(
             1,

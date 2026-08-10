@@ -23,6 +23,8 @@ from dl_utils.genai.stylegan_common import (
 
 
 def _channel_map(base_channels):
+    if base_channels <= 0:
+        raise ValueError("base_channels must be positive.")
     return {
         4: base_channels * 8,
         8: base_channels * 8,
@@ -38,6 +40,8 @@ class MappingNetwork(nn.Module):
         super().__init__()
         if layers <= 0:
             raise ValueError("mapping network must contain at least one layer.")
+        if z_dim <= 0 or style_dim <= 0:
+            raise ValueError("z_dim and style_dim must be positive.")
         modules = [PixelNorm()]
         in_features = z_dim
         for _ in range(layers):
@@ -47,6 +51,7 @@ class MappingNetwork(nn.Module):
                         in_features,
                         style_dim,
                         learning_rate_multiplier=0.01,
+                        gain=math.sqrt(2),
                     ),
                     nn.LeakyReLU(0.2, inplace=True),
                 ]
@@ -173,6 +178,10 @@ class StyleGANGenerator(nn.Module):
         self.z_dim = int(z_dim)
         self.style_dim = int(style_dim)
         self.base_channels = int(base_channels)
+        if min(self.z_dim, self.style_dim, self.base_channels) <= 0:
+            raise ValueError(
+                "z_dim, style_dim, and base_channels must be positive."
+            )
         self.w_avg_beta = float(w_avg_beta)
         self.resolutions = RESOLUTIONS
         self.styles_per_block = 2
@@ -271,8 +280,10 @@ class StyleGANGenerator(nn.Module):
             raise ValueError("truncation_psi must be non-negative.")
         if truncation_cutoff is None:
             truncation_cutoff = active_ws
-        if not 0 <= truncation_cutoff <= self.num_ws:
-            raise ValueError("truncation_cutoff is outside the style stack.")
+        if not 0 <= truncation_cutoff <= active_ws:
+            raise ValueError(
+                "truncation_cutoff is outside the active style stack."
+            )
         if truncation_psi != 1.0 and truncation_cutoff > 0:
             truncated = torch.lerp(
                 self.w_avg.view(1, 1, -1),

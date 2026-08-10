@@ -153,12 +153,28 @@ class BigGANDiscriminator(SAGANDiscriminator):
     """SAGAN projection discriminator reused by the compact BigGAN lesson."""
 
 
-def modified_orthogonal_regularization(module, strength=1e-4):
-    """Penalize off-diagonal filter correlations in generator weights.
+def initialize_orthogonal_weights(module):
+    """Apply BigGAN's orthogonal initialization to learned weight tensors."""
+    if not isinstance(module, (nn.Conv2d, nn.Linear, nn.Embedding)):
+        return
+    weight = getattr(module, "weight_orig", None)
+    if weight is None:
+        weight = module.weight
+    nn.init.orthogonal_(weight)
+    if getattr(module, "bias", None) is not None:
+        nn.init.zeros_(module.bias)
 
-    The smaller matrix orientation is used to keep the teaching model's
-    regularization cost bounded for wide linear layers.
+
+def modified_orthogonal_regularization(module, strength=1e-4):
+    """Return BigGAN's filter-wise modified orthogonal regularizer.
+
+    For tall matrices, the equivalent column-Gram identity avoids allocating
+    a potentially large filter-by-filter matrix without changing the loss or
+    its gradient. The factor of one half matches the gradient update in the
+    reference BigGAN implementation.
     """
+    if strength < 0:
+        raise ValueError("strength must be non-negative.")
     first_parameter = next(module.parameters())
     penalty = first_parameter.new_zeros(())
 
@@ -166,13 +182,18 @@ def modified_orthogonal_regularization(module, strength=1e-4):
         if parameter.ndim < 2 or "class_embedding" in name:
             continue
         matrix = parameter.flatten(start_dim=1)
-        if matrix.shape[0] > matrix.shape[1]:
-            matrix = matrix.transpose(0, 1)
-        gram = matrix @ matrix.transpose(0, 1)
-        off_diagonal = gram - torch.diag_embed(torch.diagonal(gram))
-        penalty = penalty + off_diagonal.square().sum()
+        if matrix.shape[0] <= matrix.shape[1]:
+            gram = matrix @ matrix.transpose(0, 1)
+            off_diagonal = gram - torch.diag_embed(
+                torch.diagonal(gram)
+            )
+            penalty = penalty + off_diagonal.square().sum()
+        else:
+            column_gram = matrix.transpose(0, 1) @ matrix
+            row_norm_fourth = matrix.square().sum(dim=1).square().sum()
+            penalty = penalty + column_gram.square().sum() - row_norm_fourth
 
-    return strength * penalty
+    return 0.5 * strength * penalty
 
 
 def truncated_normal(shape, truncation, device):
@@ -186,3 +207,14 @@ def truncated_normal(shape, truncation, device):
         samples[invalid] = torch.randn_like(samples[invalid])
         invalid = samples.abs() > truncation
     return samples
+
+
+__all__ = [
+    "BigGANDiscriminator",
+    "BigGANGeneratorResidualBlock",
+    "CompactBigGANGenerator",
+    "ConditionalBatchNorm2d",
+    "initialize_orthogonal_weights",
+    "modified_orthogonal_regularization",
+    "truncated_normal",
+]

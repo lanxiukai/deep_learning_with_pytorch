@@ -38,8 +38,8 @@ Training epochs:         100
 Optimizer updates:       78,100 D / 39,050 G (exactly 2:1)
 
 Generator:                0.84 M params (plus one EMA copy)
-Discriminator:            1.06 M params
-Trainable total:          1.90 M params
+Discriminator:            1.08 M params
+Trainable total:          1.92 M params
 """
 
 import argparse
@@ -47,7 +47,6 @@ from copy import deepcopy
 from pathlib import Path
 
 import torch
-from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
@@ -58,6 +57,7 @@ from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.biggan import (
     BigGANDiscriminator,
     CompactBigGANGenerator,
+    initialize_orthogonal_weights,
     modified_orthogonal_regularization,
 )
 from dl_utils.genai.sagan import (
@@ -111,18 +111,6 @@ DISCRIMINATOR_CONFIG = {
     "num_classes": NUM_CLASSES,
     "base_channels": BASE_CHANNELS,
 }
-
-
-def initialize_orthogonal_weights(module):
-    """Apply BigGAN's orthogonal initialization to learned affine maps."""
-    if isinstance(module, (nn.Conv2d, nn.Linear, nn.Embedding)):
-        weight = getattr(module, "weight_orig", None)
-        if weight is None:
-            weight = module.weight
-        nn.init.orthogonal_(weight)
-        bias = getattr(module, "bias", None)
-        if bias is not None:
-            nn.init.zeros_(bias)
 
 
 @torch.no_grad()
@@ -304,7 +292,7 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 5,
+            "format_version": 6,
             "conditioning": "class_conditional",
             "discriminator_conditioning": "projection",
             "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,

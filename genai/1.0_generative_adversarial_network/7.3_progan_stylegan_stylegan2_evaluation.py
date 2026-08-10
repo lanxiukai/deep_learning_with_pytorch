@@ -53,6 +53,7 @@ MODEL_SPECS = (
         ProGANGenerator,
         PROJECT_ROOT / "output" / "progan" / "progan_generator.pth",
         "7.0_progan.py",
+        5,
     ),
     (
         "stylegan",
@@ -60,6 +61,7 @@ MODEL_SPECS = (
         StyleGANGenerator,
         PROJECT_ROOT / "output" / "stylegan" / "stylegan_generator.pth",
         "7.1_stylegan.py",
+        6,
     ),
     (
         "stylegan2",
@@ -67,6 +69,7 @@ MODEL_SPECS = (
         StyleGenerator,
         PROJECT_ROOT / "output" / "stylegan2" / "stylegan2_generator.pth",
         "7.2_stylegan2.py",
+        6,
     ),
 )
 
@@ -76,6 +79,7 @@ def load_generator(
     model_class,
     checkpoint_path,
     script_name,
+    expected_format_version,
     device,
 ):
     """Load one EMA generator produced by the current lesson scripts."""
@@ -97,6 +101,7 @@ def load_generator(
 
     expected_metadata = {
         "model_name": model_name,
+        "format_version": expected_format_version,
         "conditioning": "unconditional",
         "weights": "ema",
     }
@@ -192,11 +197,7 @@ def generate_style_mixing(generator, model_name, row_z, column_z):
         noise_mode="fixed",
     )
 
-    coarse_blocks = sum(
-        resolution <= COARSE_MAX_RESOLUTION
-        for resolution in generator.resolutions
-    )
-    cutoff = coarse_blocks * generator.styles_per_block
+    cutoff = generator.num_ws_for_resolution(COARSE_MAX_RESOLUTION)
     mixed_ws = torch.stack(
         [
             torch.cat(
@@ -329,12 +330,20 @@ def main():
 
     generators = {}
     configurations = {}
-    for model_name, _, model_class, path, script_name in MODEL_SPECS:
+    for (
+        model_name,
+        _,
+        model_class,
+        path,
+        script_name,
+        format_version,
+    ) in MODEL_SPECS:
         generator, model_config = load_generator(
             model_name,
             model_class,
             path,
             script_name,
+            format_version,
             device,
         )
         generators[model_name] = generator

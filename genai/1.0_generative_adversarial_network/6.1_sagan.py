@@ -4,7 +4,8 @@ This lesson starts from the ResNet hinge-GAN training in ``6.0_sn_gan.py``
 and presents SAGAN's algorithmic additions:
     - class-indexed conditional BatchNorm in G;
     - projection conditioning in D;
-    - non-local self-attention with a zero-initialized residual gate in G/D;
+    - non-local self-attention with pooled key/value branches and a
+      zero-initialized residual gate in G/D;
     - spectral normalization in both G and D;
     - TTUR with one D update per G update.
 
@@ -36,8 +37,8 @@ Training epochs:         100
 Optimizer updates:       78,100 D / 78,100 G (1:1)
 
 Generator:                1.14 M params
-Discriminator:            1.06 M params
-Total:                    2.20 M params
+Discriminator:            1.08 M params
+Total:                    2.22 M params
 """
 
 import argparse
@@ -223,7 +224,7 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 5,
+            "format_version": 6,
             "conditioning": "class_conditional",
             "discriminator_conditioning": "projection",
             "update_ratio": 1,

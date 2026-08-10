@@ -8,14 +8,14 @@ Submodules:
     pix2pix:  Paired CelebA data, U-Net generator, conditional PatchGAN, and
               shared preprocessing helpers.
     sn_gan:   Conditional SN-GAN residual blocks, hinge losses, and helpers.
-    sagan:    Self-attention extensions for the SN-GAN generator and
-              discriminator.
+    sagan:    Pooled non-local attention plus conditional generator and
+              projection-discriminator components.
     biggan:   Conditional BatchNorm, hierarchical latent conditioning,
-              orthogonal regularization, and truncated sampling.
+              orthogonal initialization/regularization, and truncated sampling.
     stylegan_common: Equalized layers, noise control, minibatch statistics,
                      and pure PyTorch filtered resampling.
     progan:    Progressive-growing generator and critic blocks.
     stylegan:  Progressive AdaIN synthesis, W-space styles, and truncation.
-    stylegan2: Modulated/demodulated synthesis, skip RGB generation, and the
-               residual discriminator.
+    stylegan2: Modulated/demodulated synthesis, overlapping W-slot routing,
+               skip RGB generation, and the residual discriminator.
 """

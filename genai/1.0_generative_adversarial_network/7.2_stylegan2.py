@@ -2,11 +2,12 @@
 
 Compared with StyleGAN, this lesson presents the main StyleGAN2 increments:
     - per-sample weight modulation/demodulation instead of AdaIN;
+    - the original one-convolution 4x4 block and eight overlapping W slots;
     - skip-connected RGB outputs and full-resolution training;
     - residual discriminator downsampling;
     - lazy R1 and path-length regularization in separate optimizer passes;
     - lazy-regularization compensation for Adam's learning rate and beta2;
-    - style mixing, stochastic noise, truncation state, and G-EMA.
+    - style mixing, scalar-strength layer noise, truncation state, and G-EMA.
 
 The complete mapping, synthesis, and discriminator models live in
 ``dl_utils/genai/stylegan2.py``.  This is a pure-PyTorch 32x32 teaching model,
@@ -35,9 +36,9 @@ Samples per epoch:       49,984 (1,562 full batches; drop_last=True)
 Training epochs:         100
 Main optimizer updates:  156,200 D / 156,200 G (1:1)
 
-Generator:                3.28 M params (plus one EMA copy)
+Generator:                2.66 M params (plus one EMA copy)
 Discriminator:            3.48 M params
-Trainable total:          6.77 M params
+Trainable total:          6.14 M params
 """
 
 import argparse
@@ -371,7 +372,7 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 5,
+            "format_version": 6,
             "conditioning": "unconditional",
             "objective": "non_saturating_logistic_r1_path",
             "progressive_training": False,

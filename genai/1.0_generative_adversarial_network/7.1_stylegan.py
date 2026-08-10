@@ -422,7 +422,7 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 5,
+            "format_version": 6,
             "conditioning": "unconditional",
             "objective": "non_saturating_logistic_r1",
             "progressive_training": True,

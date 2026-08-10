@@ -55,6 +55,7 @@ MODEL_SPECS = (
         SNGenerator,
         PROJECT_ROOT / "output" / "sn_gan" / "generator.pth",
         "6.0_sn_gan.py",
+        5,
         "unconditional",
         None,
     ),
@@ -64,6 +65,7 @@ MODEL_SPECS = (
         SAGANGenerator,
         PROJECT_ROOT / "output" / "sagan" / "generator.pth",
         "6.1_sagan.py",
+        6,
         "class_conditional",
         None,
     ),
@@ -73,6 +75,7 @@ MODEL_SPECS = (
         CompactBigGANGenerator,
         PROJECT_ROOT / "output" / "biggan" / "generator.pth",
         "6.2_biggan.py",
+        6,
         "class_conditional",
         "ema",
     ),
@@ -84,6 +87,7 @@ def load_generator(
     model_class,
     checkpoint_path,
     script_name,
+    expected_format_version,
     expected_conditioning,
     expected_weights,
     device,
@@ -107,6 +111,7 @@ def load_generator(
 
     expected_metadata = {
         "model_name": model_name,
+        "format_version": expected_format_version,
         "conditioning": expected_conditioning,
     }
     if expected_weights is not None:
@@ -256,6 +261,7 @@ def main():
         model_class,
         checkpoint_path,
         script_name,
+        format_version,
         conditioning,
         weights,
     ) in MODEL_SPECS:
@@ -264,6 +270,7 @@ def main():
             model_class,
             checkpoint_path,
             script_name,
+            format_version,
             conditioning,
             weights,
             device,
