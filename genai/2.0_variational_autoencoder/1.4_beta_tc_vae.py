@@ -13,10 +13,10 @@ the density-ratio calculation visible, but paper-level dataset comparisons
 should use the minibatch-weighted estimator from Chen et al. (2018).
 
 Run a one-batch gradient/shape check:
-    python genai/1.0_variational_autoencoder/1.4_beta_tc_vae.py --smoke-test
+    python genai/2.0_variational_autoencoder/1.4_beta_tc_vae.py --smoke-test
 
 Train on MNIST:
-    python genai/1.0_variational_autoencoder/1.4_beta_tc_vae.py
+    python genai/2.0_variational_autoencoder/1.4_beta_tc_vae.py
 """
 
 from __future__ import annotations

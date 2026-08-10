@@ -16,8 +16,8 @@ This is a deliberately small MNIST implementation.  It also exposes KL
 warm-up and free bits so layer-wise posterior collapse can be inspected.
 
 Run:
-    python genai/1.0_variational_autoencoder/2.0_ladder_vae.py --smoke-test
-    python genai/1.0_variational_autoencoder/2.0_ladder_vae.py
+    python genai/2.0_variational_autoencoder/2.0_ladder_vae.py --smoke-test
+    python genai/2.0_variational_autoencoder/2.0_ladder_vae.py
 """
 
 from __future__ import annotations

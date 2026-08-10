@@ -29,7 +29,7 @@ Outputs:
     output/sn_gan/loss_curves.png: separate D and G loss panels
 
 Resume an interrupted run:
-    python genai/2.0_generative_adversarial_network/6.0_sn_gan.py \
+    python genai/1.0_generative_adversarial_network/6.0_sn_gan.py \
         --resume-from output/sn_gan/checkpoints/latest.pth
 
 Training data -- CIFAR-10:

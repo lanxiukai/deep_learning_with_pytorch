@@ -29,8 +29,8 @@ the PyTorch framework.
 │
 ├── genai/                           # Generative AI lessons
 │   ├── 0.0_energy_based_model/
-│   ├── 1.0_variational_autoencoder/
-│   ├── 2.0_generative_adversarial_network/
+│   ├── 1.0_generative_adversarial_network/
+│   ├── 2.0_variational_autoencoder/
 │   └── 3.0_diffusion_model/
 │
 ├── docs/                            # Implementation notes and model guides

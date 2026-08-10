@@ -16,11 +16,11 @@ Adversarial training starts after a warm-up.  Its weight is balanced against
 the reconstruction objective using gradient norms on the decoder's last layer.
 
 Run:
-    python genai/1.0_variational_autoencoder/4.0_vqgan_kl_autoencoder.py \
+    python genai/2.0_variational_autoencoder/4.0_vqgan_kl_autoencoder.py \
         --smoke-test
-    python genai/1.0_variational_autoencoder/4.0_vqgan_kl_autoencoder.py \
+    python genai/2.0_variational_autoencoder/4.0_vqgan_kl_autoencoder.py \
         --bottleneck vq
-    python genai/1.0_variational_autoencoder/4.0_vqgan_kl_autoencoder.py \
+    python genai/2.0_variational_autoencoder/4.0_vqgan_kl_autoencoder.py \
         --bottleneck kl
 """
 

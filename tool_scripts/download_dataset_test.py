@@ -230,7 +230,7 @@ except Exception as e:
 #            (ImageFolder layout: one subdirectory per Pokédex number)
 #            ToTensor() auto-converts palette → 3ch RGB; reshape to 64×64 for training
 #     Cache: extracts to data/pokemon/ with class subdirectories (e.g., bulbasaur/, pikachu/)
-#     Used by: genai/2.0_generative_adversarial_network/ (DCGAN training)
+#     Used by: genai/1.0_generative_adversarial_network/ (DCGAN training)
 #     Download: https://d2l-data.s3-accelerate.amazonaws.com/pokemon.zip
 # ============================================================
 data_dir = download_extract('pokemon', data_root=DATA_DIR)

@@ -10,8 +10,8 @@ The encoder still receives a straight-through gradient and the output remains
 an integer grid suitable for the same second-stage prior used by VQ-VAE.
 
 Run:
-    python genai/1.0_variational_autoencoder/3.1_fsq.py --smoke-test
-    python genai/1.0_variational_autoencoder/3.1_fsq.py
+    python genai/2.0_variational_autoencoder/3.1_fsq.py --smoke-test
+    python genai/2.0_variational_autoencoder/3.1_fsq.py
 """
 
 from __future__ import annotations

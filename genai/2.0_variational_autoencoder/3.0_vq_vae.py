@@ -12,8 +12,8 @@ on the integer index grid.  Reconstruction and unconditional generation are
 therefore two different paths, as they should be.
 
 Quick checks and training:
-    python genai/1.0_variational_autoencoder/3.0_vq_vae.py --smoke-test
-    python genai/1.0_variational_autoencoder/3.0_vq_vae.py --stage all
+    python genai/2.0_variational_autoencoder/3.0_vq_vae.py --smoke-test
+    python genai/2.0_variational_autoencoder/3.0_vq_vae.py --stage all
 """
 
 from __future__ import annotations
