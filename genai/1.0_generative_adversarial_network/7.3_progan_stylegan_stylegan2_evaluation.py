@@ -17,11 +17,12 @@ Inputs:
     output/stylegan2/stylegan2_generator.pth, created by 7.2_stylegan2.py
 
 Outputs:
-    output/progan_stylegan_stylegan2_evaluation/fixed_samples.png
-    output/progan_stylegan_stylegan2_evaluation/noise_variations.png
-    output/progan_stylegan_stylegan2_evaluation/stylegan_style_mixing.png
-    output/progan_stylegan_stylegan2_evaluation/stylegan2_style_mixing.png
-    output/progan_stylegan_stylegan2_evaluation/truncation.png
+    Each evaluation directory is reset at the start of every run.
+    output/{progan,stylegan,stylegan2}/evaluation/fixed_samples.png
+    output/{stylegan,stylegan2}/evaluation/noise_variations.png
+    output/stylegan/evaluation/stylegan_style_mixing.png
+    output/stylegan2/evaluation/stylegan2_style_mixing.png
+    output/{stylegan,stylegan2}/evaluation/truncation.png
 """
 
 import torch
@@ -37,7 +38,14 @@ from dl_utils.plot.images import save_image_row_grid
 
 
 PROJECT_ROOT = infer_project_root()
-OUT_DIR = PROJECT_ROOT / "output" / "progan_stylegan_stylegan2_evaluation"
+MODEL_OUT_DIRS = {
+    model_name: PROJECT_ROOT / "output" / model_name
+    for model_name in ("progan", "stylegan", "stylegan2")
+}
+EVALUATION_DIRS = {
+    model_name: output_dir / "evaluation"
+    for model_name, output_dir in MODEL_OUT_DIRS.items()
+}
 
 SEED = 42
 NUM_FIXED_SAMPLES = 8
@@ -51,7 +59,7 @@ MODEL_SPECS = (
         "progan",
         "ProGAN EMA",
         ProGANGenerator,
-        PROJECT_ROOT / "output" / "progan" / "progan_generator.pth",
+        MODEL_OUT_DIRS["progan"] / "progan_generator.pth",
         "7.0_progan.py",
         5,
     ),
@@ -59,7 +67,7 @@ MODEL_SPECS = (
         "stylegan",
         "StyleGAN EMA",
         StyleGANGenerator,
-        PROJECT_ROOT / "output" / "stylegan" / "stylegan_generator.pth",
+        MODEL_OUT_DIRS["stylegan"] / "stylegan_generator.pth",
         "7.1_stylegan.py",
         6,
     ),
@@ -67,7 +75,7 @@ MODEL_SPECS = (
         "stylegan2",
         "StyleGAN2 EMA",
         StyleGenerator,
-        PROJECT_ROOT / "output" / "stylegan2" / "stylegan2_generator.pth",
+        MODEL_OUT_DIRS["stylegan2"] / "stylegan2_generator.pth",
         "7.2_stylegan2.py",
         6,
     ),
@@ -255,34 +263,36 @@ def generate_truncation_samples(generator, model_name, z):
 def save_fixed_samples(fixed_samples):
     """Save the shared-z comparison for all three generator families."""
     names = ("progan", "stylegan", "stylegan2")
-    save_image_row_grid(
-        [fixed_samples[name] for name in names],
-        ["ProGAN EMA", "StyleGAN EMA", "StyleGAN2 EMA"],
-        OUT_DIR / "fixed_samples.png",
-        title=(
-            "Shared-z samples from independently trained generators "
-            "(no semantic alignment implied)"
-        ),
-        column_labels=[
-            f"Shared z {index + 1}" for index in range(NUM_FIXED_SAMPLES)
-        ],
-    )
+    for model_name in names:
+        save_image_row_grid(
+            [fixed_samples[name] for name in names],
+            ["ProGAN EMA", "StyleGAN EMA", "StyleGAN2 EMA"],
+            EVALUATION_DIRS[model_name] / "fixed_samples.png",
+            title=(
+                "Shared-z samples from independently trained generators "
+                "(no semantic alignment implied)"
+            ),
+            column_labels=[
+                f"Shared z {index + 1}" for index in range(NUM_FIXED_SAMPLES)
+            ],
+        )
 
 
 def save_noise_variations(noise_variations):
     """Save stochastic-noise rows while W remains unchanged."""
-    save_image_row_grid(
-        [
-            noise_variations["stylegan"],
-            noise_variations["stylegan2"],
-        ],
-        ["StyleGAN EMA", "StyleGAN2 EMA"],
-        OUT_DIR / "noise_variations.png",
-        title="One fixed W with independent stochastic layer noise",
-        column_labels=[
-            f"Noise {index + 1}" for index in range(NUM_NOISE_VARIATIONS)
-        ],
-    )
+    for model_name in ("stylegan", "stylegan2"):
+        save_image_row_grid(
+            [
+                noise_variations["stylegan"],
+                noise_variations["stylegan2"],
+            ],
+            ["StyleGAN EMA", "StyleGAN2 EMA"],
+            EVALUATION_DIRS[model_name] / "noise_variations.png",
+            title="One fixed W with independent stochastic layer noise",
+            column_labels=[
+                f"Noise {index + 1}" for index in range(NUM_NOISE_VARIATIONS)
+            ],
+        )
 
 
 def save_style_mixing(model_name, display_name, mixing_data):
@@ -299,7 +309,7 @@ def save_style_mixing(model_name, display_name, mixing_data):
         ["Fine sources"] + [
             f"Coarse {index + 1}" for index in range(NUM_STYLE_SOURCES)
         ],
-        OUT_DIR / f"{model_name}_style_mixing.png",
+        EVALUATION_DIRS[model_name] / f"{model_name}_style_mixing.png",
         title=(
             f"{display_name}: 4-8 px styles from rows, "
             "16-32 px styles from columns"
@@ -312,19 +322,23 @@ def save_style_mixing(model_name, display_name, mixing_data):
 
 def save_truncation(truncation_samples):
     """Save learned-W-center interpolation for both style generators."""
-    save_image_row_grid(
-        [
-            truncation_samples["stylegan"],
-            truncation_samples["stylegan2"],
-        ],
-        ["StyleGAN EMA", "StyleGAN2 EMA"],
-        OUT_DIR / "truncation.png",
-        title="One fixed z interpolated toward each model's learned w_avg",
-        column_labels=[f"psi={psi:.1f}" for psi in TRUNCATION_PSIS],
-    )
+    for model_name in ("stylegan", "stylegan2"):
+        save_image_row_grid(
+            [
+                truncation_samples["stylegan"],
+                truncation_samples["stylegan2"],
+            ],
+            ["StyleGAN EMA", "StyleGAN2 EMA"],
+            EVALUATION_DIRS[model_name] / "truncation.png",
+            title="One fixed z interpolated toward each model's learned w_avg",
+            column_labels=[f"psi={psi:.1f}" for psi in TRUNCATION_PSIS],
+        )
 
 
 def main():
+    for evaluation_dir in EVALUATION_DIRS.values():
+        reset_dir(str(evaluation_dir))
+
     set_seed(SEED)
     device = try_gpu()
 
@@ -357,7 +371,6 @@ def main():
             "The three checkpoints need the same z_dim for shared-z sampling."
         )
     z_dim = latent_dimensions.pop()
-    reset_dir(str(OUT_DIR))
 
     torch.manual_seed(SEED)
     fixed_z = torch.randn(NUM_FIXED_SAMPLES, z_dim, device=device)

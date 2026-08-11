@@ -21,6 +21,8 @@ Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.
 
 Outputs:
+    Fresh runs reset training/ and checkpoints/ before setup; --resume-from
+    preserves both directories.
     output/sn_gan/training/epoch_*.png: fixed-z unconditional samples
     output/sn_gan/checkpoints/latest.pth: full recoverable training state
     output/sn_gan/checkpoints/epoch_*.pth: sparse full-state archives
@@ -53,6 +55,7 @@ from tqdm import tqdm
 
 from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.sn_gan import (
     SNDiscriminator,
@@ -70,6 +73,7 @@ PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
 OUT_DIR = PROJECT_ROOT / "output" / "sn_gan"
 TRAINING_DIR = OUT_DIR / "training"
+CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
 NUM_EPOCHS = 650
 DISCRIMINATOR_BATCH_SIZE = 64
@@ -171,6 +175,10 @@ def train_epoch(
 
 
 def main(resume_from=None):
+    if resume_from is None:
+        reset_dir(str(TRAINING_DIR))
+        reset_dir(str(CHECKPOINT_DIR))
+
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
             f"CIFAR-10 data not found: {DATA_DIR}. "
@@ -237,6 +245,7 @@ def main(resume_from=None):
     fixed_noise = torch.randn(SAMPLES_TO_DISPLAY, Z_DIM, device=device)
     start_epoch, state = session.start(
         resume_from,
+        reset_output_dir=False,
         initial_state={
             "loss_history": {
                 "epoch": [],

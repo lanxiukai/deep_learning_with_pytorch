@@ -86,8 +86,13 @@ class TrainingSession:
         resume_from: str | PathLike[str] | None = None,
         *,
         initial_state: Mapping[str, Any] | None = None,
+        reset_output_dir: bool = True,
     ) -> tuple[int, dict[str, Any]]:
-        """Prepare output and return ``(start_epoch, training_state)``."""
+        """Prepare output and return ``(start_epoch, training_state)``.
+
+        Set ``reset_output_dir=False`` when the caller has already cleaned
+        the run-specific artifact directories before starting the session.
+        """
         if self._started:
             raise RuntimeError(
                 "TrainingSession.start() may only be called once."
@@ -97,7 +102,7 @@ class TrainingSession:
         if resume_path is not None and not resume_path.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {resume_path}.")
 
-        if resume_path is None:
+        if resume_path is None and reset_output_dir:
             reset_dir(str(self.output_dir))
         else:
             self.output_dir.mkdir(parents=True, exist_ok=True)

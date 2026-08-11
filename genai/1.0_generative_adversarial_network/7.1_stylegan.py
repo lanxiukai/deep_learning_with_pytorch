@@ -17,6 +17,8 @@ Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.
 
 Outputs:
+    Fresh runs reset training/ and checkpoints/ before setup; --resume-from
+    preserves both directories.
     output/stylegan/training/epoch_*.png: fixed-z/noise EMA samples
     output/stylegan/checkpoints/latest.pth: full recoverable training state
     output/stylegan/checkpoints/epoch_*.pth: phase-boundary state archives
@@ -54,6 +56,7 @@ from tqdm import tqdm
 
 from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.stylegan import (
     StyleGANDiscriminator,
@@ -69,6 +72,7 @@ PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
 OUT_DIR = PROJECT_ROOT / "output" / "stylegan"
 TRAINING_DIR = OUT_DIR / "training"
+CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
 RESOLUTIONS = (4, 8, 16, 32)
 BATCH_SIZES = {4: 128, 8: 128, 16: 64, 32: 32}
@@ -373,6 +377,10 @@ def save_training_samples(
 
 
 def main(resume_from=None):
+    if resume_from is None:
+        reset_dir(str(TRAINING_DIR))
+        reset_dir(str(CHECKPOINT_DIR))
+
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
             f"CIFAR-10 data not found: {DATA_DIR}. "
@@ -450,6 +458,7 @@ def main(resume_from=None):
     fixed_z = torch.randn(SAMPLES_TO_DISPLAY, Z_DIM, device=device)
     start_epoch, state = session.start(
         resume_from,
+        reset_output_dir=False,
         initial_state={
             "loss_history": {
                 "epoch": [],

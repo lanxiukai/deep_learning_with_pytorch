@@ -21,6 +21,15 @@ from torch import nn
 from torch.nn.utils import spectral_norm
 
 
+def count_spectral_norm_layers(module):
+    """Count modules wrapped by PyTorch's legacy spectral-normalization hook."""
+    required_state = ("weight_orig", "weight_u", "weight_v")
+    return sum(
+        all(hasattr(child, name) for name in required_state)
+        for child in module.modules()
+    )
+
+
 def uniform_dequantize_uint8(pixels, *, generator=None):
     """Map uint8 pixels with uniform dequantization to the paper's range."""
     if not isinstance(pixels, torch.Tensor) or pixels.dtype != torch.uint8:

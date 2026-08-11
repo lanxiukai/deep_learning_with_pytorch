@@ -15,9 +15,11 @@ Inputs:
     output/biggan/generator.pth, created by 6.2_biggan.py
 
 Outputs:
-    output/sn_sagan_biggan_evaluation/sn_gan_samples.png
-    output/sn_sagan_biggan_evaluation/conditional_class_sweep.png
-    output/sn_sagan_biggan_evaluation/biggan_truncation.png
+    Each evaluation directory is reset at the start of every run.
+    output/sn_gan/evaluation/sn_gan_samples.png
+    output/sagan/evaluation/conditional_class_sweep.png
+    output/biggan/evaluation/conditional_class_sweep.png
+    output/biggan/evaluation/biggan_truncation.png
 """
 
 import torch
@@ -40,7 +42,14 @@ from dl_utils.plot.images import save_image_row_grid
 
 
 PROJECT_ROOT = infer_project_root()
-OUT_DIR = PROJECT_ROOT / "output" / "sn_sagan_biggan_evaluation"
+MODEL_OUT_DIRS = {
+    model_name: PROJECT_ROOT / "output" / model_name
+    for model_name in ("sn_gan", "sagan", "biggan")
+}
+EVALUATION_DIRS = {
+    model_name: output_dir / "evaluation"
+    for model_name, output_dir in MODEL_OUT_DIRS.items()
+}
 
 NUM_CLASSES = 10
 NUM_UNCONDITIONAL_SAMPLES = 10
@@ -53,7 +62,7 @@ MODEL_SPECS = (
         "sn_gan",
         "SN-GAN",
         SNGenerator,
-        PROJECT_ROOT / "output" / "sn_gan" / "generator.pth",
+        MODEL_OUT_DIRS["sn_gan"] / "generator.pth",
         "6.0_sn_gan.py",
         5,
         "unconditional",
@@ -63,7 +72,7 @@ MODEL_SPECS = (
         "sagan",
         "SAGAN",
         SAGANGenerator,
-        PROJECT_ROOT / "output" / "sagan" / "generator.pth",
+        MODEL_OUT_DIRS["sagan"] / "generator.pth",
         "6.1_sagan.py",
         6,
         "class_conditional",
@@ -73,7 +82,7 @@ MODEL_SPECS = (
         "biggan",
         "Compact BigGAN EMA",
         CompactBigGANGenerator,
-        PROJECT_ROOT / "output" / "biggan" / "generator.pth",
+        MODEL_OUT_DIRS["biggan"] / "generator.pth",
         "6.2_biggan.py",
         6,
         "class_conditional",
@@ -172,7 +181,7 @@ def save_sn_gan_samples(generator, z_dim, device):
     save_image_row_grid(
         [samples],
         ["SN-GAN"],
-        OUT_DIR / "sn_gan_samples.png",
+        EVALUATION_DIRS["sn_gan"] / "sn_gan_samples.png",
         title="Unconditional SN-GAN samples",
         column_labels=[
             f"Sample {index + 1}"
@@ -201,15 +210,16 @@ def save_conditional_class_sweep(
         generators[model_name](noise, labels).cpu()
         for model_name in ("sagan", "biggan")
     ]
-    save_image_row_grid(
-        image_rows,
-        ["SAGAN", "Compact BigGAN EMA"],
-        OUT_DIR / "conditional_class_sweep.png",
-        title="Fixed-z CIFAR-10 class response",
-        column_labels=[
-            name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
-        ],
-    )
+    for model_name in ("sagan", "biggan"):
+        save_image_row_grid(
+            image_rows,
+            ["SAGAN", "Compact BigGAN EMA"],
+            EVALUATION_DIRS[model_name] / "conditional_class_sweep.png",
+            title="Fixed-z CIFAR-10 class response",
+            column_labels=[
+                name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
+            ],
+        )
 
 
 @torch.inference_mode()
@@ -241,7 +251,7 @@ def save_biggan_truncation(generator, z_dim, device):
     save_image_row_grid(
         image_rows,
         row_labels,
-        OUT_DIR / "biggan_truncation.png",
+        EVALUATION_DIRS["biggan"] / "biggan_truncation.png",
         title="Compact BigGAN EMA truncation comparison",
         column_labels=[
             name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
@@ -250,6 +260,9 @@ def save_biggan_truncation(generator, z_dim, device):
 
 
 def main():
+    for evaluation_dir in EVALUATION_DIRS.values():
+        reset_dir(str(evaluation_dir))
+
     set_seed(SEED)
     device = try_gpu()
 
@@ -289,7 +302,6 @@ def main():
         )
     conditional_z_dim = conditional_z_dims.pop()
 
-    reset_dir(str(OUT_DIR))
     save_sn_gan_samples(
         generators["sn_gan"],
         int(configurations["sn_gan"]["z_dim"]),
