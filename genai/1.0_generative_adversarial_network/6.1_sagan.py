@@ -11,9 +11,11 @@ and presents SAGAN's algorithmic additions:
 
 The original paper trains 128x128 ImageNet models.  Here the same ideas are
 kept in a three-block 32x32 CIFAR-10 model with ordinary single-device
-BatchNorm.  Random horizontal flips are retained as a small, useful image
-augmentation.  Loss curves, fixed class samples, and full checkpoints are
-training conveniences and do not alter the adversarial updates.
+BatchNorm.  G keeps 256 channels across its three upsampling blocks, while D
+keeps 128 channels and applies attention after its first 16x16 block.  Random
+horizontal flips are retained as a small, useful image augmentation.  Loss
+curves, fixed class samples, and full checkpoints are training conveniences
+and do not alter the adversarial updates.
 
 Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.
@@ -35,12 +37,12 @@ Resume an interrupted run:
 Training data -- CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
-Training epochs:         100
-Optimizer updates:       78,100 D / 78,100 G (1:1)
+Training epochs:         200
+Optimizer updates:       156,200 D / 156,200 G (1:1)
 
-Generator:                1.14 M params
+Generator:                4.39 M params
 Discriminator:            1.08 M params
-Total:                    2.22 M params
+Total:                    5.46 M params
 """
 
 import argparse
@@ -76,13 +78,15 @@ OUT_DIR = PROJECT_ROOT / "output" / "sagan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
-NUM_EPOCHS = 100
+NUM_EPOCHS = 200
 BATCH_SIZE = 64
+# If BATCH_SIZE is raised to 128, raise NUM_EPOCHS to 400 as well.
 NUM_WORKERS = 8
 NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
-Z_DIM = 120
-BASE_CHANNELS = 32
+Z_DIM = 128
+GENERATOR_BASE_CHANNELS = 256
+DISCRIMINATOR_BASE_CHANNELS = 128
 IMAGE_SIZE = 32
 GENERATOR_LR = 1e-4
 DISCRIMINATOR_LR = 4e-4
@@ -95,13 +99,13 @@ SEED = 42
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
     "num_classes": NUM_CLASSES,
-    "base_channels": BASE_CHANNELS,
+    "base_channels": GENERATOR_BASE_CHANNELS,
     "image_size": IMAGE_SIZE,
 }
 
 DISCRIMINATOR_CONFIG = {
     "num_classes": NUM_CLASSES,
-    "base_channels": BASE_CHANNELS,
+    "base_channels": DISCRIMINATOR_BASE_CHANNELS,
 }
 
 
@@ -225,7 +229,7 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 6,
+            "format_version": 7,
             "conditioning": "class_conditional",
             "discriminator_conditioning": "projection",
             "update_ratio": 1,

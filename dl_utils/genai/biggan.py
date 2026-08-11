@@ -64,7 +64,7 @@ class CompactBigGANGenerator(nn.Module):
 
     def __init__(
         self,
-        z_dim=120,
+        z_dim=128,
         num_classes=10,
         base_channels=32,
         class_embedding_dim=128,

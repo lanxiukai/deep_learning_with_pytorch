@@ -39,9 +39,9 @@ Samples per epoch:       49,984 (781 full batches; drop_last=True)
 Training epochs:         100
 Optimizer updates:       78,100 D / 39,050 G (exactly 2:1)
 
-Generator:                0.84 M params (plus one EMA copy)
+Generator:                0.85 M params (plus one EMA copy)
 Discriminator:            1.08 M params
-Trainable total:          1.92 M params
+Trainable total:          1.93 M params
 """
 
 import argparse
@@ -87,8 +87,9 @@ BATCH_SIZE = 64
 NUM_WORKERS = 8
 NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
-Z_DIM = 120
-BASE_CHANNELS = 32
+Z_DIM = 128
+GENERATOR_BASE_CHANNELS = 32
+DISCRIMINATOR_BASE_CHANNELS = 128
 CLASS_EMBEDDING_DIM = 32
 IMAGE_SIZE = 32
 GENERATOR_LR = 5e-5
@@ -105,14 +106,14 @@ SEED = 42
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
     "num_classes": NUM_CLASSES,
-    "base_channels": BASE_CHANNELS,
+    "base_channels": GENERATOR_BASE_CHANNELS,
     "class_embedding_dim": CLASS_EMBEDDING_DIM,
     "image_size": IMAGE_SIZE,
 }
 
 DISCRIMINATOR_CONFIG = {
     "num_classes": NUM_CLASSES,
-    "base_channels": BASE_CHANNELS,
+    "base_channels": DISCRIMINATOR_BASE_CHANNELS,
 }
 
 
@@ -293,7 +294,7 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 6,
+            "format_version": 7,
             "conditioning": "class_conditional",
             "discriminator_conditioning": "projection",
             "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,
