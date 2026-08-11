@@ -37,10 +37,6 @@ def make_fixed_class_latent_grid(
     base_noise=None,
 ):
     """Return labels and latent columns repeated across every class row."""
-    if num_classes < 1 or samples_per_class < 1 or z_dim < 1:
-        raise ValueError(
-            "num_classes, samples_per_class, and z_dim must be positive."
-        )
     if base_noise is None:
         base_noise = torch.randn(samples_per_class, z_dim, device=device)
     elif tuple(base_noise.shape) != (samples_per_class, z_dim):
@@ -53,9 +49,12 @@ def make_fixed_class_latent_grid(
 
     labels = torch.arange(num_classes, device=device).repeat_interleave(
         samples_per_class
-    )
-    noise = base_noise.repeat(num_classes, 1)
-    return noise, labels
+    )  # element-wise consecutive repetition
+    noise = base_noise.repeat(num_classes, 1)  # tensor tiling / repetition
+    # noise:  z₀ z₁ z₂ z₃ | z₀ z₁ z₂ z₃ | z₀ z₁ z₂ z₃
+    # labels:  0  0  0  0 |  1  1  1  1 |  2  2  2  2
+    # B = num_classes * samples_per_class
+    return noise, labels  # noise: (B, z_dim), labels: (B,)
 
 
 class SelfAttention(nn.Module):
@@ -68,8 +67,6 @@ class SelfAttention(nn.Module):
 
     def __init__(self, channels):
         super().__init__()
-        if channels <= 0:
-            raise ValueError("channels must be positive.")
         key_channels = max(1, channels // 8)
         value_channels = max(1, channels // 2)
         self.query = spectral_norm(
@@ -93,14 +90,18 @@ class SelfAttention(nn.Module):
         if min(height, width) < 2:
             raise ValueError("SelfAttention needs spatial dimensions >= 2.")
 
+        # (B, C/8, H, W) -> (B, C/8, H×W) -> (B, H×W, C/8)
         query = self.query(inputs).flatten(2).transpose(1, 2)
+        # (B, C/8, H, W) -> (B, C/8, H/2, W/2) -> (B, C/8, H×W/4)
         key = F.max_pool2d(self.key(inputs), 2).flatten(2)
+        # (B, H×W, H×W/4), attention[b, i, :].sum() = 1
         attention = torch.softmax(query @ key, dim=-1)
 
+        # (B, C/2, H, W) -> (B, C/2, H/2, W/2) -> (B, C/2, H×W/4)
         value = F.max_pool2d(self.value(inputs), 2).flatten(2)
-        attended = value @ attention.transpose(1, 2)
-        attended = attended.view(batch, -1, height, width)
-        return inputs + self.gamma * self.output(attended)
+        attended = value @ attention.transpose(1, 2)        # (B, C/2, H×W)
+        attended = attended.view(batch, -1, height, width)  # (B, C/2, H, W)
+        return inputs + self.gamma * self.output(attended)  # (B, C, H, W)
 
 
 class ConditionalBatchNorm2d(nn.Module):
@@ -115,9 +116,10 @@ class ConditionalBatchNorm2d(nn.Module):
         nn.init.zeros_(self.bias.weight)
 
     def forward(self, inputs, labels):
-        gain = self.gain(labels)[:, :, None, None]
-        bias = self.bias(labels)[:, :, None, None]
-        return self.normalization(inputs) * gain + bias
+        # inputs shape: (B, C, H, W)， labels shape: (B,)
+        gain = self.gain(labels)[:, :, None, None]  # (B, C) -> (B, C, 1, 1)
+        bias = self.bias(labels)[:, :, None, None]  # (B, C) -> (B, C, 1, 1)
+        return self.normalization(inputs) * gain + bias  # (B, C, H, W)
 
 
 class SAGANGeneratorResidualBlock(nn.Module):
@@ -140,16 +142,18 @@ class SAGANGeneratorResidualBlock(nn.Module):
         )
 
     def forward(self, inputs, labels):
+        # inputs shape: (B, IC, H, W)， labels shape: (B,)
+        # (B, IC, H, W) -> (B, IC, 2H, 2W)
         residual = F.interpolate(inputs, scale_factor=2, mode="nearest")
-        residual = self.skip(residual)
+        residual = self.skip(residual)  # (B, OC, 2H, 2W)
 
-        hidden = F.relu(self.norm1(inputs, labels), inplace=True)
-        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")
-        hidden = self.conv1(hidden)
+        hidden = F.relu(self.norm1(inputs, labels), inplace=True)  # (B, IC, H, W)
+        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")  # (B, IC, 2H, 2W)
+        hidden = self.conv1(hidden)  # (B, OC, 2H, 2W)
         hidden = self.conv2(
             F.relu(self.norm2(hidden, labels), inplace=True)
-        )
-        return hidden + residual
+        )  # (B, OC, 2H, 2W)
+        return hidden + residual  # (B, OC, 2H, 2W)
 
 
 class SAGANGenerator(nn.Module):
@@ -189,6 +193,7 @@ class SAGANGenerator(nn.Module):
         self.output = spectral_norm(nn.Conv2d(base_channels, 3, 3, padding=1))
 
     def forward(self, noise, labels):
+        # noise shape: (B, z_dim), labels shape: (B,)
         if noise.ndim != 2 or noise.shape[1] != self.z_dim:
             raise ValueError(
                 f"Expected noise with shape (batch, {self.z_dim}), "
@@ -197,14 +202,14 @@ class SAGANGenerator(nn.Module):
         if labels.ndim != 1 or labels.shape[0] != noise.shape[0]:
             raise ValueError("labels must have shape (batch,).")
 
-        hidden = self.input(noise)
-        hidden = hidden.view(noise.shape[0], -1, 4, 4)
-        hidden = self.block1(hidden, labels)
-        hidden = self.block2(hidden, labels)
-        hidden = self.attention(hidden)
-        hidden = self.block3(hidden, labels)
-        hidden = F.relu(self.output_norm(hidden), inplace=True)
-        return torch.tanh(self.output(hidden))
+        hidden = self.input(noise)  # (B, 256 * 4 * 4)
+        hidden = hidden.view(noise.shape[0], -1, 4, 4)  # (B, 256, 4, 4)
+        hidden = self.block1(hidden, labels)  # (B, 128, 8, 8)
+        hidden = self.block2(hidden, labels)  # (B, 64, 16, 16)
+        hidden = self.attention(hidden)       # (B, 64, 16, 16)
+        hidden = self.block3(hidden, labels)  # (B, 32, 32, 32)
+        hidden = F.relu(self.output_norm(hidden), inplace=True)  # (B, 32, 32, 32)
+        return torch.tanh(self.output(hidden))  # (B, 3, 32, 32)
 
 
 class SAGANDiscriminator(nn.Module):
@@ -217,7 +222,6 @@ class SAGANDiscriminator(nn.Module):
     def __init__(self, num_classes=10, base_channels=32):
         super().__init__()
         channels = base_channels * 4
-        self.feature_channels = channels
         self.block1 = SNDiscriminatorResidualBlock(
             3, channels, first=True
         )
@@ -235,19 +239,20 @@ class SAGANDiscriminator(nn.Module):
         )
 
     def extract_features(self, images):
-        hidden = self.block1(images)
-        hidden = self.block2(hidden)
-        hidden = self.attention(hidden)
-        hidden = self.block3(hidden)
-        hidden = self.block4(hidden)
+        # images shape: (B, 3, 32, 32)
+        hidden = self.block1(images)     # (B, 128, 16, 16)
+        hidden = self.block2(hidden)     # (B, 128, 8, 8)
+        hidden = self.attention(hidden)  # (B, 128, 8, 8)
+        hidden = self.block3(hidden)     # (B, 128, 8, 8)
+        hidden = self.block4(hidden)     # (B, 128, 8, 8)
         hidden = F.relu(hidden, inplace=True)
-        return hidden.sum(dim=(2, 3))
+        return hidden.sum(dim=(2, 3))    # (B, 128), global sum pooling
 
     def forward(self, images, labels):
         hidden = self.extract_features(images)
-        unconditional = self.output(hidden).squeeze(1)
-        projection = (self.class_embedding(labels) * hidden).sum(dim=1)
-        return unconditional + projection
+        unconditional = self.output(hidden).squeeze(1)  # (B,)
+        projection = (self.class_embedding(labels) * hidden).sum(dim=1)  # (B,)
+        return unconditional + projection  # (B,)
 
 
 __all__ = [

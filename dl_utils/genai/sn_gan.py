@@ -21,15 +21,6 @@ from torch import nn
 from torch.nn.utils import spectral_norm
 
 
-def count_spectral_norm_layers(module):
-    """Count modules wrapped by PyTorch's legacy spectral-normalization hook."""
-    required_state = ("weight_orig", "weight_u", "weight_v")
-    return sum(
-        all(hasattr(child, name) for name in required_state)
-        for child in module.modules()
-    )
-
-
 def uniform_dequantize_uint8(pixels, *, generator=None):
     """Map uint8 pixels with uniform dequantization to the paper's range."""
     if not isinstance(pixels, torch.Tensor) or pixels.dtype != torch.uint8:
@@ -171,15 +162,17 @@ class SNDiscriminatorResidualBlock(nn.Module):
         )
 
     def forward(self, inputs):
+        # inputs shape: (B, IC, H, W)
         hidden = inputs if self.first else F.relu(inputs, inplace=False)
-        hidden = self.conv1(hidden)
-        hidden = self.conv2(F.relu(hidden, inplace=True))
+        hidden = self.conv1(hidden)  # (B, OC, H, W)
+        hidden = self.conv2(F.relu(hidden, inplace=True))  # (B, OC, H, W)
         if self.downsample:
-            hidden = F.avg_pool2d(hidden, 2)
+            hidden = F.avg_pool2d(hidden, 2)  # (B, OC, H/2, W/2)
 
-        residual = self.skip(inputs)
+        residual = self.skip(inputs)  # (B, OC, H, W)
         if self.downsample:
-            residual = F.avg_pool2d(residual, 2)
+            residual = F.avg_pool2d(residual, 2)  # (B, OC, H/2, W/2)
+        # (B, OC, H/2, W/2) if self.downsample else (B, OC, H, W)
         return hidden + residual
 
 

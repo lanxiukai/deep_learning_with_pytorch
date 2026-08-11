@@ -57,7 +57,6 @@ from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.genai.sn_gan import (
     SNDiscriminator,
     SNGenerator,
-    count_spectral_norm_layers,
     discriminator_hinge_loss,
     generator_hinge_loss,
     uniform_dequantize_uint8,
@@ -203,12 +202,6 @@ def main(resume_from=None):
 
     generator = SNGenerator(**MODEL_CONFIG).to(device)
     discriminator = SNDiscriminator(**DISCRIMINATOR_CONFIG).to(device)
-    sn_layer_counts = (
-        count_spectral_norm_layers(generator),
-        count_spectral_norm_layers(discriminator),
-    )
-    if sn_layer_counts[0] != 0 or sn_layer_counts[1] == 0:
-        raise RuntimeError("SN-GAN requires spectral norm in D but not G.")
 
     opt_g = torch.optim.Adam(
         generator.parameters(),

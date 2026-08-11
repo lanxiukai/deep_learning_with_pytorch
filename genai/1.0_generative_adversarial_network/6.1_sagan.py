@@ -59,7 +59,6 @@ from dl_utils.genai.sagan import (
     make_fixed_class_latent_grid,
 )
 from dl_utils.genai.sn_gan import (
-    count_spectral_norm_layers,
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
@@ -198,12 +197,6 @@ def main(resume_from=None):
 
     generator = SAGANGenerator(**MODEL_CONFIG).to(device)
     discriminator = SAGANDiscriminator(**DISCRIMINATOR_CONFIG).to(device)
-    sn_layer_counts = (
-        count_spectral_norm_layers(generator),
-        count_spectral_norm_layers(discriminator),
-    )
-    if sn_layer_counts[0] == 0 or sn_layer_counts[1] == 0:
-        raise RuntimeError("SAGAN requires spectral norm in both G and D.")
 
     opt_g = torch.optim.Adam(
         generator.parameters(),
