@@ -4,7 +4,8 @@ The evaluation separates the mechanisms introduced across the three lessons:
     - all generators receive shared fixed z samples;
     - StyleGAN and StyleGAN2 vary stochastic noise while holding W fixed;
     - their coarse and fine styles are mixed explicitly;
-    - their learned ``w_avg`` buffers drive truncation comparisons.
+    - their learned ``w_avg`` buffers drive truncation comparisons;
+    - spherical Z interpolation is compared with linear W interpolation.
 
 Shared inputs fix random conditions only.  The independently trained latent
 spaces do not have sample-wise semantic correspondence.  This compact lesson
@@ -17,15 +18,17 @@ Inputs:
     output/stylegan2/stylegan2_generator.pth, created by 7.2_stylegan2.py
 
 Outputs:
-    Each evaluation directory is reset at the start of every run.
+    Each evaluation directory is reset after inputs have been validated.
     output/{progan,stylegan,stylegan2}/evaluation/fixed_samples.png
     output/{stylegan,stylegan2}/evaluation/noise_variations.png
     output/stylegan/evaluation/stylegan_style_mixing.png
     output/stylegan2/evaluation/stylegan2_style_mixing.png
     output/{stylegan,stylegan2}/evaluation/truncation.png
+    output/{progan,stylegan,stylegan2}/evaluation/latent_interpolation.png
 """
 
 import torch
+import torch.nn.functional as F
 
 from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
@@ -51,6 +54,7 @@ SEED = 42
 NUM_FIXED_SAMPLES = 8
 NUM_NOISE_VARIATIONS = 8
 NUM_STYLE_SOURCES = 4
+NUM_INTERPOLATION_STEPS = 9
 COARSE_MAX_RESOLUTION = 8
 TRUNCATION_PSIS = (1.0, 0.7, 0.5, 0.0)
 
@@ -61,7 +65,7 @@ MODEL_SPECS = (
         ProGANGenerator,
         MODEL_OUT_DIRS["progan"] / "progan_generator.pth",
         "7.0_progan.py",
-        5,
+        6,
     ),
     (
         "stylegan",
@@ -69,7 +73,7 @@ MODEL_SPECS = (
         StyleGANGenerator,
         MODEL_OUT_DIRS["stylegan"] / "stylegan_generator.pth",
         "7.1_stylegan.py",
-        6,
+        7,
     ),
     (
         "stylegan2",
@@ -77,7 +81,7 @@ MODEL_SPECS = (
         StyleGenerator,
         MODEL_OUT_DIRS["stylegan2"] / "stylegan2_generator.pth",
         "7.2_stylegan2.py",
-        6,
+        7,
     ),
 )
 
@@ -144,6 +148,52 @@ def synthesize_styles(generator, model_name, ws, noise_mode):
     if model_name == "stylegan2":
         return generator.synthesize(ws, noise_mode=noise_mode)
     raise ValueError(f"{model_name} does not expose style synthesis.")
+
+
+def spherical_interpolation(start, end, num_steps):
+    """Interpolate directions on Z's hypersphere and radii linearly."""
+    if start.shape != end.shape or start.ndim != 2 or start.shape[0] != 1:
+        raise ValueError("start and end must both have shape [1, z_dim].")
+    if num_steps < 2:
+        raise ValueError("num_steps must be at least two.")
+
+    fractions = torch.linspace(
+        0,
+        1,
+        num_steps,
+        device=start.device,
+        dtype=start.dtype,
+    )[:, None]
+    start_direction = F.normalize(start, dim=1)
+    end_direction = F.normalize(end, dim=1)
+    cosine = (start_direction * end_direction).sum().clamp(-1, 1)
+
+    if cosine.item() < -0.9995:
+        raise ValueError("Slerp endpoints must not be nearly antipodal.")
+    # Near-parallel endpoints make the trigonometric form ill-conditioned.
+    if cosine.item() > 0.9995:
+        directions = F.normalize(
+            torch.lerp(start, end, fractions),
+            dim=1,
+        )
+    else:
+        angle = torch.acos(cosine)
+        denominator = torch.sin(angle)
+        directions = (
+            torch.sin((1 - fractions) * angle)
+            / denominator
+            * start_direction
+            + torch.sin(fractions * angle)
+            / denominator
+            * end_direction
+        )
+
+    radii = torch.lerp(
+        start.norm(dim=1, keepdim=True),
+        end.norm(dim=1, keepdim=True),
+        fractions,
+    )
+    return directions * radii
 
 
 @torch.inference_mode()
@@ -260,6 +310,56 @@ def generate_truncation_samples(generator, model_name, z):
     return torch.stack(samples)
 
 
+@torch.inference_mode()
+def generate_interpolations(generators, start_z, end_z):
+    """Expose each style model's intermediate W path beside its Z path."""
+    z_path = spherical_interpolation(
+        start_z,
+        end_z,
+        NUM_INTERPOLATION_STEPS,
+    )
+    results = {
+        "progan": [
+            generators["progan"](
+                z_path,
+                resolution=32,
+                alpha=1.0,
+            ).cpu()
+        ]
+    }
+    for model_name in ("stylegan", "stylegan2"):
+        generator = generators[model_name]
+        if model_name == "stylegan":
+            z_images = generator(
+                z_path,
+                resolution=32,
+                alpha=1.0,
+                noise_mode="fixed",
+            )
+        else:
+            z_images = generator(z_path, noise_mode="fixed")
+
+        start_w = generator.mapping(start_z)
+        end_w = generator.mapping(end_z)
+        fractions = torch.linspace(
+            0,
+            1,
+            NUM_INTERPOLATION_STEPS,
+            device=start_z.device,
+            dtype=start_z.dtype,
+        )[:, None]
+        w_path = torch.lerp(start_w, end_w, fractions)
+        ws = w_path[:, None, :].repeat(1, generator.num_ws, 1)
+        w_images = synthesize_styles(
+            generator,
+            model_name,
+            ws,
+            noise_mode="fixed",
+        )
+        results[model_name] = [z_images.cpu(), w_images.cpu()]
+    return results
+
+
 def save_fixed_samples(fixed_samples):
     """Save the shared-z comparison for all three generator families."""
     names = ("progan", "stylegan", "stylegan2")
@@ -335,10 +435,31 @@ def save_truncation(truncation_samples):
         )
 
 
-def main():
-    for evaluation_dir in EVALUATION_DIRS.values():
-        reset_dir(str(evaluation_dir))
+def save_interpolations(interpolations):
+    """Save Z paths for every model and the added W paths where available."""
+    column_labels = [
+        f"t={index / (NUM_INTERPOLATION_STEPS - 1):.2f}"
+        for index in range(NUM_INTERPOLATION_STEPS)
+    ]
+    for model_name in ("progan", "stylegan", "stylegan2"):
+        row_labels = (
+            ["Z (slerp)"]
+            if model_name == "progan"
+            else ["Z (slerp)", "W (linear)"]
+        )
+        save_image_row_grid(
+            interpolations[model_name],
+            row_labels,
+            EVALUATION_DIRS[model_name] / "latent_interpolation.png",
+            title=(
+                f"{model_name.upper()} latent interpolation "
+                "(fixed synthesis noise where applicable)"
+            ),
+            column_labels=column_labels,
+        )
 
+
+def main():
     set_seed(SEED)
     device = try_gpu()
 
@@ -411,6 +532,17 @@ def main():
         for model_name in ("stylegan", "stylegan2")
     }
 
+    torch.manual_seed(SEED + 4)
+    interpolation_endpoints = torch.randn(2, z_dim, device=device)
+    interpolations = generate_interpolations(
+        generators,
+        interpolation_endpoints[:1],
+        interpolation_endpoints[1:],
+    )
+
+    for evaluation_dir in EVALUATION_DIRS.values():
+        reset_dir(str(evaluation_dir))
+
     save_fixed_samples(fixed_samples)
     save_noise_variations(noise_variations)
     save_style_mixing(
@@ -424,6 +556,7 @@ def main():
         style_mixing["stylegan2"],
     )
     save_truncation(truncation_samples)
+    save_interpolations(interpolations)
 
 
 if __name__ == "__main__":

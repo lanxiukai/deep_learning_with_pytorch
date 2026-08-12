@@ -1,7 +1,12 @@
 """Utilities for VAE, GAN, CycleGAN, pix2pix, modern GANs, and DDPM.
 
 Submodules:
-    vae:      VAE model (VAEEncoder, VAEDecoder, VAE) and training constants.
+    vae:      Original 256x256 VAE and diagonal-Gaussian primitives.
+    vae_common: Compact Gaussian-VAE model and distribution algebra.
+    vae_hierarchy: Shared two-level HVAE generator, ELBO, and diagnostics.
+    quantization: VQ/FSQ quantizers and compact 32x32 tokenizers.
+    token_prior: PixelCNN and causal-Transformer discrete priors.
+    perceptual_autoencoder: Shared VAE-GAN/VQGAN/KL-AE network blocks.
     gan:      GAN training helpers (update_D, update_G, gradient_penalty).
     cyclegan: CycleGAN models (Generator, Discriminator, LoadData) and
               training helpers (train_epoch, weights_init).

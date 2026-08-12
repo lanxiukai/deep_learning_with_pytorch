@@ -36,7 +36,7 @@ def _channel_map(base_channels):
 class MappingNetwork(nn.Module):
     """Map normalized Z vectors into StyleGAN's intermediate W space."""
 
-    def __init__(self, z_dim, style_dim, layers=4):
+    def __init__(self, z_dim, style_dim, layers=8):
         super().__init__()
         if layers <= 0:
             raise ValueError("mapping network must contain at least one layer.")
@@ -169,7 +169,7 @@ class StyleGANGenerator(nn.Module):
         z_dim=128,
         style_dim=128,
         base_channels=32,
-        mapping_layers=4,
+        mapping_layers=8,
         w_avg_beta=0.995,
     ):
         super().__init__()

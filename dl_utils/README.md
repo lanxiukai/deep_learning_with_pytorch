@@ -86,13 +86,18 @@ dl_utils/
 │   ├── ddpm.py
 │   ├── gan.py
 │   ├── pix2pix.py
+│   ├── perceptual_autoencoder.py
 │   ├── progan.py
+│   ├── quantization.py
 │   ├── sagan.py
 │   ├── sn_gan.py
 │   ├── stylegan.py
 │   ├── stylegan2.py
 │   ├── stylegan_common.py
-│   └── vae.py
+│   ├── token_prior.py
+│   ├── vae.py
+│   ├── vae_common.py
+│   └── vae_hierarchy.py
 │
 ├── plot/
 │   ├── __init__.py
@@ -423,7 +428,47 @@ StyleDiscriminator, denormalize.
 ### dl_utils/genai/vae.py
 
 Dependencies: torch, torch.nn.functional, torch.nn, dl_utils.devices.selection (get_device).
-Public entries: device, VAEEncoder, VAEDecoder, VAE.
+Public entries: device, diagonal_gaussian_kl, reparameterize, VAEEncoder,
+VAEDecoder, VAE.
+
+### dl_utils/genai/vae_common.py
+
+Dependencies: math, torch, torch.nn.
+Public entries (__all__): LOG_2PI, split_gaussian_parameters,
+reparameterize_logvar, diagonal_gaussian_kl_from_logvar,
+diagonal_gaussian_log_density, fuse_diagonal_gaussians, ConvGaussianVAE28.
+
+### dl_utils/genai/vae_hierarchy.py
+
+Dependencies: torch, torch.nn.functional, torch.nn,
+dl_utils.genai.vae_common.
+Public entries (__all__): CompactHierarchicalVAE, ActiveUnitAccumulator,
+hierarchical_vae_loss, active_units.
+
+### dl_utils/genai/quantization.py
+
+Dependencies: math, collections.abc (Sequence), torch,
+torch.nn.functional, torch.nn.
+Public entries (__all__): token_usage, TokenUsageAccumulator, VectorQuantizer,
+FiniteScalarQuantizer, ResidualBlock, ImageEncoder32, ImageDecoder32,
+VQVAE32, FSQAutoencoder32.
+
+### dl_utils/genai/token_prior.py
+
+Dependencies: math, torch, torch.nn.functional, torch.nn.
+Public entries (__all__): MaskedConv2d, PixelCNNPrior,
+CausalTransformerPrior.
+
+### dl_utils/genai/perceptual_autoencoder.py
+
+Dependencies: torch, torch.nn.functional, torch.nn,
+dl_utils.genai.quantization, dl_utils.genai.vae_common;
+torchvision.models is imported lazily only for pretrained VGG features.
+Public entries (__all__): ResidualBlock, PerceptualEncoder32,
+PerceptualDecoder32, VQPerceptualAutoencoder32,
+KLPerceptualAutoencoder32, PatchDiscriminator32,
+RandomFeaturePerceptualLoss, VGGPerceptualLoss,
+discriminator_hinge_loss, adaptive_adversarial_weight.
 
 ### dl_utils/plot/__init__.py
 

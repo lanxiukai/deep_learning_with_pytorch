@@ -7,7 +7,8 @@ Compared with StyleGAN, this lesson presents the main StyleGAN2 increments:
     - residual discriminator downsampling;
     - lazy R1 and path-length regularization in separate optimizer passes;
     - lazy-regularization compensation for Adam's learning rate and beta2;
-    - style mixing, scalar-strength layer noise, truncation state, and G-EMA.
+    - style mixing, scalar-strength layer noise, truncation state, and an
+      image-count-based G-EMA.
 
 The complete mapping, synthesis, and discriminator models live in
 ``dl_utils/genai/stylegan2.py``.  This is a pure-PyTorch 32x32 teaching model,
@@ -38,9 +39,9 @@ Samples per epoch:       49,984 (1,562 full batches; drop_last=True)
 Training epochs:         100
 Main optimizer updates:  156,200 D / 156,200 G (1:1)
 
-Generator:                2.66 M params (plus one EMA copy)
+Generator:                2.73 M params (plus one EMA copy)
 Discriminator:            3.48 M params
-Trainable total:          6.14 M params
+Trainable total:          6.21 M params
 """
 
 import argparse
@@ -81,7 +82,7 @@ NUM_WORKERS = 4
 Z_DIM = 128
 STYLE_DIM = 128
 BASE_CHANNELS = 32
-MAPPING_LAYERS = 4
+MAPPING_LAYERS = 8
 W_AVG_BETA = 0.995
 LEARNING_RATE = 2e-3
 STYLE_MIXING_PROBABILITY = 0.9
@@ -90,7 +91,9 @@ D_REG_EVERY = 16
 PATH_WEIGHT = 2.0
 G_REG_EVERY = 8
 PATH_BATCH_SHRINK = 2
-EMA_DECAY = 0.995
+# StyleGAN2 defines smoothing by the number of images seen.  This is clearer
+# than a fixed per-step decay and stays correct if the teaching batch changes.
+EMA_HALF_LIFE_KIMG = 10.0
 SAMPLES_TO_DISPLAY = 64
 SAMPLE_GRID_COLUMNS = 8
 SAMPLE_EVERY_EPOCHS = 5
@@ -158,11 +161,18 @@ def path_length_penalty(images, ws, running_mean, decay=0.01):
     return (lengths - updated_mean).square().mean(), updated_mean
 
 
+def ema_decay(batch_size):
+    """Convert an image-count half-life into this update's EMA decay."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    half_life_images = EMA_HALF_LIFE_KIMG * 1_000
+    return 0.5 ** (batch_size / half_life_images)
+
+
 @torch.no_grad()
-def update_ema(averaged_generator, generator, decay=EMA_DECAY):
-    """Move StyleGAN2's sampling weights toward the online generator."""
-    if not 0 <= decay < 1:
-        raise ValueError("EMA decay must be in [0, 1).")
+def update_ema(averaged_generator, generator, batch_size):
+    """Move StyleGAN2's sampling weights toward G after one image batch."""
+    decay = ema_decay(batch_size)
     for averaged_parameter, parameter in zip(
         averaged_generator.parameters(),
         generator.parameters(),
@@ -267,7 +277,7 @@ def train_epoch(
                 weighted_path.backward()
                 optimizer_g.step()
             loss_g = loss_g_main.detach() + weighted_path.detach()
-            update_ema(averaged_generator, generator)
+            update_ema(averaged_generator, generator, batch_size)
         finally:
             discriminator.requires_grad_(True)
 
@@ -380,14 +390,14 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 6,
+            "format_version": 7,
             "conditioning": "unconditional",
             "objective": "non_saturating_logistic_r1_path",
             "progressive_training": False,
             "style_mixing_probability": STYLE_MIXING_PROBABILITY,
             "r1_interval": D_REG_EVERY,
             "path_interval": G_REG_EVERY,
-            "ema_decay": EMA_DECAY,
+            "ema_half_life_kimg": EMA_HALF_LIFE_KIMG,
         },
         model_metadata={
             "online_generator": {

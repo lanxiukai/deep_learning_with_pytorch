@@ -5,7 +5,7 @@ This lesson presents the original progressively growing GAN ingredients:
     - each new resolution fades in before a stabilization phase;
     - equalized learning rates, PixelNorm, and minibatch standard deviation;
     - Wasserstein objectives with gradient and critic-drift penalties;
-    - an exponential moving average of G for monitoring and final sampling.
+    - an image-count-based exponential moving average of G for sampling.
 
 The original work targets much larger images and measures stages in thousands
 of images.  Here every stage uses short epoch-based phases over CIFAR-10.  The
@@ -80,7 +80,10 @@ BASE_CHANNELS = 32
 LEARNING_RATE = 1e-3
 GRADIENT_PENALTY_WEIGHT = 10.0
 DRIFT_PENALTY_WEIGHT = 1e-3
-EMA_DECAY = 0.999
+# A half-life measured in real images keeps EMA equally meaningful when the
+# progressive schedule changes batch size.  After 10 kimg, the initial EMA
+# value's remaining contribution has halved.
+EMA_HALF_LIFE_KIMG = 10.0
 SAMPLES_TO_DISPLAY = 64
 SAMPLE_GRID_COLUMNS = 8
 SAMPLE_EVERY_EPOCHS = 4
@@ -222,11 +225,18 @@ def gradient_penalty(
     return (norms - 1.0).square().mean()
 
 
+def ema_decay(batch_size):
+    """Convert an image-count half-life into this update's EMA decay."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    half_life_images = EMA_HALF_LIFE_KIMG * 1_000
+    return 0.5 ** (batch_size / half_life_images)
+
+
 @torch.no_grad()
-def update_ema(averaged_generator, generator, decay=EMA_DECAY):
-    """Move ProGAN's sampling weights toward the online generator."""
-    if not 0 <= decay < 1:
-        raise ValueError("EMA decay must be in [0, 1).")
+def update_ema(averaged_generator, generator, batch_size):
+    """Move ProGAN's sampling weights toward G after one image batch."""
+    decay = ema_decay(batch_size)
     for averaged_parameter, parameter in zip(
         averaged_generator.parameters(),
         generator.parameters(),
@@ -313,7 +323,7 @@ def train_epoch(
             ).mean()
             loss_g.backward()
             optimizer_g.step()
-            update_ema(averaged_generator, generator)
+            update_ema(averaged_generator, generator, batch_size)
         finally:
             discriminator.requires_grad_(True)
 
@@ -427,12 +437,12 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 5,
+            "format_version": 6,
             "conditioning": "unconditional",
             "objective": "wasserstein_gp",
             "progressive_training": True,
             "training_schedule": schedule_metadata,
-            "ema_decay": EMA_DECAY,
+            "ema_half_life_kimg": EMA_HALF_LIFE_KIMG,
         },
         model_metadata={
             "online_generator": {

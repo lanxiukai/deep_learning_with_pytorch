@@ -37,8 +37,8 @@ Resume an interrupted run:
 Training data -- CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
-Training epochs:         200
-Optimizer updates:       156,200 D / 156,200 G (1:1)
+Training epochs:          90
+Optimizer updates:        70,290 D / 70,290 G (1:1)
 
 Generator:                4.39 M params
 Discriminator:            1.08 M params
@@ -78,9 +78,9 @@ OUT_DIR = PROJECT_ROOT / "output" / "sagan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
-NUM_EPOCHS = 200
+NUM_EPOCHS = 90
 BATCH_SIZE = 64
-# If BATCH_SIZE is raised to 128, raise NUM_EPOCHS to 400 as well.
+# If BATCH_SIZE is raised to 128, raise NUM_EPOCHS to 180 as well.
 NUM_WORKERS = 8
 NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
@@ -92,7 +92,7 @@ DISCRIMINATOR_LR = 4e-4
 SAMPLES_TO_DISPLAY = NUM_CLASSES * SAMPLES_PER_CLASS
 SAMPLE_EVERY_EPOCHS = 5
 CHECKPOINT_EVERY_EPOCHS = 5
-ARCHIVE_EVERY_EPOCHS = 25
+ARCHIVE_EVERY_EPOCHS = 5
 SEED = 42
 
 MODEL_CONFIG = {

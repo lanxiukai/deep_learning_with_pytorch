@@ -1,4 +1,4 @@
-"""Shared Variational AutoEncoder with 63,332,411 trainable parameters (~63.3M)."""
+"""Shared 256x256 VAE and its diagonal-Gaussian teaching primitives."""
 
 import torch
 import torch.nn.functional as F
@@ -7,6 +7,26 @@ from torch import nn
 from dl_utils.devices.selection import get_device
 
 device = get_device()
+
+
+def diagonal_gaussian_kl(mu, std):
+    """Return KL[N(mu, std^2) || N(0, 1)] per sample and dimension."""
+    if mu.shape != std.shape or mu.ndim != 2:
+        raise ValueError("mu and std must have matching [batch, latent] shapes.")
+    return 0.5 * (
+        mu.square()
+        + std.square()
+        - 1.0
+        - 2.0 * torch.log(std.clamp_min(1e-8))
+    )
+
+
+def reparameterize(mu, std):
+    """Draw a differentiable sample from a diagonal Gaussian posterior."""
+    if mu.shape != std.shape:
+        raise ValueError("mu and std must have matching shapes.")
+    return mu + std * torch.randn_like(mu)
+
 
 class VAEEncoder(nn.Module):
     # Manual forward (not Sequential) — the network branches into μ and log σ
@@ -24,16 +44,22 @@ class VAEEncoder(nn.Module):
         self.linear2 = nn.Linear(1024, latent_dims)   # μ
         self.linear3 = nn.Linear(1024, latent_dims)   # log σ
 
-    def forward(self, x):
-        x = x.to(device)
+    def statistics(self, x):
+        """Encode an image batch into posterior mean and standard deviation."""
         x = F.relu(self.conv1(x))
         x = F.relu(self.batch2(self.conv2(x)))
         x = F.relu(self.conv3(x))
         x = torch.flatten(x, start_dim=1)
         x = F.relu(self.linear1(x))
-        mu = self.linear2(x)                         # (B, 100)
-        std = torch.exp(self.linear3(x))             # (B, 100)
-        z = mu + std * torch.randn_like(mu)          # (B, 100)
+        mu = self.linear2(x)                         # (B, latent_dims)
+        # Bound only the exponential's numerical range, not the sampled z.
+        log_std = self.linear3(x).clamp(-12.0, 12.0)
+        std = torch.exp(log_std)                     # (B, latent_dims)
+        return mu, std
+
+    def forward(self, x):
+        mu, std = self.statistics(x)
+        z = reparameterize(mu, std)                  # (B, 100)
         return mu, std, z
 
 
@@ -66,7 +92,9 @@ class VAEDecoder(nn.Module):
         x = self.decoder_lin(x)
         x = self.unflatten(x)
         x = self.decoder_conv(x)  # → (B, 3, 256, 256)
-        x = torch.sigmoid(x)      # pixel-wise Gaussian mean p(x|z), σ²=1
+        # Pixel-wise Gaussian mean; the fixed likelihood scale is absorbed by
+        # the reconstruction-loss coefficient in the lesson script.
+        x = torch.sigmoid(x)
         return x
 
 
@@ -76,7 +104,21 @@ class VAE(nn.Module):
         self.encoder = VAEEncoder(latent_dims)
         self.decoder = VAEDecoder(latent_dims)
 
-    def forward(self, x):
-        x = x.to(device)
-        mu, std, z = self.encoder(x)
+    def reconstruct(self, x, *, sample=True):
+        """Reconstruct from a posterior sample or deterministically from mu."""
+        mu, std = self.encoder.statistics(x)
+        z = reparameterize(mu, std) if sample else mu
         return mu, std, self.decoder(z)
+
+    def forward(self, x):
+        return self.reconstruct(x, sample=True)
+
+
+__all__ = [
+    "VAE",
+    "VAEDecoder",
+    "VAEEncoder",
+    "device",
+    "diagonal_gaussian_kl",
+    "reparameterize",
+]

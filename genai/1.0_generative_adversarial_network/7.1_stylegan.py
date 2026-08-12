@@ -6,12 +6,13 @@ original StyleGAN generator ideas:
     - per-layer AdaIN styles and independent stochastic noise;
     - style-mixing regularization and a moving W center for truncation;
     - non-saturating logistic loss with R1 regularization;
-    - an exponential moving average of G for monitoring and final sampling.
+    - an image-count-based exponential moving average of G for sampling.
 
-The original model targets high-resolution faces with a deeper mapping
-network and a much longer image-count schedule.  This CIFAR-10 adaptation
-keeps every algorithmic mechanism but uses smaller widths and epoch-based
-progressive phases.  Lazy regularization is intentionally left for StyleGAN2.
+The original model targets high-resolution faces with wider features and a
+much longer image-count schedule.  This CIFAR-10 adaptation keeps its
+eight-layer mapping depth and every algorithmic mechanism, but uses smaller
+widths and epoch-based progressive phases.  Lazy regularization is
+intentionally left for StyleGAN2.
 
 Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.
@@ -37,9 +38,9 @@ Samples per epoch:       49,920 at 4x4/8x8; 49,984 at 16x16/32x32
 Progressive phases:      7 x 12 epochs (84 global epochs)
 Optimizer updates:       70,272 D / 70,272 G (1:1)
 
-Generator:                2.76 M params (plus one EMA copy)
+Generator:                2.83 M params (plus one EMA copy)
 Discriminator:            3.38 M params
-Trainable total:          6.14 M params
+Trainable total:          6.20 M params
 """
 
 import argparse
@@ -81,12 +82,14 @@ NUM_WORKERS = 4
 Z_DIM = 128
 STYLE_DIM = 128
 BASE_CHANNELS = 32
-MAPPING_LAYERS = 4
+MAPPING_LAYERS = 8
 W_AVG_BETA = 0.995
 LEARNING_RATE = 2e-3
 STYLE_MIXING_PROBABILITY = 0.9
 R1_GAMMA = 10.0
-EMA_DECAY = 0.999
+# Express smoothing in images rather than optimizer steps: progressive stages
+# use different batches, but every 10 kimg always halves old EMA information.
+EMA_HALF_LIFE_KIMG = 10.0
 SAMPLES_TO_DISPLAY = 64
 SAMPLE_GRID_COLUMNS = 8
 SAMPLE_EVERY_EPOCHS = 4
@@ -219,11 +222,18 @@ def r1_penalty(real_scores, real_images):
     return gradients.square().flatten(1).sum(dim=1).mean()
 
 
+def ema_decay(batch_size):
+    """Convert an image-count half-life into this update's EMA decay."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    half_life_images = EMA_HALF_LIFE_KIMG * 1_000
+    return 0.5 ** (batch_size / half_life_images)
+
+
 @torch.no_grad()
-def update_ema(averaged_generator, generator, decay=EMA_DECAY):
-    """Move StyleGAN's sampling weights toward the online generator."""
-    if not 0 <= decay < 1:
-        raise ValueError("EMA decay must be in [0, 1).")
+def update_ema(averaged_generator, generator, batch_size):
+    """Move StyleGAN's sampling weights toward G after one image batch."""
+    decay = ema_decay(batch_size)
     for averaged_parameter, parameter in zip(
         averaged_generator.parameters(),
         generator.parameters(),
@@ -321,7 +331,7 @@ def train_epoch(
             ).mean()
             loss_g.backward()
             optimizer_g.step()
-            update_ema(averaged_generator, generator)
+            update_ema(averaged_generator, generator, batch_size)
         finally:
             discriminator.requires_grad_(True)
 
@@ -430,13 +440,13 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 6,
+            "format_version": 7,
             "conditioning": "unconditional",
             "objective": "non_saturating_logistic_r1",
             "progressive_training": True,
             "training_schedule": schedule_metadata,
             "style_mixing_probability": STYLE_MIXING_PROBABILITY,
-            "ema_decay": EMA_DECAY,
+            "ema_half_life_kimg": EMA_HALF_LIFE_KIMG,
         },
         model_metadata={
             "online_generator": {
