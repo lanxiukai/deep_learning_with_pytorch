@@ -21,17 +21,9 @@ from torch import nn
 from torch.nn.utils import spectral_norm
 
 
-def count_spectral_norm_layers(module):
-    """Count modules wrapped by PyTorch's legacy spectral-normalization hook."""
-    required_state = ("weight_orig", "weight_u", "weight_v")
-    return sum(
-        all(hasattr(child, name) for name in required_state)
-        for child in module.modules()
-    )
-
-
 def uniform_dequantize_uint8(pixels, *, generator=None):
     """Map uint8 pixels with uniform dequantization to the paper's range."""
+    # pixels shape: (B, C, H, W), torch.uint8
     if not isinstance(pixels, torch.Tensor) or pixels.dtype != torch.uint8:
         raise TypeError("pixels must be a torch.uint8 tensor.")
     noise = torch.rand(
@@ -39,8 +31,8 @@ def uniform_dequantize_uint8(pixels, *, generator=None):
         dtype=torch.float32,
         device=pixels.device,
         generator=generator,
-    )
-    return (pixels.to(torch.float32) + noise) / 128.0 - 1.0
+    )  # ~ U[0, 1), (B, C, H, W), torch.float32
+    return (pixels.to(torch.float32) + noise) / 128.0 - 1.0  # [-1, 1)
 
 
 def _initialize_affine_layer(module, gain=1.0):
@@ -86,14 +78,15 @@ class SNGeneratorResidualBlock(nn.Module):
         self.skip = nn.Conv2d(in_channels, out_channels, 1)
 
     def forward(self, inputs):
-        residual = F.interpolate(inputs, scale_factor=2, mode="nearest")
-        residual = self.skip(residual)
+        # inputs shape: (B, C_in, H, W)
+        residual = F.interpolate(inputs, scale_factor=2, mode="nearest")  # (B, C_in, 2H, 2W)
+        residual = self.skip(residual)  # (B, C_out, 2H, 2W)
 
         hidden = F.relu(self.norm1(inputs), inplace=True)
-        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")
-        hidden = self.conv1(hidden)
+        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")  # (B, C_in, 2H, 2W)
+        hidden = self.conv1(hidden)  # (B, C_out, 2H, 2W)
         hidden = self.conv2(F.relu(self.norm2(hidden), inplace=True))
-        return hidden + residual
+        return hidden + residual  # (B, C_out, 2H, 2W)
 
 
 class SNGenerator(nn.Module):
@@ -126,18 +119,19 @@ class SNGenerator(nn.Module):
         )
 
     def forward(self, noise):
+        # noise shape: (B, z_dim)
         if noise.ndim != 2 or noise.shape[1] != self.z_dim:
             raise ValueError(
                 f"Expected noise with shape (batch, {self.z_dim}), "
                 f"got {tuple(noise.shape)}."
             )
-        hidden = self.input(noise)
-        hidden = hidden.view(noise.shape[0], -1, 4, 4)
-        hidden = self.block1(hidden)
-        hidden = self.block2(hidden)
-        hidden = self.block3(hidden)
+        hidden = self.input(noise)  # (B, 256 * 4 * 4)
+        hidden = hidden.view(noise.shape[0], -1, 4, 4)  # (B, 256, 4, 4)
+        hidden = self.block1(hidden)  # (B, 256, 8, 8)
+        hidden = self.block2(hidden)  # (B, 256, 16, 16)
+        hidden = self.block3(hidden)  # (B, 256, 32, 32)
         hidden = F.relu(self.output_norm(hidden), inplace=True)
-        return torch.tanh(self.output(hidden))
+        return torch.tanh(self.output(hidden))  # (B, 3, 32, 32)
 
 
 class SNDiscriminatorResidualBlock(nn.Module):
@@ -218,19 +212,21 @@ class SNDiscriminator(nn.Module):
         )
 
     def extract_features(self, images):
+        # images shape: (B, 3, 32, 32)
         if images.ndim != 4 or images.shape[1] != 3:
             raise ValueError(
                 "Expected images with shape (batch, 3, height, width), "
                 f"got {tuple(images.shape)}."
             )
-        hidden = self.block1(images)
-        hidden = self.block2(hidden)
-        hidden = self.block3(hidden)
-        hidden = self.block4(hidden)
+        hidden = self.block1(images)  # (B, 128, 16, 16)
+        hidden = self.block2(hidden)  # (B, 128, 8, 8)
+        hidden = self.block3(hidden)  # (B, 128, 8, 8)
+        hidden = self.block4(hidden)  # (B, 128, 8, 8)
         hidden = F.relu(hidden, inplace=True)
-        return hidden.sum(dim=(2, 3))
+        return hidden.sum(dim=(2, 3)) # (B, 128)
 
     def forward(self, images):
+        # (B, 128) -> (B, 1) -> (B,)
         return self.output(self.extract_features(images)).squeeze(1)
 
 def discriminator_hinge_loss(real_scores, fake_scores):
