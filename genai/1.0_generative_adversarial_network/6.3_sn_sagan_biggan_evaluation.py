@@ -1,8 +1,10 @@
 """Qualitatively evaluate the SN-GAN to BigGAN lesson sequence.
 
 The figures keep unlike comparisons separate:
-    - SN-GAN receives independent z samples and no class labels;
-    - SAGAN and BigGAN receive the same z while the CIFAR-10 label changes;
+    - all three generators are checked for the intended spectral-normalization
+      progression;
+    - CIFAR-10 training examples provide a real-data reference for the
+      fixed-z SAGAN and BigGAN class sweep;
     - BigGAN repeats the class sweep with progressively tighter truncation.
 
 This is a compact mechanism check rather than an FID reproduction.  Models are
@@ -10,19 +12,19 @@ trained independently, so shared inputs fix sampling conditions but do not
 create semantic correspondence between generators.
 
 Inputs:
+    data/cifar10, prepared by tool_scripts/download_dataset_test.py
     output/sn_gan/generator.pth, created by 6.0_sn_gan.py
     output/sagan/generator.pth, created by 6.1_sagan.py
     output/biggan/generator.pth, created by 6.2_biggan.py
 
 Outputs:
     Each evaluation directory is reset at the start of every run.
-    output/sn_gan/evaluation/sn_gan_samples.png
     output/sagan/evaluation/conditional_class_sweep.png
-    output/biggan/evaluation/conditional_class_sweep.png
     output/biggan/evaluation/biggan_truncation.png
 """
 
 import torch
+from torchvision import datasets, transforms
 
 from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
@@ -36,23 +38,22 @@ from dl_utils.genai.sagan import (
 )
 from dl_utils.genai.sn_gan import (
     SNGenerator,
-    count_spectral_norm_layers,
 )
 from dl_utils.plot.images import save_image_row_grid
 
 
 PROJECT_ROOT = infer_project_root()
+DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
 MODEL_OUT_DIRS = {
     model_name: PROJECT_ROOT / "output" / model_name
     for model_name in ("sn_gan", "sagan", "biggan")
 }
 EVALUATION_DIRS = {
-    model_name: output_dir / "evaluation"
-    for model_name, output_dir in MODEL_OUT_DIRS.items()
+    model_name: MODEL_OUT_DIRS[model_name] / "evaluation"
+    for model_name in ("sagan", "biggan")
 }
 
 NUM_CLASSES = 10
-NUM_UNCONDITIONAL_SAMPLES = 10
 TRUNCATION_THRESHOLDS = (None, 1.0, 0.5)
 SEED = 42
 
@@ -88,6 +89,48 @@ MODEL_SPECS = (
         "ema",
     ),
 )
+
+
+def count_spectral_norm_layers(module):
+    """Count modules wrapped by PyTorch's spectral-normalization hook."""
+    required_state = ("weight_orig", "weight_u", "weight_v")
+    return sum(
+        all(hasattr(child, name) for name in required_state)
+        for child in module.modules()
+    )
+
+
+def load_cifar10_class_references():
+    """Return one normalized, unaugmented training image for every class."""
+    if not (DATA_DIR / "cifar-10-batches-py").is_dir():
+        raise FileNotFoundError(
+            f"CIFAR-10 data not found: {DATA_DIR}. "
+            "Run tool_scripts/download_dataset_test.py first."
+        )
+
+    dataset = datasets.CIFAR10(
+        DATA_DIR,
+        train=True,
+        download=False,
+        transform=transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize([0.5] * 3, [0.5] * 3),
+            ]
+        ),
+    )
+    class_indices = [None] * NUM_CLASSES
+    for sample_index, class_index in enumerate(dataset.targets):
+        if class_indices[class_index] is None:
+            class_indices[class_index] = sample_index
+        if all(index is not None for index in class_indices):
+            break
+    if any(index is None for index in class_indices):
+        raise RuntimeError("CIFAR-10 training data is missing a class.")
+
+    return torch.stack(
+        [dataset[index][0] for index in class_indices]
+    )
 
 
 def load_generator(
@@ -177,30 +220,13 @@ def validate_spectral_normalization(generators):
 
 
 @torch.inference_mode()
-def save_sn_gan_samples(generator, z_dim, device):
-    """Save unconditional samples without misleading class-column labels."""
-    torch.manual_seed(SEED)
-    z = torch.randn(NUM_UNCONDITIONAL_SAMPLES, z_dim, device=device)
-    samples = generator(z).cpu()
-    save_image_row_grid(
-        [samples],
-        ["SN-GAN"],
-        EVALUATION_DIRS["sn_gan"] / "sn_gan_samples.png",
-        title="Unconditional SN-GAN samples",
-        column_labels=[
-            f"Sample {index + 1}"
-            for index in range(NUM_UNCONDITIONAL_SAMPLES)
-        ],
-    )
-
-
-@torch.inference_mode()
 def save_conditional_class_sweep(
     generators,
+    training_images,
     z_dim,
     device,
 ):
-    """Hold one z fixed while changing only the class label."""
+    """Compare one real image per class with fixed-z generated responses."""
     torch.manual_seed(SEED + 1)
     base_z = torch.randn(1, z_dim, device=device)
     noise, labels = make_fixed_class_latent_grid(
@@ -211,19 +237,21 @@ def save_conditional_class_sweep(
         base_noise=base_z,
     )
     image_rows = [
-        generators[model_name](noise, labels).cpu()
-        for model_name in ("sagan", "biggan")
+        training_images,
+        *(
+            generators[model_name](noise, labels).cpu()
+            for model_name in ("sagan", "biggan")
+        ),
     ]
-    for model_name in ("sagan", "biggan"):
-        save_image_row_grid(
-            image_rows,
-            ["SAGAN", "Compact BigGAN EMA"],
-            EVALUATION_DIRS[model_name] / "conditional_class_sweep.png",
-            title="Fixed-z CIFAR-10 class response",
-            column_labels=[
-                name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
-            ],
-        )
+    save_image_row_grid(
+        image_rows,
+        ["CIFAR-10 train", "SAGAN", "Compact BigGAN EMA"],
+        EVALUATION_DIRS["sagan"] / "conditional_class_sweep.png",
+        title="CIFAR-10 reference and fixed-z class response",
+        column_labels=[
+            name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
+        ],
+    )
 
 
 @torch.inference_mode()
@@ -269,6 +297,7 @@ def main():
 
     set_seed(SEED)
     device = try_gpu()
+    training_images = load_cifar10_class_references()
 
     generators = {}
     configurations = {}
@@ -306,13 +335,9 @@ def main():
         )
     conditional_z_dim = conditional_z_dims.pop()
 
-    save_sn_gan_samples(
-        generators["sn_gan"],
-        int(configurations["sn_gan"]["z_dim"]),
-        device,
-    )
     save_conditional_class_sweep(
         generators,
+        training_images,
         conditional_z_dim,
         device,
     )
