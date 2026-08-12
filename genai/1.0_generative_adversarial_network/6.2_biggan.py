@@ -36,8 +36,8 @@ Resume an interrupted run:
 Training data -- CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
-Training epochs:         200
-Optimizer updates:       156,200 D / 78,100 G (exactly 2:1)
+Training epochs:         400
+Optimizer updates:       312,400 D / 156,200 G (exactly 2:1)
 
 Generator:                3.22 M params (plus one EMA copy)
 Discriminator:            1.08 M params
@@ -82,7 +82,7 @@ OUT_DIR = PROJECT_ROOT / "output" / "biggan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
-NUM_EPOCHS = 200
+NUM_EPOCHS = 400
 BATCH_SIZE = 64
 NUM_WORKERS = 8
 NUM_CLASSES = 10
