@@ -99,15 +99,12 @@ class SNGeneratorResidualBlock(nn.Module):
 class SNGenerator(nn.Module):
     """Paper-aligned unconditional 32x32 SN-GAN generator."""
 
-    def __init__(self, z_dim=128, base_channels=256, image_size=32):
+    def __init__(self, z_dim=128, base_channels=256):
         super().__init__()
         if z_dim < 1:
             raise ValueError("z_dim must be positive.")
         if base_channels < 1:
             raise ValueError("base_channels must be positive.")
-        if image_size != 32:
-            raise ValueError("image_size must be 32.")
-
         self.z_dim = z_dim
         self.input = nn.Linear(z_dim, base_channels * 4 * 4)
         self.block1 = SNGeneratorResidualBlock(
@@ -171,17 +168,17 @@ class SNDiscriminatorResidualBlock(nn.Module):
         )
 
     def forward(self, inputs):
-        # inputs shape: (B, IC, H, W)
+        # inputs shape: (B, C_in, H, W)
         hidden = inputs if self.first else F.relu(inputs, inplace=False)
-        hidden = self.conv1(hidden)  # (B, OC, H, W)
-        hidden = self.conv2(F.relu(hidden, inplace=True))  # (B, OC, H, W)
+        hidden = self.conv1(hidden)  # (B, C_out, H, W)
+        hidden = self.conv2(F.relu(hidden, inplace=True))  # (B, C_out, H, W)
         if self.downsample:
-            hidden = F.avg_pool2d(hidden, 2)  # (B, OC, H/2, W/2)
+            hidden = F.avg_pool2d(hidden, 2)  # (B, C_out, H/2, W/2)
 
-        residual = self.skip(inputs)  # (B, OC, H, W)
+        residual = self.skip(inputs)  # (B, C_out, H, W)
         if self.downsample:
-            residual = F.avg_pool2d(residual, 2)  # (B, OC, H/2, W/2)
-        # (B, OC, H/2, W/2) if self.downsample else (B, OC, H, W)
+            residual = F.avg_pool2d(residual, 2)  # (B, C_out, H/2, W/2)
+        # (B, C_out, H/2, W/2) if self.downsample else (B, C_out, H, W)
         return hidden + residual
 
 

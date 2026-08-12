@@ -156,18 +156,18 @@ class SAGANGeneratorResidualBlock(nn.Module):
         )
 
     def forward(self, inputs, labels):
-        # inputs shape: (B, IC, H, W)， labels shape: (B,)
-        # (B, IC, H, W) -> (B, IC, 2H, 2W)
+        # inputs shape: (B, C_in, H, W)， labels shape: (B,)
+        # (B, C_in, H, W) -> (B, C_in, 2H, 2W)
         residual = F.interpolate(inputs, scale_factor=2, mode="nearest")
-        residual = self.skip(residual)  # (B, OC, 2H, 2W)
+        residual = self.skip(residual)  # (B, C_out, 2H, 2W)
 
-        hidden = F.relu(self.norm1(inputs, labels), inplace=True)  # (B, IC, H, W)
-        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")  # (B, IC, 2H, 2W)
-        hidden = self.conv1(hidden)  # (B, OC, 2H, 2W)
+        hidden = F.relu(self.norm1(inputs, labels), inplace=True)  # (B, C_in, H, W)
+        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")  # (B, C_in, 2H, 2W)
+        hidden = self.conv1(hidden)  # (B, C_out, 2H, 2W)
         hidden = self.conv2(
             F.relu(self.norm2(hidden, labels), inplace=True)
-        )  # (B, OC, 2H, 2W)
-        return hidden + residual  # (B, OC, 2H, 2W)
+        )  # (B, C_out, 2H, 2W)
+        return hidden + residual  # (B, C_out, 2H, 2W)
 
 
 class SAGANGenerator(nn.Module):
@@ -178,15 +178,12 @@ class SAGANGenerator(nn.Module):
         z_dim=128,
         num_classes=10,
         base_channels=256,
-        image_size=32,
     ):
         super().__init__()
         if z_dim < 1:
             raise ValueError("z_dim must be positive.")
         if base_channels < 1:
             raise ValueError("base_channels must be positive.")
-        if image_size != 32:
-            raise ValueError("image_size must be 32.")
         self.z_dim = z_dim
         self.input = spectral_norm(
             nn.Linear(z_dim, base_channels * 4 * 4)

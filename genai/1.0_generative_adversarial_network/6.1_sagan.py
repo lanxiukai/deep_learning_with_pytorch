@@ -78,7 +78,7 @@ OUT_DIR = PROJECT_ROOT / "output" / "sagan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
-NUM_EPOCHS = 200
+NUM_EPOCHS = 100
 BATCH_SIZE = 64
 # If BATCH_SIZE is raised to 128, raise NUM_EPOCHS to 400 as well.
 NUM_WORKERS = 8
@@ -87,7 +87,6 @@ SAMPLES_PER_CLASS = 8
 Z_DIM = 128
 GENERATOR_BASE_CHANNELS = 256
 DISCRIMINATOR_BASE_CHANNELS = 128
-IMAGE_SIZE = 32
 GENERATOR_LR = 1e-4
 DISCRIMINATOR_LR = 4e-4
 SAMPLES_TO_DISPLAY = NUM_CLASSES * SAMPLES_PER_CLASS
@@ -100,7 +99,6 @@ MODEL_CONFIG = {
     "z_dim": Z_DIM,
     "num_classes": NUM_CLASSES,
     "base_channels": GENERATOR_BASE_CHANNELS,
-    "image_size": IMAGE_SIZE,
 }
 
 DISCRIMINATOR_CONFIG = {
@@ -264,7 +262,6 @@ def main(resume_from=None):
             "fixed_labels": fixed_labels.cpu(),
         },
     )
-    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     loss_history = state["loss_history"]
     fixed_noise = state["fixed_noise"].to(device)
     fixed_labels = state["fixed_labels"].to(device)

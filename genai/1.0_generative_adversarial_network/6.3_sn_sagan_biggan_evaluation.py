@@ -53,7 +53,6 @@ EVALUATION_DIRS = {
 
 NUM_CLASSES = 10
 NUM_UNCONDITIONAL_SAMPLES = 10
-IMAGE_SIZE = 32
 TRUNCATION_THRESHOLDS = (None, 1.0, 0.5)
 SEED = 42
 
@@ -138,9 +137,10 @@ def load_generator(
         raise ValueError(
             f"Checkpoint metadata is incomplete: {checkpoint_path}."
         )
-    if model_config.get("image_size") != IMAGE_SIZE:
+    checkpoint_image_size = model_config.get("image_size", 32)
+    if checkpoint_image_size != 32:
         raise ValueError(
-            f"Expected a {IMAGE_SIZE}x{IMAGE_SIZE} checkpoint at "
+            "Expected a 32x32 checkpoint at "
             f"{checkpoint_path}."
         )
     if expected_conditioning == "class_conditional":
@@ -149,7 +149,11 @@ def load_generator(
                 f"Expected {NUM_CLASSES} classes at {checkpoint_path}."
             )
 
-    generator = model_class(**model_config).to(device)
+    # All lesson generators are fixed at 32x32; discard legacy metadata.
+    constructor_config = {
+        key: value for key, value in model_config.items() if key != "image_size"
+    }
+    generator = model_class(**constructor_config).to(device)
     generator.load_state_dict(state_dict, strict=True)
     return generator.eval(), model_config
 

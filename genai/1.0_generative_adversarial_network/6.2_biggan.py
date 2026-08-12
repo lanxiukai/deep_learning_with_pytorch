@@ -91,7 +91,6 @@ Z_DIM = 128
 GENERATOR_BASE_CHANNELS = 32
 DISCRIMINATOR_BASE_CHANNELS = 128
 CLASS_EMBEDDING_DIM = 32
-IMAGE_SIZE = 32
 GENERATOR_LR = 5e-5
 DISCRIMINATOR_LR = 2e-4
 DISCRIMINATOR_UPDATES_PER_GENERATOR = 2
@@ -108,7 +107,6 @@ MODEL_CONFIG = {
     "num_classes": NUM_CLASSES,
     "base_channels": GENERATOR_BASE_CHANNELS,
     "class_embedding_dim": CLASS_EMBEDDING_DIM,
-    "image_size": IMAGE_SIZE,
 }
 
 DISCRIMINATOR_CONFIG = {
@@ -122,12 +120,17 @@ def update_ema(averaged_generator, generator, decay=EMA_DECAY):
     """Move BigGAN's sampling weights toward the online generator."""
     if not 0 <= decay < 1:
         raise ValueError("EMA decay must be in [0, 1).")
+
     for averaged_parameter, parameter in zip(
         averaged_generator.parameters(),
         generator.parameters(),
-        strict=True,
+        strict=True,  # Require both generators to have matching parameter structures.
     ):
+        # theta_ema is the sampling generator's parameter (averaged_parameter);
+        # theta is the online generator's parameter (parameter).
+        # Update: theta_ema <- decay * theta_ema + (1 - decay) * theta.
         averaged_parameter.lerp_(parameter, 1 - decay)
+
     for averaged_buffer, buffer in zip(
         averaged_generator.buffers(),
         generator.buffers(),
@@ -135,6 +138,7 @@ def update_ema(averaged_generator, generator, decay=EMA_DECAY):
     ):
         # This compact implementation uses ordinary BN running statistics
         # instead of the paper's cross-replica/standing-statistics pipeline.
+        # Synchronize buffers directly rather than averaging them.
         averaged_buffer.copy_(buffer)
 
 
@@ -162,7 +166,7 @@ def train_epoch(
         labels = labels.to(device, non_blocking=True)
         batch_size = real.shape[0]
 
-        noise = torch.randn(batch_size, Z_DIM, device=device)
+        noise = torch.randn(batch_size, Z_DIM, device=device)  # (B, Z_DIM)
         with torch.no_grad():
             fake = generator(noise, labels)
         real_scores = discriminator(real, labels)
@@ -342,7 +346,6 @@ def main(resume_from=None):
             "discriminator_steps": 0,
         },
     )
-    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     loss_history = state["loss_history"]
     fixed_noise = state["fixed_noise"].to(device)
     fixed_labels = state["fixed_labels"].to(device)

@@ -82,7 +82,6 @@ NUM_WORKERS = 8
 Z_DIM = 128
 GENERATOR_BASE_CHANNELS = 256
 DISCRIMINATOR_BASE_CHANNELS = 128
-IMAGE_SIZE = 32
 LEARNING_RATE = 2e-4
 DISCRIMINATOR_UPDATES_PER_GENERATOR = 5
 SAMPLES_TO_DISPLAY = 64
@@ -95,7 +94,6 @@ SEED = 42
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
     "base_channels": GENERATOR_BASE_CHANNELS,
-    "image_size": IMAGE_SIZE,
 }
 
 DISCRIMINATOR_CONFIG = {
@@ -256,7 +254,6 @@ def main(resume_from=None):
             "discriminator_steps": 0,
         },
     )
-    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     loss_history = state["loss_history"]
     fixed_noise = state["fixed_noise"].to(device)
     discriminator_steps = state["discriminator_steps"]
