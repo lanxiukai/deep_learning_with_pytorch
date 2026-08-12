@@ -64,13 +64,13 @@ class BigGANGeneratorResidualBlock(nn.Module):
 
 
 class CompactBigGANGenerator(nn.Module):
-    """BigGAN-style generator for 32x32 images with latent conditioning."""
+    """BigGAN-style 32x32 generator with a compact 64-channel base width."""
 
     def __init__(
         self,
         z_dim=128,
         num_classes=10,
-        base_channels=32,
+        base_channels=64,
         class_embedding_dim=128,
     ):
         super().__init__()
@@ -131,12 +131,12 @@ class CompactBigGANGenerator(nn.Module):
             for chunk in latent_chunks[1:]
         ]  # (B, class_embedding_dim + z_dim/4) * 3
 
-        hidden = self.input(latent_chunks[0])  # (B, 256 * 4 * 4)
-        hidden = hidden.view(noise.shape[0], -1, 4, 4)     # (B, 256, 4, 4)
-        hidden = self.block1(hidden, block_conditions[0])  # (B, 128, 8, 8)
-        hidden = self.block2(hidden, block_conditions[1])  # (B, 64, 16, 16)
-        hidden = self.attention(hidden)                    # (B, 64, 16, 16)
-        hidden = self.block3(hidden, block_conditions[2])  # (B, 32, 32, 32)
+        hidden = self.input(latent_chunks[0])  # (B, 8C * 4 * 4)
+        hidden = hidden.view(noise.shape[0], -1, 4, 4)     # (B, 8C, 4, 4)
+        hidden = self.block1(hidden, block_conditions[0])  # (B, 4C, 8, 8)
+        hidden = self.block2(hidden, block_conditions[1])  # (B, 2C, 16, 16)
+        hidden = self.attention(hidden)                    # (B, 2C, 16, 16)
+        hidden = self.block3(hidden, block_conditions[2])  # (B, C, 32, 32)
         hidden = F.relu(self.output_norm(hidden), inplace=True)
         return torch.tanh(self.output(hidden))  # (B, 3, 32, 32)
 

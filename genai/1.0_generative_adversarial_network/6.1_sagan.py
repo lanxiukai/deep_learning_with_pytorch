@@ -78,7 +78,7 @@ OUT_DIR = PROJECT_ROOT / "output" / "sagan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
-NUM_EPOCHS = 100
+NUM_EPOCHS = 200
 BATCH_SIZE = 64
 # If BATCH_SIZE is raised to 128, raise NUM_EPOCHS to 400 as well.
 NUM_WORKERS = 8

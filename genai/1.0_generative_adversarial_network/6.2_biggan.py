@@ -36,12 +36,12 @@ Resume an interrupted run:
 Training data -- CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
-Training epochs:         100
-Optimizer updates:       78,100 D / 39,050 G (exactly 2:1)
+Training epochs:         200
+Optimizer updates:       156,200 D / 78,100 G (exactly 2:1)
 
-Generator:                0.85 M params (plus one EMA copy)
+Generator:                3.22 M params (plus one EMA copy)
 Discriminator:            1.08 M params
-Trainable total:          1.93 M params
+Trainable total:          4.30 M params
 """
 
 import argparse
@@ -82,15 +82,15 @@ OUT_DIR = PROJECT_ROOT / "output" / "biggan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
-NUM_EPOCHS = 100
+NUM_EPOCHS = 200
 BATCH_SIZE = 64
 NUM_WORKERS = 8
 NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
 Z_DIM = 128
-GENERATOR_BASE_CHANNELS = 32
+GENERATOR_BASE_CHANNELS = 64
 DISCRIMINATOR_BASE_CHANNELS = 128
-CLASS_EMBEDDING_DIM = 32
+CLASS_EMBEDDING_DIM = 128
 GENERATOR_LR = 5e-5
 DISCRIMINATOR_LR = 2e-4
 DISCRIMINATOR_UPDATES_PER_GENERATOR = 2
