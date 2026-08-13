@@ -1,4 +1,4 @@
-"""Utilities for VAE, GAN, CycleGAN, pix2pix, modern GANs, and DDPM.
+"""Utilities for VAE, GAN, CycleGAN, pix2pix, and diffusion lessons.
 
 Submodules:
     vae:      Original 256x256 VAE and diagonal-Gaussian primitives.
@@ -23,4 +23,8 @@ Submodules:
     stylegan:  Progressive AdaIN synthesis, W-space styles, and truncation.
     stylegan2: Modulated/demodulated synthesis, overlapping W-slot routing,
                skip RGB generation, and the residual discriminator.
+    diffusion_ddpm: Discrete VP schedules and DDPM/DDIM reverse transitions.
+    diffusion_score_sde: Continuous VP-SDE and probability-flow samplers.
+    diffusion_unet: Compact time-conditioned convolutional backbone.
+    ddpm:      Compatibility exports for the three focused diffusion modules.
 """

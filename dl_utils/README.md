@@ -84,6 +84,9 @@ dl_utils/
 │   ├── biggan.py
 │   ├── cyclegan.py
 │   ├── ddpm.py
+│   ├── diffusion_ddpm.py
+│   ├── diffusion_score_sde.py
+│   ├── diffusion_unet.py
 │   ├── gan.py
 │   ├── pix2pix.py
 │   ├── perceptual_autoencoder.py
@@ -357,11 +360,29 @@ ResidualBlock, Generator, Block, Discriminator, LoadData, weights_init.
 
 ### dl_utils/genai/ddpm.py
 
-Dependencies: math, typing (Union), numpy, torch, einops (rearrange),
-einops.layers.torch (Rearrange), torch (einsum, nn), torchvision.transforms
-(CenterCrop, Compose, InterpolationMode, RandomHorizontalFlip, Resize,
-ToTensor), tqdm, dl_utils.data.images (flatten_to_rgb).
-Public entries (__all__): transforms, DDIMScheduler, UNet.
+Dependencies: dl_utils.genai.diffusion_ddpm, diffusion_score_sde,
+diffusion_unet.
+Public entries (__all__): DiffusionPrediction, DiffusionUNet, DiscreteSampler,
+GaussianDiffusion, PredictionType, ScoreSampler, UNet, VPSDE,
+cosine_beta_schedule, linear_beta_schedule, sample_vp_sde. This module is a
+compatibility facade; new lessons import the focused modules directly.
+
+### dl_utils/genai/diffusion_ddpm.py
+
+Dependencies: math, dataclasses, typing, torch, torch.nn.functional.
+Public entries (__all__): DiffusionPrediction, DiscreteSampler,
+GaussianDiffusion, PredictionType, cosine_beta_schedule,
+linear_beta_schedule.
+
+### dl_utils/genai/diffusion_score_sde.py
+
+Dependencies: dataclasses, typing, torch.
+Public entries (__all__): ScoreSampler, VPSDE, sample_vp_sde.
+
+### dl_utils/genai/diffusion_unet.py
+
+Dependencies: math, typing, torch, torch.nn.functional.
+Public entries (__all__): DiffusionUNet, UNet.
 
 ### dl_utils/genai/gan.py
 
