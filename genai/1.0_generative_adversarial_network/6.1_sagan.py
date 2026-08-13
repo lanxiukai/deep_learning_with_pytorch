@@ -7,12 +7,12 @@ and presents SAGAN's algorithmic additions:
     - non-local self-attention with pooled key/value branches and a
       zero-initialized residual gate in G/D;
     - spectral normalization in both G and D;
-    - TTUR with one D update per G update.
+    - TTUR with a configurable number of D updates per G update.
 
 The original paper trains 128x128 ImageNet models.  Here the same ideas are
 kept in a three-block 32x32 CIFAR-10 model with ordinary single-device
-BatchNorm.  G keeps 256 channels across its three upsampling blocks, while D
-keeps 128 channels and applies attention after its first 16x16 block.  Random
+BatchNorm.  G tapers channels from 512 at 4x4 to 64 at 32x32, while D keeps
+128 channels and applies attention after its first 16x16 block.  Random
 horizontal flips are retained as a small, useful image augmentation.  Loss
 curves, fixed class samples, and full checkpoints are training conveniences
 and do not alter the adversarial updates.
@@ -37,12 +37,12 @@ Resume an interrupted run:
 Training data -- CIFAR-10:
 Training images:         50,000
 Samples per epoch:       49,984 (781 full batches; drop_last=True)
-Training epochs:          90
-Optimizer updates:        70,290 D / 70,290 G (1:1)
+Training epochs:         100
+Optimizer updates:        78,100 D / 78,100 G (n_D:1, n_D=1)
 
-Generator:                4.39 M params
+Generator:                3.60 M params
 Discriminator:            1.08 M params
-Total:                    5.46 M params
+Total:                    4.68 M params
 """
 
 import argparse
@@ -78,21 +78,22 @@ OUT_DIR = PROJECT_ROOT / "output" / "sagan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
-NUM_EPOCHS = 90
+NUM_EPOCHS = 100
 BATCH_SIZE = 64
-# If BATCH_SIZE is raised to 128, raise NUM_EPOCHS to 180 as well.
+# If BATCH_SIZE is raised to 128, raise NUM_EPOCHS to 200 as well.
 NUM_WORKERS = 8
 NUM_CLASSES = 10
 SAMPLES_PER_CLASS = 8
 Z_DIM = 128
-GENERATOR_BASE_CHANNELS = 256
+GENERATOR_BASE_CHANNELS = 64
 DISCRIMINATOR_BASE_CHANNELS = 128
 GENERATOR_LR = 1e-4
 DISCRIMINATOR_LR = 4e-4
+DISCRIMINATOR_UPDATES_PER_GENERATOR = 1
 SAMPLES_TO_DISPLAY = NUM_CLASSES * SAMPLES_PER_CLASS
 SAMPLE_EVERY_EPOCHS = 5
 CHECKPOINT_EVERY_EPOCHS = 5
-ARCHIVE_EVERY_EPOCHS = 5
+ARCHIVE_EVERY_EPOCHS = 10
 SEED = 42
 
 MODEL_CONFIG = {
@@ -114,12 +115,16 @@ def train_epoch(
     opt_g,
     opt_d,
     device,
+    discriminator_steps,
     progress_bar=None,
 ):
-    """Train one epoch with SAGAN's balanced D/G hinge updates."""
+    """Train one epoch while preserving SAGAN's global n_D-to-one phase."""
+    if discriminator_steps < 0:
+        raise ValueError("discriminator_steps must be non-negative.")
     discriminator_loss_sum = torch.zeros((), device=device)
     generator_loss_sum = torch.zeros((), device=device)
-    num_examples = 0
+    discriminator_examples = 0
+    generator_examples = 0
 
     for real, labels in loader:
         real = real.to(device, non_blocking=True)
@@ -137,36 +142,47 @@ def train_epoch(
         loss_d.backward()
         opt_d.step()
 
-        # G receives the class signal through conditional BatchNorm and D's
-        # projection term.  Freezing D avoids computing unused D gradients.
-        sampled_labels = torch.randint(
-            NUM_CLASSES,
-            (batch_size,),
-            device=device,
-        )
-        noise = torch.randn(batch_size, Z_DIM, device=device)
-        discriminator.requires_grad_(False)
-        try:
-            opt_g.zero_grad(set_to_none=True)
-            fake = generator(noise, sampled_labels)
-            loss_g = generator_hinge_loss(
-                discriminator(fake, sampled_labels)
-            )
-            loss_g.backward()
-            opt_g.step()
-        finally:
-            discriminator.requires_grad_(True)
-
         discriminator_loss_sum += loss_d.detach() * batch_size
-        generator_loss_sum += loss_g.detach() * batch_size
-        num_examples += batch_size
+        discriminator_examples += batch_size
+        discriminator_steps += 1
+
+        should_update_generator = (
+            discriminator_steps % DISCRIMINATOR_UPDATES_PER_GENERATOR == 0
+        )
+        if should_update_generator:
+            # G receives the class signal through conditional BatchNorm and
+            # D's projection term. Freezing D avoids unused D gradients.
+            sampled_labels = torch.randint(
+                NUM_CLASSES,
+                (batch_size,),
+                device=device,
+            )
+            noise = torch.randn(batch_size, Z_DIM, device=device)
+            discriminator.requires_grad_(False)
+            try:
+                opt_g.zero_grad(set_to_none=True)
+                fake = generator(noise, sampled_labels)
+                loss_g = generator_hinge_loss(
+                    discriminator(fake, sampled_labels)
+                )
+                loss_g.backward()
+                opt_g.step()
+            finally:
+                discriminator.requires_grad_(True)
+
+            generator_loss_sum += loss_g.detach() * batch_size
+            generator_examples += batch_size
 
         if progress_bar is not None:
             progress_bar.update(1)
 
+    if generator_examples == 0:
+        raise RuntimeError("No generator update occurred in this epoch.")
+
     return (
-        (discriminator_loss_sum / num_examples).item(),
-        (generator_loss_sum / num_examples).item(),
+        (discriminator_loss_sum / discriminator_examples).item(),
+        (generator_loss_sum / generator_examples).item(),
+        discriminator_steps,
     )
 
 
@@ -227,10 +243,10 @@ def main(resume_from=None):
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
         metadata={
-            "format_version": 7,
+            "format_version": 8,
             "conditioning": "class_conditional",
             "discriminator_conditioning": "projection",
-            "update_ratio": 1,
+            "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,
         },
         model_metadata={
             "generator": {
@@ -260,12 +276,34 @@ def main(resume_from=None):
             },
             "fixed_noise": fixed_noise.cpu(),
             "fixed_labels": fixed_labels.cpu(),
+            "discriminator_steps": 0,
         },
     )
     loss_history = state["loss_history"]
     fixed_noise = state["fixed_noise"].to(device)
     fixed_labels = state["fixed_labels"].to(device)
+    discriminator_steps = state["discriminator_steps"]
 
+    if DISCRIMINATOR_UPDATES_PER_GENERATOR < 1:
+        raise ValueError("DISCRIMINATOR_UPDATES_PER_GENERATOR must be positive.")
+    if DISCRIMINATOR_UPDATES_PER_GENERATOR > len(loader):
+        raise ValueError(
+            "DISCRIMINATOR_UPDATES_PER_GENERATOR must not exceed the "
+            "number of batches per epoch."
+        )
+    planned_discriminator_updates = NUM_EPOCHS * len(loader)
+    planned_generator_updates, incomplete_update_cycle = divmod(
+        planned_discriminator_updates,
+        DISCRIMINATOR_UPDATES_PER_GENERATOR,
+    )
+    if incomplete_update_cycle:
+        raise RuntimeError(
+            "The configured epoch count does not end on an exact "
+            f"{DISCRIMINATOR_UPDATES_PER_GENERATOR}D:1G update boundary."
+        )
+    expected_steps = (start_epoch - 1) * len(loader)
+    if discriminator_steps != expected_steps:
+        raise ValueError("Checkpoint discriminator step count is inconsistent.")
     if loss_history["epoch"] != list(range(1, start_epoch)):
         raise ValueError("Checkpoint loss history does not match its epoch.")
     expected_shape = (SAMPLES_TO_DISPLAY, Z_DIM)
@@ -278,12 +316,15 @@ def main(resume_from=None):
     if resume_from is not None:
         print(f"Resumed training from epoch {start_epoch - 1}: {resume_from}")
 
-    planned_updates = NUM_EPOCHS * len(loader)
-    completed_updates = (start_epoch - 1) * len(loader)
-    print(f"Planned optimizer updates: D={planned_updates:,}, G={planned_updates:,}")
+    print(
+        "Planned optimizer updates: "
+        f"D={planned_discriminator_updates:,}, "
+        f"G={planned_generator_updates:,} "
+        f"(exactly {DISCRIMINATOR_UPDATES_PER_GENERATOR}:1)"
+    )
     with tqdm(
-        total=planned_updates,
-        initial=completed_updates,
+        total=planned_discriminator_updates,
+        initial=discriminator_steps,
         desc=f"Epoch {min(start_epoch, NUM_EPOCHS)}/{NUM_EPOCHS}",
         unit="batch",
         dynamic_ncols=True,
@@ -295,13 +336,14 @@ def main(resume_from=None):
                 refresh=False,
             )
 
-            loss_d, loss_g = train_epoch(
+            loss_d, loss_g, discriminator_steps = train_epoch(
                 generator,
                 discriminator,
                 loader,
                 opt_g,
                 opt_d,
                 device,
+                discriminator_steps,
                 progress_bar=progress_bar,
             )
             loss_history["epoch"].append(epoch)
@@ -319,8 +361,11 @@ def main(resume_from=None):
                     shared_latents_across_classes=True,
                 )
 
+            state["discriminator_steps"] = discriminator_steps
             session.checkpoint(epoch, state)
 
+    if discriminator_steps != planned_discriminator_updates:
+        raise RuntimeError("Training ended with an unexpected D update count.")
     session.finish()
     save_loss_panels(
         loss_history["epoch"],

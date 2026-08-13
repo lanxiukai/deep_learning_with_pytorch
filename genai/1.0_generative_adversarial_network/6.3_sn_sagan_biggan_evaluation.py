@@ -74,7 +74,7 @@ MODEL_SPECS = (
         SAGANGenerator,
         MODEL_OUT_DIRS["sagan"] / "generator.pth",
         "6.1_sagan.py",
-        7,
+        8,
         "class_conditional",
         None,
     ),

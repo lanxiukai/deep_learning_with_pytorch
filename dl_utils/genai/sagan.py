@@ -171,13 +171,13 @@ class SAGANGeneratorResidualBlock(nn.Module):
 
 
 class SAGANGenerator(nn.Module):
-    """Class-conditional 32x32 SAGAN generator with CIFAR ResNet width."""
+    """Class-conditional 32x32 SAGAN generator with tapered channels."""
 
     def __init__(
         self,
         z_dim=128,
         num_classes=10,
-        base_channels=256,
+        base_channels=64,
     ):
         super().__init__()
         if z_dim < 1:
@@ -186,21 +186,21 @@ class SAGANGenerator(nn.Module):
             raise ValueError("base_channels must be positive.")
         self.z_dim = z_dim
         self.input = spectral_norm(
-            nn.Linear(z_dim, base_channels * 4 * 4)
+            nn.Linear(z_dim, base_channels * 8 * 4 * 4)
         )
         self.block1 = SAGANGeneratorResidualBlock(
-            base_channels,
-            base_channels,
+            base_channels * 8,
+            base_channels * 4,
             num_classes,
         )
         self.block2 = SAGANGeneratorResidualBlock(
-            base_channels,
-            base_channels,
+            base_channels * 4,
+            base_channels * 2,
             num_classes,
         )
-        self.attention = SelfAttention(base_channels)
+        self.attention = SelfAttention(base_channels * 2)
         self.block3 = SAGANGeneratorResidualBlock(
-            base_channels,
+            base_channels * 2,
             base_channels,
             num_classes,
         )
@@ -218,13 +218,13 @@ class SAGANGenerator(nn.Module):
         if labels.ndim != 1 or labels.shape[0] != noise.shape[0]:
             raise ValueError("labels must have shape (batch,).")
 
-        hidden = self.input(noise)  # (B, 256 * 4 * 4)
-        hidden = hidden.view(noise.shape[0], -1, 4, 4)  # (B, 256, 4, 4)
-        hidden = self.block1(hidden, labels)  # (B, 256, 8, 8)
-        hidden = self.block2(hidden, labels)  # (B, 256, 16, 16)
-        hidden = self.attention(hidden)       # (B, 256, 16, 16)
-        hidden = self.block3(hidden, labels)  # (B, 256, 32, 32)
-        hidden = F.relu(self.output_norm(hidden), inplace=True)  # (B, 256, 32, 32)
+        hidden = self.input(noise)  # (B, 8C * 4 * 4)
+        hidden = hidden.view(noise.shape[0], -1, 4, 4)     # (B, 8C, 4, 4)
+        hidden = self.block1(hidden, labels)  # (B, 4C, 8, 8)
+        hidden = self.block2(hidden, labels)  # (B, 2C, 16, 16)
+        hidden = self.attention(hidden)       # (B, 2C, 16, 16)
+        hidden = self.block3(hidden, labels)  # (B, C, 32, 32)
+        hidden = F.relu(self.output_norm(hidden), inplace=True)  # (B, C, 32, 32)
         return torch.tanh(self.output(hidden))  # (B, 3, 32, 32)
 
 
