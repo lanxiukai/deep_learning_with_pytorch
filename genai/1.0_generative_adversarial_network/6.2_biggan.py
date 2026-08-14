@@ -11,9 +11,9 @@ the main BigGAN additions that remain meaningful at 32x32:
 
 The ImageNet-scale batch, channel widths, cross-replica BatchNorm, and standing
 statistics are deliberately omitted.  Normal CIFAR-10 BatchNorm running
-statistics are copied into the EMA model instead.  The truncation trick is
-kept in ``6.3_sn_sagan_biggan_evaluation.py`` because it is a sampling choice,
-not a training loss.
+statistics are copied into the EMA model instead.  A truncated-normal helper
+remains available for optional sampling experiments, while the shared lesson
+evaluation stays focused on real-versus-generated comparisons.
 
 Data:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py.

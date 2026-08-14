@@ -1,15 +1,13 @@
-"""Qualitatively evaluate the SN-GAN to BigGAN lesson sequence.
+"""Compare CIFAR-10 reference images with fresh GAN samples.
 
-The figures keep unlike comparisons separate:
-    - all three generators are checked for the intended spectral-normalization
-      progression;
-    - CIFAR-10 training examples provide a real-data reference for the
-      fixed-z SAGAN and BigGAN class sweep;
-    - BigGAN repeats the class sweep with progressively tighter truncation.
+Each available model gets one focused two-row figure.  The first row contains
+one CIFAR-10 test image per class; the second uses evaluation-only latent
+vectors that are independent of the fixed inputs saved under ``training/``.
+SAGAN and BigGAN generate the class named above each column, while SN-GAN
+remains unconditional and makes no per-column class claim.
 
-This is a compact mechanism check rather than an FID reproduction.  Models are
-trained independently, so shared inputs fix sampling conditions but do not
-create semantic correspondence between generators.
+Missing generator checkpoints are reported and skipped so any completed model
+in the lesson sequence can be evaluated independently.
 
 Inputs:
     data/cifar10, prepared by tool_scripts/download_dataset_test.py
@@ -19,8 +17,9 @@ Inputs:
 
 Outputs:
     Each evaluation directory is reset at the start of every run.
-    output/sagan/evaluation/conditional_class_sweep.png
-    output/biggan/evaluation/biggan_truncation.png
+    output/sn_gan/evaluation/real_vs_generated.png
+    output/sagan/evaluation/real_vs_generated.png
+    output/biggan/evaluation/real_vs_generated.png
 """
 
 import torch
@@ -30,11 +29,10 @@ from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.biggan import CompactBigGANGenerator, truncated_normal
+from dl_utils.genai.biggan import CompactBigGANGenerator
 from dl_utils.genai.sagan import (
     CIFAR10_CLASS_NAMES,
     SAGANGenerator,
-    make_fixed_class_latent_grid,
 )
 from dl_utils.genai.sn_gan import (
     SNGenerator,
@@ -50,12 +48,16 @@ MODEL_OUT_DIRS = {
 }
 EVALUATION_DIRS = {
     model_name: MODEL_OUT_DIRS[model_name] / "evaluation"
-    for model_name in ("sagan", "biggan")
+    for model_name in MODEL_OUT_DIRS
 }
 
 NUM_CLASSES = 10
-TRUNCATION_THRESHOLDS = (None, 1.0, 0.5)
-SEED = 42
+EVALUATION_SEED = 10_042
+MODEL_EVALUATION_SEEDS = {
+    "sn_gan": EVALUATION_SEED + 1,
+    "sagan": EVALUATION_SEED + 2,
+    "biggan": EVALUATION_SEED + 3,
+}
 
 MODEL_SPECS = (
     (
@@ -91,17 +93,8 @@ MODEL_SPECS = (
 )
 
 
-def count_spectral_norm_layers(module):
-    """Count modules wrapped by PyTorch's spectral-normalization hook."""
-    required_state = ("weight_orig", "weight_u", "weight_v")
-    return sum(
-        all(hasattr(child, name) for name in required_state)
-        for child in module.modules()
-    )
-
-
-def load_cifar10_class_references():
-    """Return one normalized, unaugmented training image for every class."""
+def load_cifar10_test_references():
+    """Return one deterministic, normalized test image for every class."""
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
             f"CIFAR-10 data not found: {DATA_DIR}. "
@@ -110,7 +103,7 @@ def load_cifar10_class_references():
 
     dataset = datasets.CIFAR10(
         DATA_DIR,
-        train=True,
+        train=False,
         download=False,
         transform=transforms.Compose(
             [
@@ -119,18 +112,29 @@ def load_cifar10_class_references():
             ]
         ),
     )
-    class_indices = [None] * NUM_CLASSES
+    indices_by_class = [[] for _ in range(NUM_CLASSES)]
     for sample_index, class_index in enumerate(dataset.targets):
-        if class_indices[class_index] is None:
-            class_indices[class_index] = sample_index
-        if all(index is not None for index in class_indices):
-            break
-    if any(index is None for index in class_indices):
-        raise RuntimeError("CIFAR-10 training data is missing a class.")
+        indices_by_class[class_index].append(sample_index)
+    if any(not indices for indices in indices_by_class):
+        raise RuntimeError("CIFAR-10 test data is missing a class.")
 
-    return torch.stack(
-        [dataset[index][0] for index in class_indices]
+    random_generator = torch.Generator().manual_seed(EVALUATION_SEED)
+    selected_indices = [
+        indices[
+            torch.randint(
+                len(indices),
+                (),
+                generator=random_generator,
+            ).item()
+        ]
+        for indices in indices_by_class
+    ]
+
+    images = torch.stack(
+        [dataset[index][0] for index in selected_indices]
     )
+    labels = torch.arange(NUM_CLASSES, dtype=torch.long)
+    return images, labels
 
 
 def load_generator(
@@ -201,116 +205,97 @@ def load_generator(
     return generator.eval(), model_config
 
 
-def validate_spectral_normalization(generators):
-    """Check the generator-side SN increment introduced by SAGAN."""
-    counts = {
-        name: count_spectral_norm_layers(generator)
-        for name, generator in generators.items()
-    }
-    if counts["sn_gan"] != 0:
-        raise RuntimeError("SN-GAN should keep spectral normalization out of G.")
-    if counts["sagan"] == 0 or counts["biggan"] == 0:
-        raise RuntimeError("SAGAN and BigGAN require spectral normalization in G.")
-    print(
-        "Spectral-normalized generator layers: "
-        f"SN-GAN={counts['sn_gan']}, "
-        f"SAGAN={counts['sagan']}, "
-        f"BigGAN={counts['biggan']}"
-    )
-
-
 @torch.inference_mode()
-def save_conditional_class_sweep(
-    generators,
-    training_images,
-    z_dim,
+def save_real_vs_generated(
+    model_name,
+    display_name,
+    generator,
+    model_config,
+    conditioning,
+    reference_images,
+    reference_labels,
     device,
 ):
-    """Compare one real image per class with fixed-z generated responses."""
-    torch.manual_seed(SEED + 1)
-    base_z = torch.randn(1, z_dim, device=device)
-    noise, labels = make_fixed_class_latent_grid(
+    """Save one model's CIFAR-10 test-versus-fresh-sample comparison."""
+    z_dim = model_config.get("z_dim")
+    if not isinstance(z_dim, int) or z_dim < 1:
+        raise ValueError(f"{model_name} checkpoint has an invalid z_dim.")
+
+    random_generator = torch.Generator().manual_seed(
+        MODEL_EVALUATION_SEEDS[model_name]
+    )
+    noise = torch.randn(
         NUM_CLASSES,
-        1,
         z_dim,
-        device,
-        base_noise=base_z,
-    )
-    image_rows = [
-        training_images,
-        *(
-            generators[model_name](noise, labels).cpu()
-            for model_name in ("sagan", "biggan")
-        ),
-    ]
-    save_image_row_grid(
-        image_rows,
-        ["CIFAR-10 train", "SAGAN", "Compact BigGAN EMA"],
-        EVALUATION_DIRS["sagan"] / "conditional_class_sweep.png",
-        title="CIFAR-10 reference and fixed-z class response",
-        column_labels=[
+        generator=random_generator,
+    ).to(device)
+    if conditioning == "class_conditional":
+        generated_images = generator(
+            noise,
+            reference_labels.to(device),
+        ).float().cpu()
+        generated_row_label = display_name
+        column_labels = [
             name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
-        ],
-    )
+        ]
+        title = f"{display_name}: CIFAR-10 test vs class-conditioned samples"
+    else:
+        generated_images = generator(noise).float().cpu()
+        generated_row_label = f"{display_name} (unconditional)"
+        column_labels = [
+            f"Reference: {name.title()}"
+            for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
+        ]
+        title = f"{display_name}: CIFAR-10 test vs unconditional samples"
 
-
-@torch.inference_mode()
-def save_biggan_truncation(generator, z_dim, device):
-    """Compare BigGAN class sweeps under three latent distributions."""
-    image_rows = []
-    row_labels = []
-    for threshold in TRUNCATION_THRESHOLDS:
-        torch.manual_seed(SEED + 2)
-        if threshold is None:
-            base_z = torch.randn(1, z_dim, device=device)
-            row_labels.append("Standard normal")
-        else:
-            base_z = truncated_normal(
-                (1, z_dim),
-                threshold,
-                device,
-            )
-            row_labels.append(f"Truncated |z| <= {threshold:.1f}")
-        noise, labels = make_fixed_class_latent_grid(
-            NUM_CLASSES,
-            1,
-            z_dim,
-            device,
-            base_noise=base_z,
+    expected_shape = (NUM_CLASSES, 3, 32, 32)
+    if tuple(generated_images.shape) != expected_shape:
+        raise ValueError(
+            f"{model_name} generated {tuple(generated_images.shape)}; "
+            f"expected {expected_shape}."
         )
-        image_rows.append(generator(noise, labels).cpu())
-
     save_image_row_grid(
-        image_rows,
-        row_labels,
-        EVALUATION_DIRS["biggan"] / "biggan_truncation.png",
-        title="Compact BigGAN EMA truncation comparison",
-        column_labels=[
-            name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
-        ],
+        [reference_images, generated_images],
+        ["CIFAR-10 test", generated_row_label],
+        EVALUATION_DIRS[model_name] / "real_vs_generated.png",
+        title=title,
+        column_labels=column_labels,
     )
+    return EVALUATION_DIRS[model_name] / "real_vs_generated.png"
 
 
 def main():
     for evaluation_dir in EVALUATION_DIRS.values():
         reset_dir(str(evaluation_dir))
 
-    set_seed(SEED)
-    device = try_gpu()
-    training_images = load_cifar10_class_references()
+    available_specs = []
+    for spec in MODEL_SPECS:
+        model_name, display_name, _, checkpoint_path, script_name, *_ = spec
+        if checkpoint_path.is_file():
+            available_specs.append(spec)
+        else:
+            print(
+                f"Skipping {display_name}: {checkpoint_path} is missing. "
+                f"Run {script_name} first."
+            )
+    if not available_specs:
+        print("No generator checkpoints are available; nothing to evaluate.")
+        return
 
-    generators = {}
-    configurations = {}
+    set_seed(EVALUATION_SEED)
+    device = try_gpu()
+    reference_images, reference_labels = load_cifar10_test_references()
+
     for (
         model_name,
-        _,
+        display_name,
         model_class,
         checkpoint_path,
         script_name,
         format_version,
         conditioning,
         weights,
-    ) in MODEL_SPECS:
+    ) in available_specs:
         generator, model_config = load_generator(
             model_name,
             model_class,
@@ -321,31 +306,17 @@ def main():
             weights,
             device,
         )
-        generators[model_name] = generator
-        configurations[model_name] = model_config
-
-    validate_spectral_normalization(generators)
-    conditional_z_dims = {
-        int(configurations[name]["z_dim"])
-        for name in ("sagan", "biggan")
-    }
-    if len(conditional_z_dims) != 1:
-        raise ValueError(
-            "SAGAN and BigGAN need the same z_dim for the fixed-z class sweep."
+        output_path = save_real_vs_generated(
+            model_name,
+            display_name,
+            generator,
+            model_config,
+            conditioning,
+            reference_images,
+            reference_labels,
+            device,
         )
-    conditional_z_dim = conditional_z_dims.pop()
-
-    save_conditional_class_sweep(
-        generators,
-        training_images,
-        conditional_z_dim,
-        device,
-    )
-    save_biggan_truncation(
-        generators["biggan"],
-        conditional_z_dim,
-        device,
-    )
+        print(f"Saved {display_name} comparison: {output_path}")
 
 
 if __name__ == "__main__":
