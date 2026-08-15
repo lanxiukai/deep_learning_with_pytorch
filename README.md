@@ -34,9 +34,6 @@ the PyTorch framework.
 │   └── 3.0_diffusion_model/
 │
 ├── docs/                            # Implementation notes and model guides
-├── environments/                    # Exact, checksummed runtime records
-│   └── d2l/
-│
 ├── tool_scripts/
 │   ├── download_dataset_test.py
 │   ├── plot_fashion_mnist.py
@@ -47,7 +44,7 @@ the PyTorch framework.
 ├── tests/                           # Utility and lesson regression tests
 │
 ├── pyproject.toml
-├── environment.yml
+├── uv.lock
 └── .gitignore
 ```
 
@@ -88,15 +85,10 @@ Python, `pyproject.toml` declares the direct dependencies and the explicit
 PyTorch cu130 index, and `uv.lock` records the exact resolution. uv installs
 this repository's `dl-utils` package in editable mode.
 
-The previous Conda environment remains available during the migration. These
-files have separate recovery roles and should be kept together:
-
-- `.python-version`, `pyproject.toml`, and `uv.lock` rebuild the default uv
-  environment;
-- `environment.yml` is the readable Conda fallback declaration;
-- `environments/d2l/` is the exact, checksummed Conda runtime snapshot;
-- `pyproject.toml` defines the local `dl-utils` package and is required by the
-  editable installation.
+The previous `d2l` Conda environment, declaration, and exact runtime snapshot
+were retired on 2026-08-15. `.python-version`, `pyproject.toml`, and `uv.lock`
+are now the sole environment recovery sources. `pyproject.toml` also defines
+the local `dl-utils` package required by the editable installation.
 
 The PyTorch and torchvision wheels come from the official CUDA 13.0 (`cu130`)
 index and carry their environment-local CUDA runtime dependencies; a system

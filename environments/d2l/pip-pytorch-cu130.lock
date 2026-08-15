@@ -1,4 +1,0 @@
-# Generated PyTorch CUDA 13.0 requirements.
-# Install with --index-url https://download.pytorch.org/whl/cu130
-torch==2.13.0+cu130
-torchvision==0.28.0+cu130

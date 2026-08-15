@@ -1,17 +1,17 @@
 # dl_utils dependency-tree documentation
 
 `dl_utils` is the repository's shared utility package for the PyTorch lessons.
-Install it from the repository root after creating the Conda environment:
+Install it from the repository root through the project-local uv environment:
 
 ```bash
-pip install -e .
+uv sync --locked
 ```
 
 For a pip-only setup that also includes dependencies used directly by lesson
 and tool scripts, install the `examples` extra:
 
 ```bash
-pip install -e ".[examples]"
+uv sync --all-extras --locked
 ```
 
 **Reading conventions**
