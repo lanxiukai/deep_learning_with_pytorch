@@ -72,36 +72,35 @@ numbers do not correspond to book chapter numbers.
 
 #### Prerequisites
 
-- [Miniforge](https://github.com/conda-forge/miniforge) or another Conda distribution
+- [uv](https://docs.astral.sh/uv/) 0.12 or newer
 - Optional NVIDIA GPU: Turing or newer, with driver 580 or newer for CUDA 13.x
 - Sufficient disk space for the environment and datasets
 
 #### Setup
 
 ```bash
-conda env create -f environment.yml
-conda activate d2l
-python -m pip install --no-deps --no-build-isolation -e .
+uv sync --all-extras --locked
+uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-The human-maintained `environment.yml` is complemented by an exact,
-checksummed runtime record under [`environments/d2l/`](environments/d2l/).
-The record preserves the tested Conda artifacts and pip package set while
-restoring this repository's `dl-utils` package separately as an editable
-install.
+The default development environment is project-local. `.python-version` pins
+Python, `pyproject.toml` declares the direct dependencies and the explicit
+PyTorch cu130 index, and `uv.lock` records the exact resolution. uv installs
+this repository's `dl-utils` package in editable mode.
 
-These files have separate recovery roles and should be kept together:
+The previous Conda environment remains available during the migration. These
+files have separate recovery roles and should be kept together:
 
-- `environment.yml` is the readable dependency source for rebuilding forward;
-- `environments/d2l/` is the exact, checksummed snapshot of the tested runtime;
+- `.python-version`, `pyproject.toml`, and `uv.lock` rebuild the default uv
+  environment;
+- `environment.yml` is the readable Conda fallback declaration;
+- `environments/d2l/` is the exact, checksummed Conda runtime snapshot;
 - `pyproject.toml` defines the local `dl-utils` package and is required by the
-  editable-install step above.
+  editable installation.
 
-`environment.yml` installs PyTorch and all source-derived Python dependencies
-with pip inside the Conda environment. The PyTorch and torchvision wheels come
-from the official CUDA 13.0 (`cu130`) index and carry their environment-local
-CUDA runtime dependencies; a system CUDA Toolkit is not required and the setup
-does not modify the NVIDIA driver.
+The PyTorch and torchvision wheels come from the official CUDA 13.0 (`cu130`)
+index and carry their environment-local CUDA runtime dependencies; a system
+CUDA Toolkit is not required and the setup does not modify the NVIDIA driver.
 
 The dependency set covers imports in the active project source. Generated
 `build/` copies and the ignored nested reference repositories under

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dl-utils"
 version = "0.1.0"
-requires-python = ">=3.14"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "einops==0.8.2",
     "imageio==2.37.4",
@@ -33,6 +33,20 @@ examples = [
 test = [
     "pytest==9.1.1",
 ]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.setuptools.packages.find]
 where = ["."]
