@@ -38,6 +38,7 @@ the PyTorch framework.
 │   ├── download_dataset.py
 │   ├── plot_fashion_mnist.py
 │   ├── pytorch_test.py
+│   ├── setup_cloud_gpu.sh
 │   ├── sgd_animation.py
 │   └── word_frequency.py
 │
@@ -50,6 +51,13 @@ the PyTorch framework.
 
 Lesson directories and files are numbered in suggested reading order; the
 numbers do not correspond to book chapter numbers.
+
+---
+
+#### Cloud GPU
+
+- One-command environment setup after cloning:
+  `bash tool_scripts/setup_cloud_gpu.sh --profile core`
 
 ---
 
@@ -77,7 +85,7 @@ numbers do not correspond to book chapter numbers.
 
 ```bash
 uv sync --all-extras --locked
-uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+uv run --locked --no-sync python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
 The default development environment is project-local. `.python-version` pins
