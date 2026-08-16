@@ -2,7 +2,7 @@
 Analyze a previously trained Variational AutoEncoder checkpoint.
 """
 
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 import numpy as np
 import torch
 import torchvision

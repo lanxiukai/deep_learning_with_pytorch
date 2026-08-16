@@ -6,12 +6,10 @@ from collections.abc import Mapping, Sequence
 from os import PathLike
 from typing import Any
 
-from dl_utils.plot import _backend as _  # one-shot backend selection
+from dl_utils.plot._backend import pyplot as _plt
 
 import matplotlib_inline.backend_inline as backend_inline
 from IPython import get_ipython
-
-from matplotlib import pyplot as _plt
 
 from dl_utils.training.metrics import MetricHistory, as_list, has_any_finite
 

@@ -2,22 +2,13 @@
 Softmax Regression
 '''
 
+from dl_utils.plot._backend import pyplot as plt
 import torch
 from dl_utils.d2l.data_fashion import get_fashion_mnist_labels, load_data_fashion_mnist
 from dl_utils.plot.figures import set_axes
 from dl_utils.plot.images import show_images
 from dl_utils.training.optimization import sgd
 from dl_utils.training.timing import Timer
-
-import matplotlib
-import matplotlib.pyplot as plt
-try:
-    matplotlib.use('TkAgg')
-    import tkinter  # TkAgg depends on Tkinter
-    tkinter.Tk().destroy()
-except Exception as err:  # pragma: no cover
-    print('TkAgg failed:', err)
-    matplotlib.use('Agg')
 
 def softmax(X):
     '''Compute the softmax of the input.

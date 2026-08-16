@@ -148,7 +148,7 @@ def _pretrain_layer2_dbm(rbm: BinaryRBM, train_iter: TensorDataLoader, *, cfg: _
 
 
 def _plot_metric_curve(xs: list[NumericScalar], ys: list[NumericScalar], path: str, *, xlabel: str, ylabel: str, title: str) -> None:
-    from matplotlib import pyplot as plt
+    from dl_utils.plot._backend import pyplot as plt
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     fig, axis = plt.subplots(figsize=(7, 4))

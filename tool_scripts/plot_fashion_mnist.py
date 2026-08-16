@@ -13,9 +13,7 @@ from dl_utils.filesystem.project_root import infer_project_root
 
 _PROJECT_ROOT = infer_project_root()
 
-from dl_utils.plot import _backend as _  # one-shot backend selection
-
-import matplotlib.pyplot as plt  # noqa: E402
+from dl_utils.plot._backend import pyplot as plt  # noqa: E402
 import torch  # noqa: E402
 import torchvision  # noqa: E402
 import torchvision.transforms as T  # noqa: E402

@@ -33,9 +33,8 @@ from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.vae.vae import VAE, device, diagonal_gaussian_kl
-from dl_utils.plot import _backend as _  # select a backend before pyplot
+from dl_utils.plot._backend import pyplot as plt
 from dl_utils.plot.images import save_image_row_grid
-from matplotlib import pyplot as plt
 
 
 PROJECT_ROOT = infer_project_root()

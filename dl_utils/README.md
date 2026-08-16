@@ -524,8 +524,8 @@ Public entries: none (docstring-only package marker).
 
 ### dl_utils/plot/_backend.py
 
-Dependencies: os, matplotlib.
-Public entries: none.
+Dependencies: matplotlib, matplotlib.pyplot.
+Public entries: matplotlib, pyplot.
 
 ### dl_utils/plot/figures.py
 

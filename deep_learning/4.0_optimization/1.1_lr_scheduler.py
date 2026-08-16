@@ -4,7 +4,7 @@ Learning Rate Scheduler
 
 import math
 import torch
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 from torch import nn
 from torch.optim import lr_scheduler
 from dl_utils.d2l.data_fashion import load_data_fashion_mnist

@@ -3,7 +3,7 @@ Attention Weights Visualization
 """
 
 import torch
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 from dl_utils.plot.figures import use_svg_display
 
 #@save

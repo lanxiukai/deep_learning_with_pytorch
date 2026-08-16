@@ -3,7 +3,7 @@ Momentum Demo
 '''
 
 import torch
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 from dl_utils.d2l.optim import train_2d
 from dl_utils.plot.figures import set_figsize, trace2d
 

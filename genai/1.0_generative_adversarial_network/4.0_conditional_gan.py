@@ -34,7 +34,7 @@ import os
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / 'data'

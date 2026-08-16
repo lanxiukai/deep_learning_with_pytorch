@@ -3,7 +3,7 @@ Minibatch Stochastic Gradient Descent (Concise Implementation)
 '''
 
 import torch
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 from dl_utils.d2l.optim import get_data_ch11, train_concise_ch11
 
 batch_size = 10

@@ -3,7 +3,7 @@ Minibatch Stochastic Gradient Descent (Scratch)
 '''
 
 import torch
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 from dl_utils.d2l.optim import get_data_ch11, train_ch11
 from dl_utils.plot.figures import plot, set_figsize
 from dl_utils.training.timing import Timer

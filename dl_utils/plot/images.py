@@ -5,12 +5,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from dl_utils.plot import _backend as _  # one-shot backend selection
+from dl_utils.plot._backend import pyplot as _plt
 
 import numpy as np
 import torch
 import torchvision
-from matplotlib import pyplot as _plt
 
 
 def show_images(imgs, num_rows, num_cols, titles=None, scale=1.5, cmap=None):

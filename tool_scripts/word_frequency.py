@@ -1,10 +1,9 @@
 import re
 from collections import Counter
-import matplotlib.pyplot as plt
-import matplotlib
 from pathlib import Path
 
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.plot._backend import matplotlib, pyplot as plt
 
 matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 

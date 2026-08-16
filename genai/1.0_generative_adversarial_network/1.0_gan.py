@@ -11,7 +11,7 @@ from dl_utils.data.vision import load_array
 from dl_utils.training.timing import Timer
 from dl_utils.training.metrics import Accumulator
 from dl_utils.gan.gan import update_D, update_G
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 
 def train(net_D, net_G, data_iter, num_epochs, lr_D, lr_G, latent_dim, data, out_dir):
     loss = nn.BCEWithLogitsLoss(reduction='sum')

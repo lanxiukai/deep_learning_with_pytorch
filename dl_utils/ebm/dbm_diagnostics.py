@@ -2,7 +2,8 @@ import math
 import os
 
 import torch
-from matplotlib import pyplot as plt
+
+from dl_utils.plot._backend import pyplot as plt
 
 from ._ebm_types import MCMCMetrics
 

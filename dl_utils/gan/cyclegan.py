@@ -8,12 +8,13 @@ outputs land under the project's output/ directory.
 """
 
 import os
-from matplotlib import pyplot as plt
 import torch
 import numpy as np
 import torch.nn as nn
 from torch.utils.data import Dataset
 from tqdm import tqdm
+
+from dl_utils.plot._backend import pyplot as plt
 
 from dl_utils.data.images import load_rgb_image
 

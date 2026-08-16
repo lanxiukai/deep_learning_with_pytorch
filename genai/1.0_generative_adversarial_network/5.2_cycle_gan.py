@@ -36,7 +36,7 @@ Total (2 of each):     28.3 M params
 import random
 
 import albumentations
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 import torch
 import torch.nn as nn
 from albumentations.pytorch import ToTensorV2

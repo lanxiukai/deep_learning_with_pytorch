@@ -10,7 +10,7 @@ from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.gan.gan import Generator
 
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 import torch
 
 PROJECT_ROOT = infer_project_root()

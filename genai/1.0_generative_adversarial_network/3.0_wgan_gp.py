@@ -19,7 +19,7 @@ Total:       6.4 M params
 
 import os
 import warnings
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 import torch
 import torchvision
 from torch import nn

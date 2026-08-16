@@ -3,7 +3,7 @@ Bahdanau Attention
 """
 
 import torch
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 from torch import nn
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.d2l.attention import AdditiveAttention, AttentionDecoder

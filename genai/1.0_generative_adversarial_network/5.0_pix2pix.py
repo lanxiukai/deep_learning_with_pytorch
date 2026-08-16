@@ -41,7 +41,7 @@ Discriminator:           2.8 M params
 Total:                  57.2 M params
 """
 
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader

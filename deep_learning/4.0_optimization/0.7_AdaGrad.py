@@ -4,7 +4,7 @@ AdaGrad
 
 import math
 import torch
-import matplotlib.pyplot as plt
+from dl_utils.plot._backend import pyplot as plt
 from dl_utils.d2l.optim import (
     get_data_ch11,
     train_2d,

@@ -3,7 +3,8 @@ from collections.abc import Sequence
 
 import imageio.v2 as imageio
 import torch
-from matplotlib import pyplot as plt
+
+from dl_utils.plot._backend import pyplot as plt
 
 from ..plot.figures import save_curve
 from dl_utils.ebm._ebm_types import _DBNSamplingConfig, _RBMSamplingConfig
