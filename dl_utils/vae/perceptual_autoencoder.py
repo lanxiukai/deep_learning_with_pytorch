@@ -10,8 +10,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from dl_utils.genai.quantization import VectorQuantizer
-from dl_utils.genai.vae_common import reparameterize_logvar
+from dl_utils.vae.quantization import VectorQuantizer
+from dl_utils.vae.vae_common import reparameterize_logvar
 
 
 class ResidualBlock(nn.Module):

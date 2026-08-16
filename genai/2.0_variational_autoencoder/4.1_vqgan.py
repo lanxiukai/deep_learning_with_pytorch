@@ -27,7 +27,7 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.perceptual_autoencoder import (
+from dl_utils.vae.perceptual_autoencoder import (
     PatchDiscriminator32,
     RandomFeaturePerceptualLoss,
     VGGPerceptualLoss,
@@ -35,8 +35,8 @@ from dl_utils.genai.perceptual_autoencoder import (
     adaptive_adversarial_weight,
     discriminator_hinge_loss,
 )
-from dl_utils.genai.quantization import TokenUsageAccumulator
-from dl_utils.genai.token_prior import CausalTransformerPrior
+from dl_utils.vae.quantization import TokenUsageAccumulator
+from dl_utils.vae.token_prior import CausalTransformerPrior
 
 
 PROJECT_ROOT = infer_project_root()

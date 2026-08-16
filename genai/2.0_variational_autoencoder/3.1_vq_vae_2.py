@@ -29,14 +29,14 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.quantization import (
+from dl_utils.vae.quantization import (
     ImageDecoder32,
     ImageEncoder32,
     ResidualBlock,
     TokenUsageAccumulator,
     VectorQuantizer,
 )
-from dl_utils.genai.token_prior import PixelCNNPrior
+from dl_utils.vae.token_prior import PixelCNNPrior
 
 
 PROJECT_ROOT = infer_project_root()

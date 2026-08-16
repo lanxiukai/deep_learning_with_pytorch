@@ -11,7 +11,7 @@ Compared with StyleGAN, this lesson presents the main StyleGAN2 increments:
       image-count-based G-EMA.
 
 The complete mapping, synthesis, and discriminator models live in
-``dl_utils/genai/stylegan2.py``.  This pure-PyTorch single-GPU profile stops at
+``dl_utils/gan/stylegan2.py``.  This pure-PyTorch single-GPU profile stops at
 128x128 and uses compact widths, so it omits fused CUDA kernels, multi-GPU
 training, and paper-scale capacity while leaving every new loss explicit.
 
@@ -65,7 +65,7 @@ from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.stylegan2 import (
+from dl_utils.gan.stylegan2 import (
     StyleDiscriminator,
     StyleGenerator,
     denormalize,

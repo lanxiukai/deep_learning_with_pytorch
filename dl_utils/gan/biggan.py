@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils import spectral_norm
 
-from dl_utils.genai.sagan import SAGANDiscriminator, SelfAttention
+from dl_utils.gan.sagan import SAGANDiscriminator, SelfAttention
 
 
 class ConditionalBatchNorm2d(nn.Module):

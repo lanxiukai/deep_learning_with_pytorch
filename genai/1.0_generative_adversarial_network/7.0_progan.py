@@ -61,12 +61,12 @@ from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.progan import (
+from dl_utils.gan.progan import (
     ProGANDiscriminator,
     ProGANGenerator,
     denormalize,
 )
-from dl_utils.genai.stylegan_common import RESOLUTIONS
+from dl_utils.gan.stylegan_common import RESOLUTIONS
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_grid
 from dl_utils.training.session import TrainingSession

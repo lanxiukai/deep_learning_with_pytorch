@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils import spectral_norm
 
-from dl_utils.genai.sn_gan import SNDiscriminatorResidualBlock
+from dl_utils.gan.sn_gan import SNDiscriminatorResidualBlock
 
 
 CIFAR10_CLASS_NAMES = (

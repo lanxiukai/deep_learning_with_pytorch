@@ -56,6 +56,13 @@ dl_utils/
 │   ├── randomness.py
 │   └── selection.py
 │
+├── diffusion/
+│   ├── __init__.py
+│   ├── ddpm.py
+│   ├── diffusion_ddpm.py
+│   ├── diffusion_score_sde.py
+│   └── diffusion_unet.py
+│
 ├── ebm/
 │   ├── __init__.py
 │   ├── _ebm_types.py
@@ -80,28 +87,18 @@ dl_utils/
 │   ├── directories.py
 │   └── project_root.py
 │
-├── genai/
+├── gan/
 │   ├── __init__.py
 │   ├── biggan.py
 │   ├── cyclegan.py
-│   ├── ddpm.py
-│   ├── diffusion_ddpm.py
-│   ├── diffusion_score_sde.py
-│   ├── diffusion_unet.py
 │   ├── gan.py
 │   ├── pix2pix.py
-│   ├── perceptual_autoencoder.py
 │   ├── progan.py
-│   ├── quantization.py
 │   ├── sagan.py
 │   ├── sn_gan.py
 │   ├── stylegan.py
 │   ├── stylegan2.py
-│   ├── stylegan_common.py
-│   ├── token_prior.py
-│   ├── vae.py
-│   ├── vae_common.py
-│   └── vae_hierarchy.py
+│   └── stylegan_common.py
 │
 ├── plot/
 │   ├── __init__.py
@@ -109,12 +106,21 @@ dl_utils/
 │   ├── figures.py
 │   └── images.py
 │
-└── training/
+├── training/
+│   ├── __init__.py
+│   ├── metrics.py
+│   ├── optimization.py
+│   ├── parameters.py
+│   └── timing.py
+│
+└── vae/
     ├── __init__.py
-    ├── metrics.py
-    ├── optimization.py
-    ├── parameters.py
-    └── timing.py
+    ├── perceptual_autoencoder.py
+    ├── quantization.py
+    ├── token_prior.py
+    ├── vae.py
+    ├── vae_common.py
+    └── vae_hierarchy.py
 ```
 
 ## Section 2: Per-module entry reference
@@ -348,58 +354,63 @@ Dependencies: pathlib (Path).
 Public entries: infer_project_root.
 Runnable project scripts use this helper to anchor `data/` and `output/` paths independently of the caller's working directory.
 
-### dl_utils/genai/__init__.py
+### dl_utils/gan/__init__.py
 
 Dependencies: none.
-Public entries: none (docstring-only package marker, documents the generative-model submodules).
+Public entries: none (docstring-only package marker).
 
-### dl_utils/genai/biggan.py
+### dl_utils/gan/biggan.py
 
 Dependencies: torch, torch.nn.functional (as F), torch (nn), torch.nn.utils
-(spectral_norm), dl_utils.genai.sagan (SAGANDiscriminator, SelfAttention).
+(spectral_norm), dl_utils.gan.sagan (SAGANDiscriminator, SelfAttention).
 Public entries: ConditionalBatchNorm2d, BigGANGeneratorResidualBlock,
 CompactBigGANGenerator, BigGANDiscriminator,
 modified_orthogonal_regularization, truncated_normal.
 
-### dl_utils/genai/cyclegan.py
+### dl_utils/gan/cyclegan.py
 
 Dependencies: os, matplotlib.pyplot, torch, numpy, torch.nn, torch.utils.data
 (Dataset), tqdm, dl_utils.data.images (load_rgb_image).
 Public entries: LAMBDA_CYCLE, save_translation_snapshot, train_epoch, ConvBlock,
 ResidualBlock, Generator, Block, Discriminator, LoadData, weights_init.
 
-### dl_utils/genai/ddpm.py
+### dl_utils/diffusion/__init__.py
 
-Dependencies: dl_utils.genai.diffusion_ddpm, diffusion_score_sde,
+Dependencies: none.
+Public entries: none (docstring-only package marker).
+
+### dl_utils/diffusion/ddpm.py
+
+Dependencies: dl_utils.diffusion.diffusion_ddpm, diffusion_score_sde,
 diffusion_unet.
 Public entries (__all__): DiffusionPrediction, DiffusionUNet, DiscreteSampler,
 GaussianDiffusion, PredictionType, ScoreSampler, UNet, VPSDE,
 cosine_beta_schedule, linear_beta_schedule, sample_vp_sde. This module is a
 compatibility facade; new lessons import the focused modules directly.
 
-### dl_utils/genai/diffusion_ddpm.py
+### dl_utils/diffusion/diffusion_ddpm.py
 
 Dependencies: math, dataclasses, typing, torch, torch.nn.functional.
 Public entries (__all__): DiffusionPrediction, DiscreteSampler,
 GaussianDiffusion, PredictionType, cosine_beta_schedule,
 linear_beta_schedule.
 
-### dl_utils/genai/diffusion_score_sde.py
+### dl_utils/diffusion/diffusion_score_sde.py
 
 Dependencies: dataclasses, typing, torch.
 Public entries (__all__): ScoreSampler, VPSDE, sample_vp_sde.
 
-### dl_utils/genai/diffusion_unet.py
+### dl_utils/diffusion/diffusion_unet.py
 
 Dependencies: math, typing, torch, torch.nn.functional.
 Public entries (__all__): DiffusionUNet, UNet.
 
-### dl_utils/genai/gan.py
+### dl_utils/gan/gan.py
 
 Dependencies: torch, torch.nn (as nn).
 Public entries: gradient_penalty, update_D, update_G, Generator, Critic.
 
-### dl_utils/genai/pix2pix.py
+### dl_utils/gan/pix2pix.py
 
 Dependencies: __future__ (annotations), csv, pathlib (Path), albumentations,
 albumentations.pytorch (ToTensorV2), numpy, torch, PIL (ImageOps), torch
@@ -409,13 +420,13 @@ Public entries: build_paired_transform, CelebAColorizationDataset, DownBlock,
 UpBlock, UNetGenerator, ConditionalPatchDiscriminator, initialize_weights,
 denormalize.
 
-### dl_utils/genai/sagan.py
+### dl_utils/gan/sagan.py
 
 Dependencies: math, torch, torch (nn), torch.nn.utils (spectral_norm),
-dl_utils.genai.sn_gan (ProjectionSNDiscriminator, SNGenerator).
+dl_utils.gan.sn_gan (ProjectionSNDiscriminator, SNGenerator).
 Public entries: SelfAttention, SAGANGenerator, SAGANDiscriminator.
 
-### dl_utils/genai/sn_gan.py
+### dl_utils/gan/sn_gan.py
 
 Dependencies: math, torch, torch.nn.functional (as F), torch (nn),
 torch.nn.utils (spectral_norm).
@@ -424,7 +435,7 @@ SNGenerator, SNDiscriminator, count_spectral_norm_layers,
 uniform_dequantize_uint8, discriminator_hinge_loss, generator_hinge_loss,
 init_spectral_norm_state, spectral_norm_scratch_minimal.
 
-### dl_utils/genai/stylegan_common.py
+### dl_utils/gan/stylegan_common.py
 
 Dependencies: math, collections.abc (Sequence), torch,
 torch.nn.functional (as F), torch (nn).
@@ -433,50 +444,55 @@ make_channel_map, validate_resolution, validate_alpha, PixelNorm,
 EqualizedLinear, EqualizedConv2d, MinibatchStandardDeviation, NoiseInjection,
 filter2d, filtered_upsample2d, filtered_downsample2d, denormalize.
 
-### dl_utils/genai/progan.py
+### dl_utils/gan/progan.py
 
 Dependencies: math, torch, torch.nn.functional (as F), torch (nn),
-dl_utils.genai.stylegan_common.
+dl_utils.gan.stylegan_common.
 Public entries: GeneratorInputBlock, GeneratorBlock, ProGANGenerator,
 DiscriminatorBlock, ProGANDiscriminator, denormalize.
 
-### dl_utils/genai/stylegan.py
+### dl_utils/gan/stylegan.py
 
 Dependencies: math, random, torch, torch.nn.functional (as F), torch (nn),
-dl_utils.genai.stylegan_common.
+dl_utils.gan.stylegan_common.
 Public entries: MappingNetwork, AdaptiveInstanceNorm, StyledActivation,
 SynthesisBlock, StyleGANGenerator, DiscriminatorBlock,
 StyleGANDiscriminator, denormalize.
 
-### dl_utils/genai/stylegan2.py
+### dl_utils/gan/stylegan2.py
 
 Dependencies: math, random, torch, torch.nn.functional (as F), torch (nn),
-dl_utils.genai.stylegan_common.
+dl_utils.gan.stylegan_common.
 Public entries: MappingNetwork, ModulatedConv2d, StyledConv, ToRGB,
 SynthesisBlock, StyleGenerator, DiscriminatorResidualBlock,
 StyleDiscriminator, denormalize.
 
-### dl_utils/genai/vae.py
+### dl_utils/vae/__init__.py
+
+Dependencies: none.
+Public entries: none (docstring-only package marker).
+
+### dl_utils/vae/vae.py
 
 Dependencies: torch, torch.nn.functional, torch.nn, dl_utils.devices.selection (get_device).
 Public entries: device, diagonal_gaussian_kl, reparameterize, VAEEncoder,
 VAEDecoder, VAE.
 
-### dl_utils/genai/vae_common.py
+### dl_utils/vae/vae_common.py
 
 Dependencies: math, torch, torch.nn.
 Public entries (__all__): LOG_2PI, split_gaussian_parameters,
 reparameterize_logvar, diagonal_gaussian_kl_from_logvar,
 diagonal_gaussian_log_density, fuse_diagonal_gaussians, ConvGaussianVAE28.
 
-### dl_utils/genai/vae_hierarchy.py
+### dl_utils/vae/vae_hierarchy.py
 
 Dependencies: torch, torch.nn.functional, torch.nn,
-dl_utils.genai.vae_common.
+dl_utils.vae.vae_common.
 Public entries (__all__): CompactHierarchicalVAE, ActiveUnitAccumulator,
 hierarchical_vae_loss, active_units.
 
-### dl_utils/genai/quantization.py
+### dl_utils/vae/quantization.py
 
 Dependencies: math, collections.abc (Sequence), torch,
 torch.nn.functional, torch.nn.
@@ -484,16 +500,16 @@ Public entries (__all__): token_usage, TokenUsageAccumulator, VectorQuantizer,
 FiniteScalarQuantizer, ResidualBlock, ImageEncoder32, ImageDecoder32,
 VQVAE32, FSQAutoencoder32.
 
-### dl_utils/genai/token_prior.py
+### dl_utils/vae/token_prior.py
 
 Dependencies: math, torch, torch.nn.functional, torch.nn.
 Public entries (__all__): MaskedConv2d, PixelCNNPrior,
 CausalTransformerPrior.
 
-### dl_utils/genai/perceptual_autoencoder.py
+### dl_utils/vae/perceptual_autoencoder.py
 
 Dependencies: torch, torch.nn.functional, torch.nn,
-dl_utils.genai.quantization, dl_utils.genai.vae_common;
+dl_utils.vae.quantization, dl_utils.vae.vae_common;
 torchvision.models is imported lazily only for pretrained VGG features.
 Public entries (__all__): ResidualBlock, PerceptualEncoder32,
 PerceptualDecoder32, VQPerceptualAutoencoder32,

@@ -34,9 +34,9 @@ from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.progan import ProGANGenerator
-from dl_utils.genai.stylegan import StyleGANGenerator
-from dl_utils.genai.stylegan2 import StyleGenerator
+from dl_utils.gan.progan import ProGANGenerator
+from dl_utils.gan.stylegan import StyleGANGenerator
+from dl_utils.gan.stylegan2 import StyleGenerator
 from dl_utils.plot.images import save_image_row_grid
 
 

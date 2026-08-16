@@ -31,8 +31,8 @@ from torch import Tensor
 from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.diffusion_ddpm import GaussianDiffusion, PredictionType
-from dl_utils.genai.diffusion_unet import DiffusionUNet
+from dl_utils.diffusion.diffusion_ddpm import GaussianDiffusion, PredictionType
+from dl_utils.diffusion.diffusion_unet import DiffusionUNet
 
 
 PROJECT_ROOT = infer_project_root()

@@ -7,7 +7,7 @@ Compared with 5.2_cycle_gan.py:
     - No reverse generator or cycle-consistency loss is needed.
 
 The reusable dataset and complete model definitions live in
-dl_utils/genai/pix2pix.py.  The configuration uses a 256x256 U-Net, 70x70
+dl_utils/gan/pix2pix.py.  The configuration uses a 256x256 U-Net, 70x70
 PatchGAN, batch size 8, Adam(lr=2e-4, beta1=0.5), and 20 epochs with linear
 learning-rate decay after epoch 10.
 
@@ -50,7 +50,7 @@ from tqdm import tqdm
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.pix2pix import (
+from dl_utils.gan.pix2pix import (
     CelebAColorizationDataset,
     ConditionalPatchDiscriminator,
     UNetGenerator,

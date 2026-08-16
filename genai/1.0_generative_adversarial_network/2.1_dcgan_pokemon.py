@@ -20,7 +20,7 @@ from dl_utils.data.images import load_rgb_image
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.devices.selection import try_gpu
-from dl_utils.genai.gan import update_D, update_G
+from dl_utils.gan.gan import update_D, update_G
 from dl_utils.plot.figures import Animator, plot, set_figsize
 from dl_utils.training.metrics import Accumulator
 from dl_utils.training.timing import Timer, format_epoch_timing

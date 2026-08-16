@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.pix2pix import (
+from dl_utils.gan.pix2pix import (
     CelebAColorizationDataset,
     UNetGenerator,
     build_paired_transform,

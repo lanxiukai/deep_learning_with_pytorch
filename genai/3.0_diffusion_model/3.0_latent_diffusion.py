@@ -31,9 +31,9 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.diffusion_ddpm import GaussianDiffusion
-from dl_utils.genai.diffusion_unet import DiffusionUNet
-from dl_utils.genai.perceptual_autoencoder import KLPerceptualAutoencoder32
+from dl_utils.diffusion.diffusion_ddpm import GaussianDiffusion
+from dl_utils.diffusion.diffusion_unet import DiffusionUNet
+from dl_utils.vae.perceptual_autoencoder import KLPerceptualAutoencoder32
 
 
 PROJECT_ROOT = infer_project_root()

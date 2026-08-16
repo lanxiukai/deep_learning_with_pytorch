@@ -10,7 +10,7 @@ import torchvision
 from dl_utils.data.vision import image_folder_loader
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
-from dl_utils.genai.vae import VAE, device
+from dl_utils.vae.vae import VAE, device
 from dl_utils.plot.images import vae_sample_grid
 
 def main():

@@ -2,7 +2,7 @@
 
 Adapted from the companion code for "Generative Deep Learning", 2nd ed.
 (book_repos/DGAI/ch06CycleGAN.ipynb). Models and shared training helpers live
-in dl_utils/genai/cyclegan.py.
+in dl_utils/gan/cyclegan.py.
 
 Data:
     data/celeba/{black,blond}, prepared by
@@ -47,7 +47,7 @@ from tqdm import tqdm
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.cyclegan import (
+from dl_utils.gan.cyclegan import (
     Discriminator,
     Generator,
     LAMBDA_CYCLE,

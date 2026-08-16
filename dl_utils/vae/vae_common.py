@@ -1,6 +1,6 @@
 """Small Gaussian-VAE primitives shared by the post-beta-VAE lessons.
 
-The older :mod:`dl_utils.genai.vae` module intentionally keeps the 256x256
+The older :mod:`dl_utils.vae.vae` module intentionally keeps the 256x256
 face model used by the first VAE lessons.  This module contains only the
 distribution algebra and the compact 28x28 model reused by the later
 algorithm-comparison scripts.

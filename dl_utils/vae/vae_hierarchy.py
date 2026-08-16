@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from dl_utils.genai.vae_common import (
+from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
     reparameterize_logvar,
     split_gaussian_parameters,

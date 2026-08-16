@@ -24,12 +24,12 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.vae_common import (
+from dl_utils.vae.vae_common import (
     fuse_diagonal_gaussians,
     reparameterize_logvar,
     split_gaussian_parameters,
 )
-from dl_utils.genai.vae_hierarchy import (
+from dl_utils.vae.vae_hierarchy import (
     ActiveUnitAccumulator,
     CompactHierarchicalVAE,
     active_units,

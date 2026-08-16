@@ -10,7 +10,7 @@ from dl_utils.plot.figures import Animator, set_figsize
 from dl_utils.data.vision import load_array
 from dl_utils.training.timing import Timer
 from dl_utils.training.metrics import Accumulator
-from dl_utils.genai.gan import update_D, update_G
+from dl_utils.gan.gan import update_D, update_G
 import matplotlib.pyplot as plt
 
 def train(net_D, net_G, data_iter, num_epochs, lr_D, lr_G, latent_dim, data, out_dir):

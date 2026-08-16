@@ -27,7 +27,7 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.perceptual_autoencoder import (
+from dl_utils.vae.perceptual_autoencoder import (
     KLPerceptualAutoencoder32,
     PatchDiscriminator32,
     RandomFeaturePerceptualLoss,
@@ -35,7 +35,7 @@ from dl_utils.genai.perceptual_autoencoder import (
     adaptive_adversarial_weight,
     discriminator_hinge_loss,
 )
-from dl_utils.genai.vae_common import diagonal_gaussian_kl_from_logvar
+from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
 
 
 PROJECT_ROOT = infer_project_root()

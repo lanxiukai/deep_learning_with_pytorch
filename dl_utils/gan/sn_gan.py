@@ -3,7 +3,7 @@
 The CIFAR-10 experiment in the spectral-normalization paper is an
 unsupervised image-generation experiment.  Accordingly, this module contains
 no label embeddings, conditional BatchNorm, or projection discriminator.
-Those mechanisms first appear in :mod:`dl_utils.genai.sagan`, matching the
+Those mechanisms first appear in :mod:`dl_utils.gan.sagan`, matching the
 class-conditional SAGAN paper.
 
 The generator follows the paper's CIFAR ResNet table: a 128-dimensional

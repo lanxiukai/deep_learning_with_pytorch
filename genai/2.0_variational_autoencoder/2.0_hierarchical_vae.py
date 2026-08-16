@@ -27,7 +27,7 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.vae_hierarchy import (
+from dl_utils.vae.vae_hierarchy import (
     ActiveUnitAccumulator,
     CompactHierarchicalVAE,
     active_units,

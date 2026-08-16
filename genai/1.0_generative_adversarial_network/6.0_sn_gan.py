@@ -57,7 +57,7 @@ from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.sn_gan import (
+from dl_utils.gan.sn_gan import (
     SNDiscriminator,
     SNGenerator,
     discriminator_hinge_loss,

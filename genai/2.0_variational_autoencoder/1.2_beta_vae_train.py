@@ -13,7 +13,7 @@ latent-channel capacity in exchange for pressure toward factorized codes.  It
 does not guarantee disentanglement: the data distribution, random seed, and
 decoder likelihood still matter.
 
-This lesson deliberately reuses ``dl_utils.genai.vae.VAE``, the 256x256
+This lesson deliberately reuses ``dl_utils.vae.vae.VAE``, the 256x256
 glasses dataset, and the optimizer from ``1.0_vae_train.py``.  The weighted KL
 is therefore the only learning-algorithm increment.  No mixed precision,
 compiled kernels, distributed training, or hyperparameter search is hidden in
@@ -54,7 +54,7 @@ from dl_utils.data.vision import image_folder_loader
 from dl_utils.devices.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.vae import VAE, device, diagonal_gaussian_kl
+from dl_utils.vae.vae import VAE, device, diagonal_gaussian_kl
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_grid
 

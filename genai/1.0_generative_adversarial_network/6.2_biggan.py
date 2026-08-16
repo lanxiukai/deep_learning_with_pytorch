@@ -57,17 +57,17 @@ from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.genai.biggan import (
+from dl_utils.gan.biggan import (
     BigGANDiscriminator,
     CompactBigGANGenerator,
     initialize_orthogonal_weights,
     modified_orthogonal_regularization,
 )
-from dl_utils.genai.sagan import (
+from dl_utils.gan.sagan import (
     CIFAR10_CLASS_NAMES,
     make_fixed_class_latent_grid,
 )
-from dl_utils.genai.sn_gan import (
+from dl_utils.gan.sn_gan import (
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
