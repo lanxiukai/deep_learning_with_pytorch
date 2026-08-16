@@ -51,11 +51,6 @@ dl_utils/
 │   ├── images.py
 │   └── vision.py
 │
-├── devices/
-│   ├── __init__.py
-│   ├── randomness.py
-│   └── selection.py
-│
 ├── diffusion/
 │   ├── __init__.py
 │   ├── ddpm.py
@@ -105,6 +100,11 @@ dl_utils/
 │   ├── _backend.py
 │   ├── figures.py
 │   └── images.py
+│
+├── runtime/
+│   ├── __init__.py
+│   ├── devices.py
+│   └── randomness.py
 │
 ├── training/
 │   ├── __init__.py
@@ -238,20 +238,20 @@ Dependencies: os, pathlib (Path), typing (TypeAlias), torch, torch.utils.data,
 torchvision, torchvision.transforms, dl_utils.data.images (load_rgb_image).
 Public entries: TensorBatch, TensorDataLoader, vision_loaders, image_folder_dataset, image_folder_loader, load_array.
 
-### dl_utils/devices/__init__.py
+### dl_utils/runtime/__init__.py
 
 Dependencies: none.
 Public entries: none (docstring-only package marker).
 
-### dl_utils/devices/randomness.py
-
-Dependencies: random, torch.
-Public entries: set_seed.
-
-### dl_utils/devices/selection.py
+### dl_utils/runtime/devices.py
 
 Dependencies: torch, typing (Optional, Union).
 Public entries: get_device, try_gpu, try_all_gpus.
+
+### dl_utils/runtime/randomness.py
+
+Dependencies: random, torch.
+Public entries: set_seed.
 
 ### dl_utils/ebm/__init__.py
 
@@ -474,7 +474,7 @@ Public entries: none (docstring-only package marker).
 
 ### dl_utils/vae/vae.py
 
-Dependencies: torch, torch.nn.functional, torch.nn, dl_utils.devices.selection (get_device).
+Dependencies: torch, torch.nn.functional, torch.nn, dl_utils.runtime.devices (try_gpu).
 Public entries: device, diagonal_gaussian_kl, reparameterize, VAEEncoder,
 VAEDecoder, VAE.
 

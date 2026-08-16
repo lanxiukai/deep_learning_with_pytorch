@@ -4,7 +4,7 @@ Sequence to Sequence (Seq2Seq)
 
 import torch
 from torch import nn
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 from dl_utils.d2l.seq2seq import (
     Decoder,
     Encoder,

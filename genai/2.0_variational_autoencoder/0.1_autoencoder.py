@@ -10,7 +10,7 @@ from torch import nn
 from dl_utils.plot.figures import Animator
 import matplotlib.pyplot as plt
 from dl_utils.data.vision import vision_loaders
-from dl_utils.devices.selection import get_device
+from dl_utils.runtime.devices import get_device
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.plot.images import show_images

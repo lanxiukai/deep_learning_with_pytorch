@@ -5,7 +5,7 @@ Asynchronous Computation
 import numpy
 import torch
 from dl_utils.d2l.benchmark import Benchmark
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 
 # GPU computation warm-up
 device = try_gpu()

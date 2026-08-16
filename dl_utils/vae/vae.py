@@ -4,9 +4,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from dl_utils.devices.selection import get_device
+from dl_utils.runtime.devices import try_gpu
 
-device = get_device()
+device = try_gpu()
 
 
 def diagonal_gaussian_kl(mu, std):

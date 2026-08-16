@@ -4,7 +4,7 @@ Automatic Parallelism
 
 import torch
 from dl_utils.d2l.benchmark import Benchmark
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 
 def run(x):
     # Matrix multiply x by itself 50 times

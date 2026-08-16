@@ -7,7 +7,7 @@ Requires output/cgan/cgan.pth — run 4.0_conditional_gan.py first.
 
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 from dl_utils.gan.gan import Generator
 
 import matplotlib.pyplot as plt

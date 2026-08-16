@@ -4,7 +4,7 @@ Use GPU
 
 import torch
 from torch import nn
-from dl_utils.devices.selection import try_all_gpus, try_gpu
+from dl_utils.runtime.devices import try_all_gpus, try_gpu
 
 print('0--------------------------------')
 print(f'torch.device("cpu"): {torch.device("cpu")}')

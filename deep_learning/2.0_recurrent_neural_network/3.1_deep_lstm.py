@@ -3,7 +3,7 @@ Deep Long Short-Term Memory (LSTM) (concise implementation)
 '''
 
 from torch import nn
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 from dl_utils.d2l.rnn import RNNModel, train_ch8
 from dl_utils.d2l.time_machine import load_data_time_machine
 

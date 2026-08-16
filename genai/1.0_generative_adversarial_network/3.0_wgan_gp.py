@@ -26,7 +26,7 @@ from torch import nn
 from dl_utils.data.images import load_rgb_image
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 from dl_utils.gan.gan import gradient_penalty
 from dl_utils.plot.figures import Animator
 from dl_utils.training.timing import Timer, format_epoch_timing

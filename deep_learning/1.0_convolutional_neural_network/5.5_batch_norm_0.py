@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from dl_utils.d2l.cnn import train_ch6
 from dl_utils.d2l.data_fashion import load_data_fashion_mnist
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 
 def batch_norm(X, gamma, beta, moving_mean, moving_var, eps, momentum):
     # Use is_grad_enabled to determine whether we are in training or inference mode

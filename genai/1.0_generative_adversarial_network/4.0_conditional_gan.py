@@ -24,7 +24,7 @@ Total:      15.7 M params
 # are written under <project_root>/output/cgan
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 from dl_utils.gan.gan import gradient_penalty, Generator, Critic
 from dl_utils.data.vision import image_folder_dataset
 from dl_utils.plot.figures import Animator

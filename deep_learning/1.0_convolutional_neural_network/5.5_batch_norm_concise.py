@@ -5,7 +5,7 @@ Batch Normalization (Concise Implementation)
 from torch import nn
 from dl_utils.d2l.cnn import train_ch6
 from dl_utils.d2l.data_fashion import load_data_fashion_mnist
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 
 if __name__ == '__main__':
     net = nn.Sequential(

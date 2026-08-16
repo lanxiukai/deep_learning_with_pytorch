@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from dl_utils.d2l.cnn import train_ch6
 from dl_utils.d2l.data_fashion import load_data_fashion_mnist
-from dl_utils.devices.selection import try_gpu
+from dl_utils.runtime.devices import try_gpu
 
 def nin_block(in_channels, out_channels, kernel_size, stride, padding):
     return nn.Sequential(

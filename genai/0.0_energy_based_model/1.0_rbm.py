@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 
-from dl_utils.devices.selection import get_device
+from dl_utils.runtime.devices import get_device
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.ebm._ebm_types import Config as EBMConfig
 from dl_utils.ebm.rbm_sampling import sampling_rbm
