@@ -67,6 +67,7 @@ htmlcov/
 /data/
 /book_repos/
 /output/
+/supplementary-materials
 
 # Local documentation, tests, and reference attachments
 /docs/
