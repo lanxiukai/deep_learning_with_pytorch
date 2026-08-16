@@ -1,9 +1,9 @@
-"""Train a compact, paper-oriented StyleGAN2 on CIFAR-10.
+"""Train a compact, paper-oriented StyleGAN2 on 128x128 aligned CelebA.
 
 Compared with StyleGAN, this lesson presents the main StyleGAN2 increments:
     - per-sample weight modulation/demodulation instead of AdaIN;
-    - the original one-convolution 4x4 block and eight overlapping W slots;
-    - skip-connected RGB outputs and full-resolution training;
+    - the original one-convolution 4x4 block and 12 overlapping W slots;
+    - skip-connected RGB outputs and full 128x128 training;
     - residual discriminator downsampling;
     - lazy R1 and path-length regularization in separate optimizer passes;
     - lazy-regularization compensation for Adam's learning rate and beta2;
@@ -11,17 +11,18 @@ Compared with StyleGAN, this lesson presents the main StyleGAN2 increments:
       image-count-based G-EMA.
 
 The complete mapping, synthesis, and discriminator models live in
-``dl_utils/genai/stylegan2.py``.  This is a pure-PyTorch 32x32 teaching model,
-so it omits fused CUDA kernels, multi-GPU training, and high-resolution
-capacity while leaving the new losses and update schedule explicit.
+``dl_utils/genai/stylegan2.py``.  This pure-PyTorch single-GPU profile stops at
+128x128 and uses compact widths, so it omits fused CUDA kernels, multi-GPU
+training, and paper-scale capacity while leaving every new loss explicit.
 
 Data:
-    data/cifar10, prepared by tool_scripts/download_dataset_test.py.
+    data/celeba aligned images and official train split, prepared by
+    tool_scripts/download_dataset.py.
 
 Outputs:
     Fresh runs reset training/ and checkpoints/ before setup; --resume-from
     preserves both directories.
-    output/stylegan2/training/epoch_*.png: fixed-z/noise EMA samples
+    output/stylegan2/training/kimg_*.png: fixed-z/noise EMA samples
     output/stylegan2/checkpoints/latest.pth: full recoverable training state
     output/stylegan2/checkpoints/epoch_*.pth: sparse full-state archives
     output/stylegan2/stylegan2_generator.pth: final EMA generator with w_avg
@@ -33,29 +34,33 @@ Resume an interrupted run:
     python genai/1.0_generative_adversarial_network/7.2_stylegan2.py \
         --resume-from output/stylegan2/checkpoints/latest.pth
 
-Training data -- CIFAR-10:
-Training images:         50,000
-Samples per epoch:       49,984 (1,562 full batches; drop_last=True)
-Training epochs:         100
-Main optimizer updates:  156,200 D / 156,200 G (1:1)
+Training data -- aligned CelebA train split:
+Training images:         162,770
+Training budget:         5,000 kimg (100 recoverable training ticks)
+Main optimizer updates:  156,250 D / 156,250 G (1:1)
 
-Generator:                2.73 M params (plus one EMA copy)
-Discriminator:            3.48 M params
-Trainable total:          6.21 M params
+Generator:                4.05 M params (plus one EMA copy)
+Discriminator:            4.76 M params
+Trainable total:          8.81 M params
 """
 
 import argparse
 import math
 import random
 from copy import deepcopy
+from itertools import islice
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision import transforms
 from tqdm import tqdm
 
+from dl_utils.data.celeba import (
+    CELEBA_ALIGNED_CROP_SIZE,
+    CelebAAlignedDataset,
+)
 from dl_utils.devices.randomness import set_seed
 from dl_utils.devices.selection import try_gpu
 from dl_utils.filesystem.directories import reset_dir
@@ -71,13 +76,20 @@ from dl_utils.training.session import TrainingSession
 
 
 PROJECT_ROOT = infer_project_root()
-DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
+DATA_DIR = PROJECT_ROOT / "data" / "celeba"
 OUT_DIR = PROJECT_ROOT / "output" / "stylegan2"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
-NUM_EPOCHS = 100
 BATCH_SIZE = 32
+TOTAL_KIMG = 5_000
+TICK_KIMG = 50
+TOTAL_TICKS = TOTAL_KIMG // TICK_KIMG
+TOTAL_BATCHES = TOTAL_KIMG * 1_000 // BATCH_SIZE
+BASE_BATCHES_PER_TICK, EXTRA_BATCH_TICKS = divmod(
+    TOTAL_BATCHES,
+    TOTAL_TICKS,
+)
 NUM_WORKERS = 4
 Z_DIM = 128
 STYLE_DIM = 128
@@ -96,9 +108,10 @@ PATH_BATCH_SHRINK = 2
 EMA_HALF_LIFE_KIMG = 10.0
 SAMPLES_TO_DISPLAY = 64
 SAMPLE_GRID_COLUMNS = 8
-SAMPLE_EVERY_EPOCHS = 5
-CHECKPOINT_EVERY_EPOCHS = 5
-ARCHIVE_EVERY_EPOCHS = 25
+SAMPLE_BATCH_SIZE = 4
+SAMPLE_EVERY_TICKS = 5
+CHECKPOINT_EVERY_TICKS = 5
+ARCHIVE_EVERY_TICKS = 25
 SEED = 42
 
 MODEL_CONFIG = {
@@ -121,6 +134,23 @@ METRIC_NAMES = (
     "weighted_r1",
     "weighted_path",
 )
+
+
+def batches_in_tick(tick):
+    """Distribute complete batches evenly across all recoverable ticks."""
+    if not 1 <= tick <= TOTAL_TICKS:
+        raise ValueError(f"tick must be within [1, {TOTAL_TICKS}].")
+    return BASE_BATCHES_PER_TICK + (tick <= EXTRA_BATCH_TICKS)
+
+
+def completed_batches(num_ticks):
+    """Return the exact number of main updates after completed ticks."""
+    if not 0 <= num_ticks <= TOTAL_TICKS:
+        raise ValueError(f"num_ticks must be within [0, {TOTAL_TICKS}].")
+    return (
+        num_ticks * BASE_BATCHES_PER_TICK
+        + min(num_ticks, EXTRA_BATCH_TICKS)
+    )
 
 
 def sample_mixing_latents(batch_size, z_dim, device):
@@ -187,7 +217,7 @@ def update_ema(averaged_generator, generator, batch_size):
         averaged_buffer.copy_(buffer)
 
 
-def train_epoch(
+def train_tick(
     generator,
     discriminator,
     loader,
@@ -196,14 +226,17 @@ def train_epoch(
     averaged_generator,
     path_mean,
     global_step,
+    num_batches,
     device,
     progress_bar=None,
 ):
-    """Train one epoch with separate main and lazy-regularization passes."""
+    """Train one nominal 50-kimg tick with separate regularization passes."""
+    if len(loader) < num_batches:
+        raise ValueError("loader is shorter than one training tick.")
     metric_sums = torch.zeros(len(METRIC_NAMES), device=device)
     num_examples = 0
 
-    for real, _ in loader:
+    for real, _ in islice(loader, num_batches):
         real = real.to(device, non_blocking=True)
         batch_size = real.shape[0]
 
@@ -298,30 +331,38 @@ def train_epoch(
         if progress_bar is not None:
             progress_bar.update(1)
 
-    epoch_metrics = dict(
+    tick_metrics = dict(
         zip(
             METRIC_NAMES,
             (value / num_examples for value in metric_sums.tolist()),
             strict=True,
         )
     )
-    return epoch_metrics, path_mean, global_step
+    return tick_metrics, path_mean, global_step
 
 
-def save_training_samples(generator, fixed_z, output_path, epoch):
+def save_training_samples(generator, fixed_z, output_path, seen_kimg):
     """Save fixed-z samples with the same layer noise at every checkpoint."""
     was_training = generator.training
     generator.eval()
     try:
         with torch.inference_mode():
-            samples = generator(fixed_z, noise_mode="fixed").cpu()
+            samples = torch.cat(
+                [
+                    generator(
+                        z_batch,
+                        noise_mode="fixed",
+                    ).cpu()
+                    for z_batch in fixed_z.split(SAMPLE_BATCH_SIZE)
+                ]
+            )
     finally:
         generator.train(was_training)
     save_grid(
         denormalize(samples),
         output_path,
         nrow=SAMPLE_GRID_COLUMNS,
-        title=f"StyleGAN2 EMA fixed samples - epoch {epoch:03d}",
+        title=f"StyleGAN2 EMA fixed samples - {seen_kimg:.0f} kimg",
     )
 
 
@@ -330,20 +371,21 @@ def main(resume_from=None):
         reset_dir(str(TRAINING_DIR))
         reset_dir(str(CHECKPOINT_DIR))
 
-    if not (DATA_DIR / "cifar-10-batches-py").is_dir():
+    if not (DATA_DIR / "list_eval_partition.csv").is_file():
         raise FileNotFoundError(
-            f"CIFAR-10 data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset_test.py first."
+            f"CelebA data not found: {DATA_DIR}. "
+            "Run tool_scripts/download_dataset.py first."
         )
 
     set_seed(SEED)
     device = try_gpu()
-    dataset = datasets.CIFAR10(
+    dataset = CelebAAlignedDataset(
         DATA_DIR,
-        train=True,
-        download=False,
+        split="train",
         transform=transforms.Compose(
             [
+                transforms.CenterCrop(CELEBA_ALIGNED_CROP_SIZE),
+                transforms.Resize((128, 128), antialias=True),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5] * 3, [0.5] * 3),
@@ -359,6 +401,15 @@ def main(resume_from=None):
         persistent_workers=NUM_WORKERS > 0,
         drop_last=True,
     )
+    if TOTAL_KIMG % TICK_KIMG:
+        raise ValueError("TOTAL_KIMG must be divisible by TICK_KIMG.")
+    if TOTAL_KIMG * 1_000 % BATCH_SIZE:
+        raise ValueError("TOTAL_KIMG must contain complete training batches.")
+    largest_tick = max(
+        batches_in_tick(tick) for tick in range(1, TOTAL_TICKS + 1)
+    )
+    if len(loader) < largest_tick:
+        raise ValueError("one training tick exceeds a complete CelebA pass.")
 
     generator = StyleGenerator(**MODEL_CONFIG).to(device)
     discriminator = StyleDiscriminator(**DISCRIMINATOR_CONFIG).to(device)
@@ -380,23 +431,29 @@ def main(resume_from=None):
 
     session = TrainingSession(
         OUT_DIR,
-        total_epochs=NUM_EPOCHS,
+        total_epochs=TOTAL_TICKS,
         models={
             "online_generator": generator,
             "stylegan2_generator": averaged_generator,
             "discriminator": discriminator,
         },
         optimizers={"generator": optimizer_g, "discriminator": optimizer_d},
-        checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
-        archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
+        checkpoint_every_epochs=CHECKPOINT_EVERY_TICKS,
+        archive_every_epochs=ARCHIVE_EVERY_TICKS,
         metadata={
-            "format_version": 7,
+            "format_version": 8,
             "conditioning": "unconditional",
+            "dataset": "celeba_aligned_train",
+            "final_resolution": 128,
             "objective": "non_saturating_logistic_r1_path",
             "progressive_training": False,
             "style_mixing_probability": STYLE_MIXING_PROBABILITY,
             "r1_interval": D_REG_EVERY,
             "path_interval": G_REG_EVERY,
+            "path_batch_shrink": PATH_BATCH_SHRINK,
+            "total_kimg": TOTAL_KIMG,
+            "tick_kimg": TICK_KIMG,
+            "total_batches": TOTAL_BATCHES,
             "ema_half_life_kimg": EMA_HALF_LIFE_KIMG,
         },
         model_metadata={
@@ -422,7 +479,7 @@ def main(resume_from=None):
         reset_output_dir=False,
         initial_state={
             "loss_history": {
-                "epoch": [],
+                "kimg": [],
                 **{name: [] for name in METRIC_NAMES},
             },
             "fixed_z": fixed_z.cpu(),
@@ -436,33 +493,37 @@ def main(resume_from=None):
     path_mean = state["path_mean"].to(device)
     global_step = state["global_step"]
 
-    expected_steps = (start_epoch - 1) * len(loader)
+    expected_steps = completed_batches(start_epoch - 1)
     if global_step != expected_steps:
-        raise ValueError("Checkpoint global step is inconsistent with its epoch.")
-    if loss_history["epoch"] != list(range(1, start_epoch)):
-        raise ValueError("Checkpoint loss history does not match its epoch.")
+        raise ValueError("Checkpoint global step is inconsistent with its tick.")
+    expected_kimg = [
+        completed_batches(tick) * BATCH_SIZE / 1_000
+        for tick in range(1, start_epoch)
+    ]
+    if loss_history["kimg"] != expected_kimg:
+        raise ValueError("Checkpoint loss history does not match its tick.")
     if tuple(fixed_z.shape) != (SAMPLES_TO_DISPLAY, Z_DIM):
         raise ValueError("Checkpoint fixed z has an unexpected shape.")
     if path_mean.ndim != 0:
         raise ValueError("Checkpoint path mean must be a scalar.")
     if resume_from is not None:
-        print(f"Resumed training from epoch {start_epoch - 1}: {resume_from}")
+        print(f"Resumed training from tick {start_epoch - 1}: {resume_from}")
 
-    planned_steps = NUM_EPOCHS * len(loader)
+    planned_steps = TOTAL_BATCHES
     with tqdm(
         total=planned_steps,
         initial=global_step,
-        desc=f"StyleGAN2 | Epoch {min(start_epoch, NUM_EPOCHS)}/{NUM_EPOCHS}",
+        desc=f"StyleGAN2 | Tick {min(start_epoch, TOTAL_TICKS)}/{TOTAL_TICKS}",
         unit="batch",
         dynamic_ncols=True,
         mininterval=1.0,
     ) as progress_bar:
-        for epoch in range(start_epoch, NUM_EPOCHS + 1):
+        for tick in range(start_epoch, TOTAL_TICKS + 1):
             progress_bar.set_description(
-                f"StyleGAN2 | Epoch {epoch}/{NUM_EPOCHS}",
+                f"StyleGAN2 | Tick {tick}/{TOTAL_TICKS}",
                 refresh=False,
             )
-            metrics, path_mean, global_step = train_epoch(
+            metrics, path_mean, global_step = train_tick(
                 generator,
                 discriminator,
                 loader,
@@ -471,30 +532,32 @@ def main(resume_from=None):
                 averaged_generator,
                 path_mean,
                 global_step,
+                batches_in_tick(tick),
                 device,
                 progress_bar=progress_bar,
             )
-            loss_history["epoch"].append(epoch)
+            seen_kimg = completed_batches(tick) * BATCH_SIZE / 1_000
+            loss_history["kimg"].append(seen_kimg)
             for name, value in metrics.items():
                 loss_history[name].append(value)
 
-            if epoch == 1 or epoch % SAMPLE_EVERY_EPOCHS == 0:
+            if tick == 1 or tick % SAMPLE_EVERY_TICKS == 0:
                 save_training_samples(
                     averaged_generator,
                     fixed_z,
-                    TRAINING_DIR / f"epoch_{epoch:03d}.png",
-                    epoch,
+                    TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
+                    seen_kimg,
                 )
 
             state["path_mean"] = path_mean.detach().cpu()
             state["global_step"] = global_step
-            session.checkpoint(epoch, state)
+            session.checkpoint(tick, state)
 
     if global_step != planned_steps:
         raise RuntimeError("Training ended with an unexpected step count.")
     session.finish()
     save_loss_panels(
-        loss_history["epoch"],
+        loss_history["kimg"],
         {
             "Discriminator objective": {
                 "D total loss": loss_history["loss_d"],
@@ -516,12 +579,13 @@ def main(resume_from=None):
             },
         },
         OUT_DIR / "loss_curves.png",
+        xlabel="thousands of real images shown to the discriminator (kimg)",
     )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train the full-resolution CIFAR-10 StyleGAN2."
+        description="Train the full-resolution 128x128 CelebA StyleGAN2."
     )
     parser.add_argument("--resume-from", type=Path, metavar="CHECKPOINT")
     return parser.parse_args()

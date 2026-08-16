@@ -44,6 +44,7 @@ dl_utils/
 │
 ├── data/
 │   ├── __init__.py
+│   ├── celeba.py
 │   ├── dataset_preparation.py
 │   ├── downloads.py
 │   ├── glasses_label_corrections.json
@@ -187,6 +188,15 @@ Public entries: tokenize, Vocab, count_corpus.
 
 Dependencies: none.
 Public entries: none (docstring-only package marker).
+
+### dl_utils/data/celeba.py
+
+Dependencies: __future__ (annotations), csv, pathlib (Path),
+torch.utils.data (Dataset), dl_utils.data.images (load_rgb_image).
+Public entries (__all__): CELEBA_ALIGNED_CROP_SIZE, CELEBA_PARTITIONS,
+CelebAAlignedDataset.
+The dataset reads the official split manifest from the locally prepared
+aligned CelebA tree and returns unconditional `(image, 0)` samples.
 
 ### dl_utils/data/downloads.py
 
@@ -418,10 +428,10 @@ init_spectral_norm_state, spectral_norm_scratch_minimal.
 
 Dependencies: math, collections.abc (Sequence), torch,
 torch.nn.functional (as F), torch (nn).
-Public entries: RESOLUTIONS, NOISE_MODES, validate_resolution, validate_alpha,
-PixelNorm, EqualizedLinear, EqualizedConv2d, MinibatchStandardDeviation,
-NoiseInjection, filter2d, filtered_upsample2d, filtered_downsample2d,
-denormalize.
+Public entries: RESOLUTIONS, CHANNEL_MULTIPLIERS, NOISE_MODES,
+make_channel_map, validate_resolution, validate_alpha, PixelNorm,
+EqualizedLinear, EqualizedConv2d, MinibatchStandardDeviation, NoiseInjection,
+filter2d, filtered_upsample2d, filtered_downsample2d, denormalize.
 
 ### dl_utils/genai/progan.py
 

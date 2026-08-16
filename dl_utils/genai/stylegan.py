@@ -1,4 +1,4 @@
-"""Compact progressive StyleGAN models with AdaIN and per-layer styles."""
+"""Compact 128x128 StyleGAN models with AdaIN and per-layer styles."""
 
 import math
 import random
@@ -17,20 +17,10 @@ from dl_utils.genai.stylegan_common import (
     denormalize,
     filtered_downsample2d,
     filtered_upsample2d,
+    make_channel_map,
     validate_alpha,
     validate_resolution,
 )
-
-
-def _channel_map(base_channels):
-    if base_channels <= 0:
-        raise ValueError("base_channels must be positive.")
-    return {
-        4: base_channels * 8,
-        8: base_channels * 8,
-        16: base_channels * 4,
-        32: base_channels * 2,
-    }
 
 
 class MappingNetwork(nn.Module):
@@ -186,7 +176,7 @@ class StyleGANGenerator(nn.Module):
         self.resolutions = RESOLUTIONS
         self.styles_per_block = 2
         self.num_ws = len(self.resolutions) * self.styles_per_block
-        self.channels = _channel_map(self.base_channels)
+        self.channels = make_channel_map(self.base_channels, self.resolutions)
         self.mapping = MappingNetwork(
             self.z_dim,
             self.style_dim,
@@ -233,7 +223,7 @@ class StyleGANGenerator(nn.Module):
         self,
         z,
         *,
-        resolution=32,
+        resolution=128,
         mixing_z=None,
         mixing_cutoff=None,
         update_w_avg=False,
@@ -297,7 +287,7 @@ class StyleGANGenerator(nn.Module):
         self,
         ws,
         *,
-        resolution=32,
+        resolution=128,
         alpha=1.0,
         noise_mode="random",
     ):
@@ -342,7 +332,7 @@ class StyleGANGenerator(nn.Module):
         self,
         z,
         *,
-        resolution=32,
+        resolution=128,
         alpha=1.0,
         mixing_z=None,
         mixing_cutoff=None,
@@ -401,7 +391,7 @@ class StyleGANDiscriminator(nn.Module):
         super().__init__()
         self.base_channels = int(base_channels)
         self.resolutions = RESOLUTIONS
-        self.channels = _channel_map(self.base_channels)
+        self.channels = make_channel_map(self.base_channels, self.resolutions)
         self.from_rgbs = nn.ModuleDict(
             {
                 str(resolution): EqualizedConv2d(
@@ -436,7 +426,7 @@ class StyleGANDiscriminator(nn.Module):
         )
         self.output = EqualizedLinear(final_channels, 1)
 
-    def forward(self, images, resolution=32, alpha=1.0):
+    def forward(self, images, resolution=128, alpha=1.0):
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
         if images.ndim != 4 or images.shape[1] != 3:

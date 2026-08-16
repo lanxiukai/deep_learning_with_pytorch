@@ -1,4 +1,4 @@
-"""Compact 4x4-to-32x32 ProGAN models for progressive-growing study.
+"""Compact 4x4-to-128x128 ProGAN models for progressive-growing study.
 
 The module keeps the paper's equalized learning rate, pixel normalization,
 minibatch-standard-deviation feature, filtered resolution transitions, and
@@ -20,20 +20,10 @@ from dl_utils.genai.stylegan_common import (
     denormalize,
     filtered_downsample2d,
     filtered_upsample2d,
+    make_channel_map,
     validate_alpha,
     validate_resolution,
 )
-
-
-def _channel_map(base_channels):
-    if base_channels <= 0:
-        raise ValueError("base_channels must be positive.")
-    return {
-        4: base_channels * 8,
-        8: base_channels * 8,
-        16: base_channels * 4,
-        32: base_channels * 2,
-    }
 
 
 class GeneratorInputBlock(nn.Module):
@@ -89,7 +79,7 @@ class GeneratorBlock(nn.Module):
 
 
 class ProGANGenerator(nn.Module):
-    """Progressively expose generator blocks from 4x4 through 32x32."""
+    """Progressively expose generator blocks from 4x4 through 128x128."""
 
     def __init__(self, z_dim=128, base_channels=32):
         super().__init__()
@@ -98,7 +88,7 @@ class ProGANGenerator(nn.Module):
         if self.z_dim <= 0:
             raise ValueError("z_dim must be positive.")
         self.resolutions = RESOLUTIONS
-        self.channels = _channel_map(self.base_channels)
+        self.channels = make_channel_map(self.base_channels, self.resolutions)
         self.input_block = GeneratorInputBlock(
             self.z_dim,
             self.channels[4],
@@ -124,7 +114,7 @@ class ProGANGenerator(nn.Module):
             }
         )
 
-    def forward(self, z, resolution=32, alpha=1.0):
+    def forward(self, z, resolution=128, alpha=1.0):
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
         if z.ndim != 2 or z.shape[1] != self.z_dim:
@@ -181,7 +171,7 @@ class ProGANDiscriminator(nn.Module):
         super().__init__()
         self.base_channels = int(base_channels)
         self.resolutions = RESOLUTIONS
-        self.channels = _channel_map(self.base_channels)
+        self.channels = make_channel_map(self.base_channels, self.resolutions)
         self.from_rgbs = nn.ModuleDict(
             {
                 str(resolution): EqualizedConv2d(
@@ -216,7 +206,7 @@ class ProGANDiscriminator(nn.Module):
         )
         self.output = EqualizedLinear(final_channels, 1)
 
-    def forward(self, images, resolution=32, alpha=1.0):
+    def forward(self, images, resolution=128, alpha=1.0):
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
         expected_shape = (resolution, resolution)

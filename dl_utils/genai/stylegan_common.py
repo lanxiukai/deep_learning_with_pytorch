@@ -13,8 +13,31 @@ import torch.nn.functional as F
 from torch import nn
 
 
-RESOLUTIONS = (4, 8, 16, 32)
+RESOLUTIONS = (4, 8, 16, 32, 64, 128)
+CHANNEL_MULTIPLIERS = {
+    4: 8,
+    8: 8,
+    16: 8,
+    32: 4,
+    64: 2,
+    128: 1,
+}
 NOISE_MODES = frozenset({"random", "fixed", "none"})
+
+
+def make_channel_map(base_channels, resolutions=RESOLUTIONS):
+    """Scale the compact 128x128 feature schedule from one base width."""
+    base_channels = int(base_channels)
+    if base_channels <= 0:
+        raise ValueError("base_channels must be positive.")
+    resolutions = tuple(int(value) for value in resolutions)
+    unknown = sorted(set(resolutions) - set(CHANNEL_MULTIPLIERS))
+    if unknown:
+        raise ValueError(f"channel multipliers are missing for {unknown}.")
+    return {
+        resolution: base_channels * CHANNEL_MULTIPLIERS[resolution]
+        for resolution in resolutions
+    }
 
 
 def validate_resolution(resolution, resolutions=RESOLUTIONS):
@@ -273,6 +296,7 @@ def denormalize(images):
 
 
 __all__ = [
+    "CHANNEL_MULTIPLIERS",
     "EqualizedConv2d",
     "EqualizedLinear",
     "MinibatchStandardDeviation",
@@ -284,6 +308,7 @@ __all__ = [
     "filter2d",
     "filtered_downsample2d",
     "filtered_upsample2d",
+    "make_channel_map",
     "validate_alpha",
     "validate_resolution",
 ]

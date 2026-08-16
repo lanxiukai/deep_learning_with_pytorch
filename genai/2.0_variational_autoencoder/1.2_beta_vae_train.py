@@ -21,7 +21,7 @@ the script.  The 63.3 M-parameter model with a batch of 16 is the intended
 12 GB single-card configuration.
 
 Data:
-    data/glasses-256, prepared by tool_scripts/download_dataset_test.py.
+    data/glasses-256, prepared by tool_scripts/download_dataset.py.
 
 Outputs:
     output/beta_vae/training/epoch_*.png: fixed-prior samples by epoch
@@ -174,7 +174,7 @@ def main(beta=BETA, num_epochs=NUM_EPOCHS):
     if not DATA_DIR.is_dir():
         raise FileNotFoundError(
             f"Training data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset_test.py first."
+            "Run tool_scripts/download_dataset.py first."
         )
 
     reset_dir(str(OUT_DIR))

@@ -5,7 +5,7 @@ the first ten unpaired black/blond image pairs.
 
 Data:
     data/celeba/{black,blond}, prepared by
-    tool_scripts/download_dataset_test.py.
+    tool_scripts/download_dataset.py.
 
 Inputs:
     - output/cyclegan/gen_black.pth: blond -> black generator
@@ -52,7 +52,7 @@ def main():
         missing = ", ".join(str(path) for path in missing_data_dirs)
         raise FileNotFoundError(
             f"CycleGAN evaluation data not found: {missing}. "
-            "Run: python tool_scripts/download_dataset_test.py"
+            "Run: python tool_scripts/download_dataset.py"
         )
 
     missing_checkpoints = [

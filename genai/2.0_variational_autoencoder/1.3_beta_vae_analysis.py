@@ -96,7 +96,7 @@ def make_dataset_and_loader():
     if not DATA_DIR.is_dir():
         raise FileNotFoundError(
             f"Analysis data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset_test.py first."
+            "Run tool_scripts/download_dataset.py first."
         )
     dataset = image_folder_dataset(DATA_DIR)
     loader = DataLoader(

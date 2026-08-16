@@ -10,7 +10,7 @@ Missing generator checkpoints are reported and skipped so any completed model
 in the lesson sequence can be evaluated independently.
 
 Inputs:
-    data/cifar10, prepared by tool_scripts/download_dataset_test.py
+    data/cifar10, prepared by tool_scripts/download_dataset.py
     output/sn_gan/generator.pth, created by 6.0_sn_gan.py
     output/sagan/generator.pth, created by 6.1_sagan.py
     output/biggan/generator.pth, created by 6.2_biggan.py
@@ -98,7 +98,7 @@ def load_cifar10_test_references():
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
             f"CIFAR-10 data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset_test.py first."
+            "Run tool_scripts/download_dataset.py first."
         )
 
     dataset = datasets.CIFAR10(

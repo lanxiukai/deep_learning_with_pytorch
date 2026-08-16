@@ -1,4 +1,4 @@
-"""Compact 32x32 StyleGAN2 without progressive growing or AdaIN.
+"""Compact 128x128 StyleGAN2 without progressive growing or AdaIN.
 
 The generator keeps weight modulation/demodulation, per-layer stochastic
 noise, skip-connected RGB outputs, style mixing, truncation, and the original
@@ -23,6 +23,7 @@ from dl_utils.genai.stylegan_common import (
     denormalize,
     filtered_downsample2d,
     filtered_upsample2d,
+    make_channel_map,
     validate_resolution,
 )
 
@@ -305,12 +306,7 @@ class StyleGenerator(nn.Module):
         # next slot, which is also reused by the following block's first conv.
         self.styles_per_block = 2
         self.num_ws = len(self.resolutions) * self.styles_per_block
-        channels = {
-            4: self.base_channels * 8,
-            8: self.base_channels * 8,
-            16: self.base_channels * 4,
-            32: self.base_channels * 2,
-        }
+        channels = make_channel_map(self.base_channels, self.resolutions)
         self.constant = nn.Parameter(torch.randn(1, channels[4], 4, 4))
         self.blocks = nn.ModuleList(
             [
@@ -475,46 +471,59 @@ class DiscriminatorResidualBlock(nn.Module):
 
 
 class StyleDiscriminator(nn.Module):
-    """Full 32x32 residual discriminator used by compact StyleGAN2."""
+    """Full 128x128 residual discriminator used by compact StyleGAN2."""
 
     def __init__(self, base_channels=32):
         super().__init__()
         self.base_channels = int(base_channels)
         if self.base_channels <= 0:
             raise ValueError("base_channels must be positive.")
-        channels = {
-            32: self.base_channels * 2,
-            16: self.base_channels * 4,
-            8: self.base_channels * 8,
-            4: self.base_channels * 8,
-        }
-        self.from_rgb = EqualizedConv2d(3, channels[32], 1)
+        self.resolutions = RESOLUTIONS
+        self.channels = make_channel_map(
+            self.base_channels,
+            self.resolutions,
+        )
+        final_resolution = self.resolutions[-1]
+        self.from_rgb = EqualizedConv2d(
+            3,
+            self.channels[final_resolution],
+            1,
+        )
         self.blocks = nn.Sequential(
-            DiscriminatorResidualBlock(channels[32], channels[16]),
-            DiscriminatorResidualBlock(channels[16], channels[8]),
-            DiscriminatorResidualBlock(channels[8], channels[4]),
+            *[
+                DiscriminatorResidualBlock(
+                    self.channels[resolution],
+                    self.channels[resolution // 2],
+                )
+                for resolution in reversed(self.resolutions[1:])
+            ]
         )
         self.minibatch_std = MinibatchStandardDeviation()
         self.final_conv = EqualizedConv2d(
-            channels[4] + 1,
-            channels[4],
+            self.channels[4] + 1,
+            self.channels[4],
             3,
             padding=1,
         )
         self.final = nn.Sequential(
             nn.Flatten(),
             EqualizedLinear(
-                channels[4] * 4 * 4,
-                channels[4],
+                self.channels[4] * 4 * 4,
+                self.channels[4],
                 gain=math.sqrt(2),
             ),
             nn.LeakyReLU(0.2, inplace=True),
-            EqualizedLinear(channels[4], 1),
+            EqualizedLinear(self.channels[4], 1),
         )
 
     def forward(self, images):
-        if images.ndim != 4 or images.shape[1:] != (3, 32, 32):
-            raise ValueError("StyleDiscriminator expects [B, 3, 32, 32].")
+        final_resolution = self.resolutions[-1]
+        expected = (3, final_resolution, final_resolution)
+        if images.ndim != 4 or images.shape[1:] != expected:
+            raise ValueError(
+                "StyleDiscriminator expects "
+                f"[B, 3, {final_resolution}, {final_resolution}]."
+            )
         hidden = F.leaky_relu(self.from_rgb(images), 0.2)
         hidden = self.blocks(hidden)
         hidden = self.minibatch_std(hidden)

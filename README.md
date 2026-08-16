@@ -35,7 +35,7 @@ the PyTorch framework.
 │
 ├── docs/                            # Implementation notes and model guides
 ├── tool_scripts/
-│   ├── download_dataset_test.py
+│   ├── download_dataset.py
 │   ├── plot_fashion_mnist.py
 │   ├── pytorch_test.py
 │   ├── sgd_animation.py
@@ -108,7 +108,7 @@ and change the `torch` and `torchvision` version suffixes from `+cu130` to
 To download the lesson datasets:
 
 ```bash
-python tool_scripts/download_dataset_test.py
+python tool_scripts/download_dataset.py
 ```
 
 Every destination in this script derives from its `DATA_DIR` constant. Change

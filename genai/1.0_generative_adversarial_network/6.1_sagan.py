@@ -18,7 +18,7 @@ curves, fixed class samples, and full checkpoints are training conveniences
 and do not alter the adversarial updates.
 
 Data:
-    data/cifar10, prepared by tool_scripts/download_dataset_test.py.
+    data/cifar10, prepared by tool_scripts/download_dataset.py.
 
 Outputs:
     Fresh runs reset training/ and checkpoints/ before setup; --resume-from
@@ -194,7 +194,7 @@ def main(resume_from=None):
     if not (DATA_DIR / "cifar-10-batches-py").is_dir():
         raise FileNotFoundError(
             f"CIFAR-10 data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset_test.py first."
+            "Run tool_scripts/download_dataset.py first."
         )
 
     set_seed(SEED)

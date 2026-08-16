@@ -3,7 +3,7 @@
 The evaluation separates the mechanisms introduced across the three lessons:
     - all generators receive shared fixed z samples;
     - StyleGAN and StyleGAN2 vary stochastic noise while holding W fixed;
-    - their coarse and fine styles are mixed explicitly;
+    - their 4-32 structure styles and 64-128 detail styles are mixed;
     - their learned ``w_avg`` buffers drive truncation comparisons;
     - spherical Z interpolation is compared with linear W interpolation.
 
@@ -55,7 +55,9 @@ NUM_FIXED_SAMPLES = 8
 NUM_NOISE_VARIATIONS = 8
 NUM_STYLE_SOURCES = 4
 NUM_INTERPOLATION_STEPS = 9
-COARSE_MAX_RESOLUTION = 8
+FINAL_RESOLUTION = 128
+STRUCTURE_MAX_RESOLUTION = 32
+INFERENCE_BATCH_SIZE = 4
 TRUNCATION_PSIS = (1.0, 0.7, 0.5, 0.0)
 
 MODEL_SPECS = (
@@ -65,7 +67,7 @@ MODEL_SPECS = (
         ProGANGenerator,
         MODEL_OUT_DIRS["progan"] / "progan_generator.pth",
         "7.0_progan.py",
-        6,
+        7,
     ),
     (
         "stylegan",
@@ -73,7 +75,7 @@ MODEL_SPECS = (
         StyleGANGenerator,
         MODEL_OUT_DIRS["stylegan"] / "stylegan_generator.pth",
         "7.1_stylegan.py",
-        7,
+        8,
     ),
     (
         "stylegan2",
@@ -81,7 +83,7 @@ MODEL_SPECS = (
         StyleGenerator,
         MODEL_OUT_DIRS["stylegan2"] / "stylegan2_generator.pth",
         "7.2_stylegan2.py",
-        7,
+        8,
     ),
 )
 
@@ -115,6 +117,8 @@ def load_generator(
         "model_name": model_name,
         "format_version": expected_format_version,
         "conditioning": "unconditional",
+        "dataset": "celeba_aligned_train",
+        "final_resolution": FINAL_RESOLUTION,
         "weights": "ema",
     }
     for key, expected in expected_metadata.items():
@@ -141,13 +145,38 @@ def synthesize_styles(generator, model_name, ws, noise_mode):
     if model_name == "stylegan":
         return generator.synthesize(
             ws,
-            resolution=32,
+            resolution=FINAL_RESOLUTION,
             alpha=1.0,
             noise_mode=noise_mode,
         )
     if model_name == "stylegan2":
         return generator.synthesize(ws, noise_mode=noise_mode)
     raise ValueError(f"{model_name} does not expose style synthesis.")
+
+
+def generate_in_chunks(inputs, generate):
+    """Run 128x128 inference in bounded batches and collect images on CPU."""
+    if inputs.shape[0] == 0:
+        raise ValueError("chunked inference requires at least one input.")
+    return torch.cat(
+        [
+            generate(batch).cpu()
+            for batch in inputs.split(INFERENCE_BATCH_SIZE)
+        ]
+    )
+
+
+def synthesize_styles_in_chunks(generator, model_name, ws, noise_mode):
+    """Synthesize a W stack without exceeding the training microbatch."""
+    return generate_in_chunks(
+        ws,
+        lambda batch: synthesize_styles(
+            generator,
+            model_name,
+            batch,
+            noise_mode,
+        ),
+    )
 
 
 def spherical_interpolation(start, end, num_steps):
@@ -200,21 +229,30 @@ def spherical_interpolation(start, end, num_steps):
 def generate_fixed_samples(generators, fixed_z):
     """Generate deterministic final-resolution samples from one shared z."""
     return {
-        "progan": generators["progan"](
+        "progan": generate_in_chunks(
             fixed_z,
-            resolution=32,
-            alpha=1.0,
-        ).cpu(),
-        "stylegan": generators["stylegan"](
+            lambda batch: generators["progan"](
+                batch,
+                resolution=FINAL_RESOLUTION,
+                alpha=1.0,
+            ),
+        ),
+        "stylegan": generate_in_chunks(
             fixed_z,
-            resolution=32,
-            alpha=1.0,
-            noise_mode="fixed",
-        ).cpu(),
-        "stylegan2": generators["stylegan2"](
+            lambda batch: generators["stylegan"](
+                batch,
+                resolution=FINAL_RESOLUTION,
+                alpha=1.0,
+                noise_mode="fixed",
+            ),
+        ),
+        "stylegan2": generate_in_chunks(
             fixed_z,
-            noise_mode="fixed",
-        ).cpu(),
+            lambda batch: generators["stylegan2"](
+                batch,
+                noise_mode="fixed",
+            ),
+        ),
     }
 
 
@@ -227,12 +265,12 @@ def generate_noise_variations(generator, model_name, z):
         generator.num_ws,
         1,
     )
-    return synthesize_styles(
+    return synthesize_styles_in_chunks(
         generator,
         model_name,
         ws,
         noise_mode="random",
-    ).cpu()
+    )
 
 
 @torch.inference_mode()
@@ -242,20 +280,20 @@ def generate_style_mixing(generator, model_name, row_z, column_z):
     column_w = generator.mapping(column_z)
     row_ws = row_w[:, None, :].repeat(1, generator.num_ws, 1)
     column_ws = column_w[:, None, :].repeat(1, generator.num_ws, 1)
-    row_images = synthesize_styles(
+    row_images = synthesize_styles_in_chunks(
         generator,
         model_name,
         row_ws,
         noise_mode="fixed",
     )
-    column_images = synthesize_styles(
+    column_images = synthesize_styles_in_chunks(
         generator,
         model_name,
         column_ws,
         noise_mode="fixed",
     )
 
-    cutoff = generator.num_ws_for_resolution(COARSE_MAX_RESOLUTION)
+    cutoff = generator.num_ws_for_resolution(STRUCTURE_MAX_RESOLUTION)
     mixed_ws = torch.stack(
         [
             torch.cat(
@@ -271,7 +309,7 @@ def generate_style_mixing(generator, model_name, row_z, column_z):
             for column in range(NUM_STYLE_SOURCES)
         ]
     )
-    mixed_images = synthesize_styles(
+    mixed_images = synthesize_styles_in_chunks(
         generator,
         model_name,
         mixed_ws,
@@ -282,7 +320,7 @@ def generate_style_mixing(generator, model_name, row_z, column_z):
         NUM_STYLE_SOURCES,
         *mixed_images.shape[1:],
     )
-    return row_images.cpu(), column_images.cpu(), mixed_images.cpu()
+    return row_images, column_images, mixed_images
 
 
 @torch.inference_mode()
@@ -293,7 +331,7 @@ def generate_truncation_samples(generator, model_name, z):
         if model_name == "stylegan":
             sample = generator(
                 z,
-                resolution=32,
+                resolution=FINAL_RESOLUTION,
                 alpha=1.0,
                 truncation_psi=psi,
                 noise_mode="fixed",
@@ -320,24 +358,33 @@ def generate_interpolations(generators, start_z, end_z):
     )
     results = {
         "progan": [
-            generators["progan"](
+            generate_in_chunks(
                 z_path,
-                resolution=32,
-                alpha=1.0,
-            ).cpu()
+                lambda batch: generators["progan"](
+                    batch,
+                    resolution=FINAL_RESOLUTION,
+                    alpha=1.0,
+                ),
+            )
         ]
     }
     for model_name in ("stylegan", "stylegan2"):
         generator = generators[model_name]
         if model_name == "stylegan":
-            z_images = generator(
+            z_images = generate_in_chunks(
                 z_path,
-                resolution=32,
-                alpha=1.0,
-                noise_mode="fixed",
+                lambda batch: generator(
+                    batch,
+                    resolution=FINAL_RESOLUTION,
+                    alpha=1.0,
+                    noise_mode="fixed",
+                ),
             )
         else:
-            z_images = generator(z_path, noise_mode="fixed")
+            z_images = generate_in_chunks(
+                z_path,
+                lambda batch: generator(batch, noise_mode="fixed"),
+            )
 
         start_w = generator.mapping(start_z)
         end_w = generator.mapping(end_z)
@@ -350,13 +397,13 @@ def generate_interpolations(generators, start_z, end_z):
         )[:, None]
         w_path = torch.lerp(start_w, end_w, fractions)
         ws = w_path[:, None, :].repeat(1, generator.num_ws, 1)
-        w_images = synthesize_styles(
+        w_images = synthesize_styles_in_chunks(
             generator,
             model_name,
             ws,
             noise_mode="fixed",
         )
-        results[model_name] = [z_images.cpu(), w_images.cpu()]
+        results[model_name] = [z_images, w_images]
     return results
 
 
@@ -396,7 +443,7 @@ def save_noise_variations(noise_variations):
 
 
 def save_style_mixing(model_name, display_name, mixing_data):
-    """Save one source-labelled coarse/fine style-mixing matrix."""
+    """Save one source-labelled structure/detail style-mixing matrix."""
     row_images, column_images, mixed_images = mixing_data
     corner = torch.zeros_like(row_images[:1])
     image_rows = [torch.cat([corner, column_images], dim=0)]
@@ -406,16 +453,16 @@ def save_style_mixing(model_name, display_name, mixing_data):
     )
     save_image_row_grid(
         image_rows,
-        ["Fine sources"] + [
-            f"Coarse {index + 1}" for index in range(NUM_STYLE_SOURCES)
+        ["Detail sources"] + [
+            f"Structure {index + 1}" for index in range(NUM_STYLE_SOURCES)
         ],
         EVALUATION_DIRS[model_name] / f"{model_name}_style_mixing.png",
         title=(
-            f"{display_name}: 4-8 px styles from rows, "
-            "16-32 px styles from columns"
+            f"{display_name}: 4-32 px structure styles from rows, "
+            "64-128 px detail styles from columns"
         ),
-        column_labels=["Coarse source"] + [
-            f"Fine {index + 1}" for index in range(NUM_STYLE_SOURCES)
+        column_labels=["Structure source"] + [
+            f"Detail {index + 1}" for index in range(NUM_STYLE_SOURCES)
         ],
     )
 

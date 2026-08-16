@@ -1,5 +1,5 @@
 '''
-Download Dataset Test
+Download Datasets
 
 Downloads and prepares datasets used by the project examples under DATA_DIR.
 '''
