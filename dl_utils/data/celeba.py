@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
 from dl_utils.data.images import load_rgb_image
+from dl_utils.data.loading import make_device_aware_loader
 
 
 CELEBA_PARTITIONS = {"train": 0, "validation": 1, "test": 2}
@@ -110,13 +111,12 @@ def make_aligned_celeba_loader(
         split=split,
         transform=transform,
     )
-    return DataLoader(
+    return make_device_aware_loader(
         dataset,
-        batch_size=batch_size,
+        batch_size,
+        device,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=num_workers > 0,
         drop_last=drop_last,
     )
 

@@ -22,8 +22,8 @@ def update_ema(
     copy_buffers: bool = True,
 ) -> None:
     """Move target parameters toward source and optionally copy buffers."""
-    if not 0.0 <= decay <= 1.0:
-        raise ValueError("decay must be within [0, 1].")
+    if not 0.0 <= decay < 1.0:
+        raise ValueError("decay must be within [0, 1).")
     for target_parameter, source_parameter in zip(
         target.parameters(),
         source.parameters(),

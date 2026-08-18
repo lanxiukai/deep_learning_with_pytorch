@@ -49,10 +49,12 @@ from copy import deepcopy
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from tqdm import tqdm
 
+from dl_utils.data.cifar10 import (
+    make_cifar10_loader,
+    normalized_cifar10_transform,
+)
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
@@ -71,8 +73,11 @@ from dl_utils.gan.sn_gan import (
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
+from dl_utils.gan.update_schedule import UpdateRatioSchedule
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_training_samples
+from dl_utils.training.metrics import WeightedMetricAccumulator
+from dl_utils.training.optimization import update_ema
 from dl_utils.training.session import TrainingSession
 
 
@@ -115,33 +120,6 @@ DISCRIMINATOR_CONFIG = {
 }
 
 
-@torch.no_grad()
-def update_ema(averaged_generator, generator, decay=EMA_DECAY):
-    """Move BigGAN's sampling weights toward the online generator."""
-    if not 0 <= decay < 1:
-        raise ValueError("EMA decay must be in [0, 1).")
-
-    for averaged_parameter, parameter in zip(
-        averaged_generator.parameters(),
-        generator.parameters(),
-        strict=True,  # Require both generators to have matching parameter structures.
-    ):
-        # theta_ema is the sampling generator's parameter (averaged_parameter);
-        # theta is the online generator's parameter (parameter).
-        # Update: theta_ema <- decay * theta_ema + (1 - decay) * theta.
-        averaged_parameter.lerp_(parameter, 1 - decay)
-
-    for averaged_buffer, buffer in zip(
-        averaged_generator.buffers(),
-        generator.buffers(),
-        strict=True,
-    ):
-        # This compact implementation uses ordinary BN running statistics
-        # instead of the paper's cross-replica/standing-statistics pipeline.
-        # Synchronize buffers directly rather than averaging them.
-        averaged_buffer.copy_(buffer)
-
-
 def train_epoch(
     generator,
     discriminator,
@@ -152,14 +130,25 @@ def train_epoch(
     device,
     discriminator_steps,
     progress_bar=None,
+    update_schedule=None,
 ):
     """Train one epoch while preserving BigGAN's exact two-to-one phase."""
     if discriminator_steps < 0:
         raise ValueError("discriminator_steps must be non-negative.")
-    discriminator_loss_sum = torch.zeros((), device=device)
-    generator_loss_sums = torch.zeros(3, device=device)
-    discriminator_examples = 0
-    generator_examples = 0
+    if update_schedule is None:
+        update_schedule = UpdateRatioSchedule(
+            DISCRIMINATOR_UPDATES_PER_GENERATOR,
+            len(loader),
+            NUM_EPOCHS,
+        )
+    discriminator_metrics = WeightedMetricAccumulator(
+        ("loss",),
+        device=device,
+    )
+    generator_metrics = WeightedMetricAccumulator(
+        ("total", "adversarial", "regularization"),
+        device=device,
+    )
 
     for real, labels in loader:
         real = real.to(device, non_blocking=True)
@@ -176,12 +165,11 @@ def train_epoch(
         loss_d.backward()
         opt_d.step()
 
-        discriminator_loss_sum += loss_d.detach() * batch_size
-        discriminator_examples += batch_size
+        discriminator_metrics.update((loss_d,), weight=batch_size)
         discriminator_steps += 1
 
-        should_update_generator = (
-            discriminator_steps % DISCRIMINATOR_UPDATES_PER_GENERATOR == 0
+        should_update_generator = update_schedule.generator_due(
+            discriminator_steps
         )
         if should_update_generator:
             sampled_labels = torch.randint(
@@ -204,32 +192,34 @@ def train_epoch(
                 loss_g_total = loss_g_adversarial + loss_g_regularization
                 loss_g_total.backward()
                 opt_g.step()
-                update_ema(averaged_generator, generator)
+                # Parameters are interpolated while BatchNorm buffers are
+                # synchronized directly with the online generator.
+                update_ema(
+                    averaged_generator,
+                    generator,
+                    decay=EMA_DECAY,
+                )
             finally:
                 discriminator.requires_grad_(True)
 
-            generator_loss_sums += (
-                torch.stack(
-                    [
-                        loss_g_total,
-                        loss_g_adversarial,
-                        loss_g_regularization,
-                    ]
-                ).detach()
-                * batch_size
+            generator_metrics.update(
+                (
+                    loss_g_total,
+                    loss_g_adversarial,
+                    loss_g_regularization,
+                ),
+                weight=batch_size,
             )
-            generator_examples += batch_size
 
         if progress_bar is not None:
             progress_bar.update(1)
 
-    if generator_examples == 0:
-        raise RuntimeError("No generator update occurred in this epoch.")
-
-    generator_losses = (generator_loss_sums / generator_examples).tolist()
+    generator_losses = generator_metrics.compute()
     return (
-        (discriminator_loss_sum / discriminator_examples).item(),
-        *generator_losses,
+        discriminator_metrics.compute()["loss"],
+        generator_losses["total"],
+        generator_losses["adversarial"],
+        generator_losses["regularization"],
         discriminator_steps,
     )
 
@@ -247,26 +237,18 @@ def main(resume_from=None):
 
     set_seed(SEED)
     device = try_gpu()
-    dataset = datasets.CIFAR10(
+    loader = make_cifar10_loader(
         DATA_DIR,
+        BATCH_SIZE,
+        device,
         train=True,
-        download=False,
-        transform=transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5] * 3, [0.5] * 3),
-            ]
-        ),
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
+        transform=normalized_cifar10_transform(horizontal_flip=True),
         num_workers=NUM_WORKERS,
-        pin_memory=device.type == "cuda",
-        persistent_workers=NUM_WORKERS > 0,
-        drop_last=True,
+    )
+    update_schedule = UpdateRatioSchedule(
+        DISCRIMINATOR_UPDATES_PER_GENERATOR,
+        len(loader),
+        NUM_EPOCHS,
     )
 
     generator = CompactBigGANGenerator(**MODEL_CONFIG).to(device)
@@ -351,17 +333,13 @@ def main(resume_from=None):
     fixed_labels = state["fixed_labels"].to(device)
     discriminator_steps = state["discriminator_steps"]
 
-    planned_discriminator_updates = NUM_EPOCHS * len(loader)
-    planned_generator_updates, incomplete_update_cycle = divmod(
-        planned_discriminator_updates,
-        DISCRIMINATOR_UPDATES_PER_GENERATOR,
+    planned_discriminator_updates = (
+        update_schedule.total_discriminator_updates
     )
-    if incomplete_update_cycle:
-        raise RuntimeError(
-            "The configured epoch count does not end on an exact 2D:1G "
-            "update boundary."
-        )
-    expected_steps = (start_epoch - 1) * len(loader)
+    planned_generator_updates = update_schedule.total_generator_updates
+    expected_steps = update_schedule.completed_discriminator_updates(
+        start_epoch - 1
+    )
     if discriminator_steps != expected_steps:
         raise ValueError("Checkpoint discriminator step count is inconsistent.")
     if loss_history["epoch"] != list(range(1, start_epoch)):
@@ -412,6 +390,7 @@ def main(resume_from=None):
                 device,
                 discriminator_steps,
                 progress_bar=progress_bar,
+                update_schedule=update_schedule,
             )
             loss_history["epoch"].append(epoch)
             loss_history["discriminator"].append(loss_d)

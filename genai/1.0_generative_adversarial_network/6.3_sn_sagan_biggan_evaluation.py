@@ -23,8 +23,11 @@ Outputs:
 """
 
 import torch
-from torchvision import datasets, transforms
 
+from dl_utils.data.cifar10 import (
+    make_cifar10_dataset,
+    normalized_cifar10_transform,
+)
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
@@ -37,6 +40,7 @@ from dl_utils.gan.sagan import (
 from dl_utils.gan.sn_gan import (
     SNGenerator,
 )
+from dl_utils.gan.inference import generate_in_batches
 from dl_utils.plot.images import save_image_row_grid
 from dl_utils.training.checkpoints import load_model_weights
 
@@ -102,16 +106,10 @@ def load_cifar10_test_references():
             "Run tool_scripts/download_dataset.py first."
         )
 
-    dataset = datasets.CIFAR10(
+    dataset = make_cifar10_dataset(
         DATA_DIR,
         train=False,
-        download=False,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize([0.5] * 3, [0.5] * 3),
-            ]
-        ),
+        transform=normalized_cifar10_transform(horizontal_flip=False),
     )
     indices_by_class = [[] for _ in range(NUM_CLASSES)]
     for sample_index, class_index in enumerate(dataset.targets):
@@ -219,17 +217,27 @@ def save_real_vs_generated(
         generator=random_generator,
     ).to(device)
     if conditioning == "class_conditional":
-        generated_images = generator(
-            noise,
-            reference_labels.to(device),
-        ).float().cpu()
+        generated_images = generate_in_batches(
+            (noise, reference_labels.to(device)),
+            NUM_CLASSES,
+            lambda noise_batch, label_batch: generator(
+                noise_batch,
+                label_batch,
+            ).float(),
+            module=generator,
+        )
         generated_row_label = display_name
         column_labels = [
             name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
         ]
         title = f"{display_name}: CIFAR-10 test vs class-conditioned samples"
     else:
-        generated_images = generator(noise).float().cpu()
+        generated_images = generate_in_batches(
+            noise,
+            NUM_CLASSES,
+            lambda noise_batch: generator(noise_batch).float(),
+            module=generator,
+        )
         generated_row_label = f"{display_name} (unconditional)"
         column_labels = [
             f"Reference: {name.title()}"

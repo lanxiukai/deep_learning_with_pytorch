@@ -49,10 +49,12 @@ import argparse
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from tqdm import tqdm
 
+from dl_utils.data.cifar10 import (
+    make_cifar10_loader,
+    normalized_cifar10_transform,
+)
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
@@ -67,8 +69,10 @@ from dl_utils.gan.sn_gan import (
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
+from dl_utils.gan.update_schedule import UpdateRatioSchedule
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_training_samples
+from dl_utils.training.metrics import WeightedMetricAccumulator
 from dl_utils.training.session import TrainingSession
 
 
@@ -117,14 +121,25 @@ def train_epoch(
     device,
     discriminator_steps,
     progress_bar=None,
+    update_schedule=None,
 ):
     """Train one epoch while preserving SAGAN's global n_D-to-one phase."""
     if discriminator_steps < 0:
         raise ValueError("discriminator_steps must be non-negative.")
-    discriminator_loss_sum = torch.zeros((), device=device)
-    generator_loss_sum = torch.zeros((), device=device)
-    discriminator_examples = 0
-    generator_examples = 0
+    if update_schedule is None:
+        update_schedule = UpdateRatioSchedule(
+            DISCRIMINATOR_UPDATES_PER_GENERATOR,
+            len(loader),
+            NUM_EPOCHS,
+        )
+    discriminator_metrics = WeightedMetricAccumulator(
+        ("loss",),
+        device=device,
+    )
+    generator_metrics = WeightedMetricAccumulator(
+        ("loss",),
+        device=device,
+    )
 
     for real, labels in loader:
         real = real.to(device, non_blocking=True)
@@ -142,12 +157,11 @@ def train_epoch(
         loss_d.backward()
         opt_d.step()
 
-        discriminator_loss_sum += loss_d.detach() * batch_size
-        discriminator_examples += batch_size
+        discriminator_metrics.update((loss_d,), weight=batch_size)
         discriminator_steps += 1
 
-        should_update_generator = (
-            discriminator_steps % DISCRIMINATOR_UPDATES_PER_GENERATOR == 0
+        should_update_generator = update_schedule.generator_due(
+            discriminator_steps
         )
         if should_update_generator:
             # G receives the class signal through conditional BatchNorm and
@@ -170,18 +184,14 @@ def train_epoch(
             finally:
                 discriminator.requires_grad_(True)
 
-            generator_loss_sum += loss_g.detach() * batch_size
-            generator_examples += batch_size
+            generator_metrics.update((loss_g,), weight=batch_size)
 
         if progress_bar is not None:
             progress_bar.update(1)
 
-    if generator_examples == 0:
-        raise RuntimeError("No generator update occurred in this epoch.")
-
     return (
-        (discriminator_loss_sum / discriminator_examples).item(),
-        (generator_loss_sum / generator_examples).item(),
+        discriminator_metrics.compute()["loss"],
+        generator_metrics.compute()["loss"],
         discriminator_steps,
     )
 
@@ -199,26 +209,18 @@ def main(resume_from=None):
 
     set_seed(SEED)
     device = try_gpu()
-    dataset = datasets.CIFAR10(
+    loader = make_cifar10_loader(
         DATA_DIR,
+        BATCH_SIZE,
+        device,
         train=True,
-        download=False,
-        transform=transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5] * 3, [0.5] * 3),
-            ]
-        ),
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
+        transform=normalized_cifar10_transform(horizontal_flip=True),
         num_workers=NUM_WORKERS,
-        pin_memory=device.type == "cuda",
-        persistent_workers=NUM_WORKERS > 0,
-        drop_last=True,
+    )
+    update_schedule = UpdateRatioSchedule(
+        DISCRIMINATOR_UPDATES_PER_GENERATOR,
+        len(loader),
+        NUM_EPOCHS,
     )
 
     generator = SAGANGenerator(**MODEL_CONFIG).to(device)
@@ -284,24 +286,13 @@ def main(resume_from=None):
     fixed_labels = state["fixed_labels"].to(device)
     discriminator_steps = state["discriminator_steps"]
 
-    if DISCRIMINATOR_UPDATES_PER_GENERATOR < 1:
-        raise ValueError("DISCRIMINATOR_UPDATES_PER_GENERATOR must be positive.")
-    if DISCRIMINATOR_UPDATES_PER_GENERATOR > len(loader):
-        raise ValueError(
-            "DISCRIMINATOR_UPDATES_PER_GENERATOR must not exceed the "
-            "number of batches per epoch."
-        )
-    planned_discriminator_updates = NUM_EPOCHS * len(loader)
-    planned_generator_updates, incomplete_update_cycle = divmod(
-        planned_discriminator_updates,
-        DISCRIMINATOR_UPDATES_PER_GENERATOR,
+    planned_discriminator_updates = (
+        update_schedule.total_discriminator_updates
     )
-    if incomplete_update_cycle:
-        raise RuntimeError(
-            "The configured epoch count does not end on an exact "
-            f"{DISCRIMINATOR_UPDATES_PER_GENERATOR}D:1G update boundary."
-        )
-    expected_steps = (start_epoch - 1) * len(loader)
+    planned_generator_updates = update_schedule.total_generator_updates
+    expected_steps = update_schedule.completed_discriminator_updates(
+        start_epoch - 1
+    )
     if discriminator_steps != expected_steps:
         raise ValueError("Checkpoint discriminator step count is inconsistent.")
     if loss_history["epoch"] != list(range(1, start_epoch)):
@@ -345,6 +336,7 @@ def main(resume_from=None):
                 device,
                 discriminator_steps,
                 progress_bar=progress_bar,
+                update_schedule=update_schedule,
             )
             loss_history["epoch"].append(epoch)
             loss_history["discriminator"].append(loss_d)

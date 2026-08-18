@@ -11,6 +11,8 @@ import numpy as np
 import torch
 import torchvision
 
+from dl_utils.gan.inference import generate_in_batches
+
 
 def show_images(imgs, num_rows, num_cols, titles=None, scale=1.5, cmap=None):
     """Plot a list of images."""
@@ -174,6 +176,7 @@ def save_fixed_noise_samples(
     title: str = "Fixed-noise samples",
     epoch: int | None = None,
     dpi: int = 200,
+    inference_batch_size: int | None = None,
 ) -> None:
     """Generate and save a fixed-noise grid for an unconditional model."""
     if columns < 1:
@@ -183,12 +186,15 @@ def save_fixed_noise_samples(
     if len(noise) % columns != 0:
         raise ValueError("The number of noise samples must divide into rows.")
 
-    was_training = generator.training
-    generator.eval()
-    try:
-        samples = generator(noise).float().cpu()
-    finally:
-        generator.train(was_training)
+    sample_batch_size = (
+        len(noise) if inference_batch_size is None else inference_batch_size
+    )
+    samples = generate_in_batches(
+        noise,
+        sample_batch_size,
+        lambda batch: generator(batch).float(),
+        module=generator,
+    )
     if samples.ndim != 4 or len(samples) != len(noise):
         raise ValueError("generator must return an N x C x H x W tensor.")
 
@@ -220,16 +226,22 @@ def save_training_samples(
     title,
     dpi=200,
     shared_latents_across_classes=False,
+    inference_batch_size: int | None = None,
 ) -> None:
     """Generate and save fixed class-conditional samples grouped by class."""
     class_names = tuple(class_names)
-    was_training = generator.training
-    generator.eval()
-    try:
-        with torch.inference_mode():
-            samples = generator(noise, labels).float().cpu()
-    finally:
-        generator.train(was_training)
+    sample_batch_size = (
+        len(noise) if inference_batch_size is None else inference_batch_size
+    )
+    samples = generate_in_batches(
+        (noise, labels),
+        sample_batch_size,
+        lambda noise_batch, label_batch: generator(
+            noise_batch,
+            label_batch,
+        ).float(),
+        module=generator,
+    )
 
     cpu_labels = labels.cpu()
     image_rows = [

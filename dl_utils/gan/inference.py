@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 from torch import nn
@@ -10,16 +10,29 @@ from torch import nn
 
 @torch.inference_mode()
 def generate_in_batches(
-    inputs: torch.Tensor,
+    inputs: torch.Tensor | Sequence[torch.Tensor],
     batch_size: int,
-    generate: Callable[[torch.Tensor], torch.Tensor],
+    generate: Callable[..., torch.Tensor],
     *,
     module: nn.Module | None = None,
     output_device: str | torch.device = "cpu",
 ) -> torch.Tensor:
-    """Generate non-empty tensor inputs in bounded batches and concatenate."""
-    if inputs.ndim == 0 or inputs.shape[0] == 0:
+    """Generate aligned tensor inputs in bounded batches and concatenate."""
+    input_tensors = (
+        (inputs,) if isinstance(inputs, torch.Tensor) else tuple(inputs)
+    )
+    if not input_tensors:
+        raise ValueError("batched inference requires at least one input tensor.")
+    if any(not isinstance(value, torch.Tensor) for value in input_tensors):
+        raise TypeError("all batched inference inputs must be tensors.")
+    if input_tensors[0].ndim == 0 or input_tensors[0].shape[0] == 0:
         raise ValueError("batched inference requires at least one input.")
+    num_inputs = input_tensors[0].shape[0]
+    if any(
+        value.ndim == 0 or value.shape[0] != num_inputs
+        for value in input_tensors[1:]
+    ):
+        raise ValueError("batched inference inputs must have equal lengths.")
     if batch_size < 1:
         raise ValueError("batch_size must be positive.")
 
@@ -28,8 +41,9 @@ def generate_in_batches(
         module.eval()
     try:
         outputs = []
-        for batch in inputs.split(batch_size):
-            generated = generate(batch)
+        split_inputs = [value.split(batch_size) for value in input_tensors]
+        for batches in zip(*split_inputs, strict=True):
+            generated = generate(*batches)
             if not isinstance(generated, torch.Tensor):
                 raise TypeError("generate must return a tensor.")
             outputs.append(generated.to(output_device))
