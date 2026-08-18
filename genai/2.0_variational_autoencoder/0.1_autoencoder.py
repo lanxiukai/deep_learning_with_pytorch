@@ -10,7 +10,7 @@ from torch import nn
 from dl_utils.plot.figures import Animator
 from dl_utils.plot._backend import pyplot as plt
 from dl_utils.data.vision import vision_loaders
-from dl_utils.runtime.devices import get_device
+from dl_utils.runtime.devices import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.plot.images import show_images
@@ -78,7 +78,7 @@ def main():
     out_dir = project_root / "output" / "ae_mnist"
     reset_dir(str(out_dir))
 
-    device = get_device()
+    device = try_gpu()
     input_dim = 784
     z_dim = 20   # dimension of latent variable of encoder
     h_dim = 200  # dimension of hidden layer of encoder/decoder
