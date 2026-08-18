@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from os import PathLike
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,7 @@ __all__ = [
     "CHECKPOINT_FORMAT_VERSION",
     "atomic_torch_save",
     "capture_rng_state",
+    "load_model_weights",
     "load_training_checkpoint",
     "make_training_checkpoint",
     "restore_rng_state",
@@ -280,3 +281,53 @@ def save_model_weights(
         raise ValueError("metadata must not define the reserved 'state_dict'.")
     payload["state_dict"] = model.state_dict()
     return atomic_torch_save(payload, path)
+
+
+def load_model_weights(
+    path: str | PathLike[str],
+    model_class: type[nn.Module],
+    *,
+    device: str | torch.device,
+    expected_metadata: Mapping[str, Any] | None = None,
+    config_transform: (
+        Callable[[dict[str, Any]], Mapping[str, Any]] | None
+    ) = None,
+    strict: bool = True,
+) -> tuple[nn.Module, dict[str, Any]]:
+    """Load and validate one metadata-rich model weight checkpoint."""
+    checkpoint_path = Path(path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Model checkpoint not found: {checkpoint_path}.")
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=True,
+    )
+    if not isinstance(checkpoint, Mapping):
+        raise ValueError("Model checkpoint must contain a mapping.")
+
+    for name, expected in (expected_metadata or {}).items():
+        if checkpoint.get(name) != expected:
+            raise ValueError(
+                f"Model checkpoint metadata mismatch for {name!r}: "
+                f"expected {expected!r}, found {checkpoint.get(name)!r}."
+            )
+
+    saved_config = checkpoint.get("model_config")
+    state_dict = checkpoint.get("state_dict")
+    if not isinstance(saved_config, Mapping):
+        raise ValueError("Model checkpoint model_config must be a mapping.")
+    if not isinstance(state_dict, Mapping):
+        raise ValueError("Model checkpoint state_dict must be a mapping.")
+
+    model_config = dict(saved_config)
+    constructor_config = (
+        config_transform(dict(model_config))
+        if config_transform is not None
+        else model_config
+    )
+    if not isinstance(constructor_config, Mapping):
+        raise TypeError("config_transform must return a mapping.")
+    model = model_class(**dict(constructor_config)).to(device)
+    model.load_state_dict(state_dict, strict=strict)
+    return model.eval(), model_config

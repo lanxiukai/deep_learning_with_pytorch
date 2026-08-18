@@ -15,6 +15,43 @@ NumericScalar: TypeAlias = int | float
 MetricHistory: TypeAlias = Mapping[str, Sequence[NumericScalar]]
 
 
+class WeightedMetricAccumulator:
+    """Accumulate named scalar tensors with example-count weighting."""
+
+    def __init__(self, names: Sequence[str], *, device: torch.device):
+        self.names = tuple(names)
+        if not self.names or len(set(self.names)) != len(self.names):
+            raise ValueError("metric names must be non-empty and unique.")
+        if any(not isinstance(name, str) or not name for name in self.names):
+            raise ValueError("metric names must be non-empty strings.")
+        self._totals = torch.zeros(len(self.names), device=device)
+        self._total_weight = 0
+
+    def update(
+        self,
+        values: Sequence[torch.Tensor],
+        *,
+        weight: int,
+    ) -> None:
+        """Add one ordered collection of scalar metric tensors."""
+        if weight < 1:
+            raise ValueError("weight must be positive.")
+        if len(values) != len(self.names):
+            raise ValueError("metric values do not match configured names.")
+        if any(value.ndim != 0 for value in values):
+            raise ValueError("metric values must be scalar tensors.")
+        stacked = torch.stack(tuple(values)).detach().to(self._totals)
+        self._totals += stacked * weight
+        self._total_weight += weight
+
+    def compute(self) -> dict[str, float]:
+        """Return weighted means for all configured metrics."""
+        if self._total_weight == 0:
+            raise RuntimeError("cannot compute metrics before an update.")
+        means = (self._totals / self._total_weight).tolist()
+        return dict(zip(self.names, means, strict=True))
+
+
 class Accumulator:
     """
     Accumulate sum over n variables (for multiple metrics).

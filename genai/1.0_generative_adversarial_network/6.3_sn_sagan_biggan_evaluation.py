@@ -38,6 +38,7 @@ from dl_utils.gan.sn_gan import (
     SNGenerator,
 )
 from dl_utils.plot.images import save_image_row_grid
+from dl_utils.training.checkpoints import load_model_weights
 
 
 PROJECT_ROOT = infer_project_root()
@@ -154,16 +155,6 @@ def load_generator(
             f"Run {script_name} first."
         )
 
-    checkpoint = torch.load(
-        checkpoint_path,
-        map_location=device,
-        weights_only=True,
-    )
-    if not isinstance(checkpoint, dict):
-        raise ValueError(
-            f"Expected a metadata-rich checkpoint: {checkpoint_path}."
-        )
-
     expected_metadata = {
         "model_name": model_name,
         "format_version": expected_format_version,
@@ -171,38 +162,36 @@ def load_generator(
     }
     if expected_weights is not None:
         expected_metadata["weights"] = expected_weights
-    for key, expected in expected_metadata.items():
-        if checkpoint.get(key) != expected:
-            raise ValueError(
-                f"{checkpoint_path} has {key}={checkpoint.get(key)!r}; "
-                f"expected {expected!r}. Retrain it with {script_name}."
-            )
 
-    model_config = checkpoint.get("model_config")
-    state_dict = checkpoint.get("state_dict")
-    if not isinstance(model_config, dict) or not isinstance(state_dict, dict):
-        raise ValueError(
-            f"Checkpoint metadata is incomplete: {checkpoint_path}."
-        )
-    checkpoint_image_size = model_config.get("image_size", 32)
-    if checkpoint_image_size != 32:
-        raise ValueError(
-            "Expected a 32x32 checkpoint at "
-            f"{checkpoint_path}."
-        )
-    if expected_conditioning == "class_conditional":
-        if model_config.get("num_classes") != NUM_CLASSES:
+    def prepare_constructor_config(model_config):
+        checkpoint_image_size = model_config.get("image_size", 32)
+        if checkpoint_image_size != 32:
+            raise ValueError(
+                f"Expected a 32x32 checkpoint at {checkpoint_path}."
+            )
+        if (
+            expected_conditioning == "class_conditional"
+            and model_config.get("num_classes") != NUM_CLASSES
+        ):
             raise ValueError(
                 f"Expected {NUM_CLASSES} classes at {checkpoint_path}."
             )
+        return {
+            key: value
+            for key, value in model_config.items()
+            if key != "image_size"
+        }
 
-    # All lesson generators are fixed at 32x32; discard legacy metadata.
-    constructor_config = {
-        key: value for key, value in model_config.items() if key != "image_size"
-    }
-    generator = model_class(**constructor_config).to(device)
-    generator.load_state_dict(state_dict, strict=True)
-    return generator.eval(), model_config
+    try:
+        return load_model_weights(
+            checkpoint_path,
+            model_class,
+            device=device,
+            expected_metadata=expected_metadata,
+            config_transform=prepare_constructor_config,
+        )
+    except ValueError as error:
+        raise ValueError(f"{error} Retrain it with {script_name}.") from error
 
 
 @torch.inference_mode()

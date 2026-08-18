@@ -27,8 +27,11 @@ Outputs:
     output/{progan,stylegan,stylegan2}/evaluation/latent_interpolation.png
 """
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.runtime.randomness import set_seed
@@ -37,7 +40,9 @@ from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.progan import ProGANGenerator
 from dl_utils.gan.stylegan import StyleGANGenerator
 from dl_utils.gan.stylegan2 import StyleGenerator
+from dl_utils.gan.inference import generate_in_batches
 from dl_utils.plot.images import save_image_row_grid
+from dl_utils.training.checkpoints import load_model_weights
 
 
 PROJECT_ROOT = infer_project_root()
@@ -88,6 +93,60 @@ MODEL_SPECS = (
 )
 
 
+@dataclass(frozen=True)
+class GeneratorAdapter:
+    """Present the three lesson generators through one evaluation API."""
+
+    model_name: str
+    generator: nn.Module
+
+    @property
+    def num_ws(self):
+        return self.generator.num_ws
+
+    def mapping(self, z):
+        return self.generator.mapping(z)
+
+    def num_ws_for_resolution(self, resolution):
+        return self.generator.num_ws_for_resolution(resolution)
+
+    def generate(self, z, *, noise_mode="fixed", truncation_psi=None):
+        if self.model_name == "progan":
+            if truncation_psi is not None:
+                raise ValueError("ProGAN does not support truncation.")
+            return self.generator(
+                z,
+                resolution=FINAL_RESOLUTION,
+                alpha=1.0,
+            )
+
+        kwargs = {"noise_mode": noise_mode}
+        if truncation_psi is not None:
+            kwargs["truncation_psi"] = truncation_psi
+        if self.model_name == "stylegan":
+            return self.generator(
+                z,
+                resolution=FINAL_RESOLUTION,
+                alpha=1.0,
+                **kwargs,
+            )
+        if self.model_name == "stylegan2":
+            return self.generator(z, **kwargs)
+        raise ValueError(f"Unknown generator family: {self.model_name}.")
+
+    def synthesize(self, ws, *, noise_mode):
+        if self.model_name == "stylegan":
+            return self.generator.synthesize(
+                ws,
+                resolution=FINAL_RESOLUTION,
+                alpha=1.0,
+                noise_mode=noise_mode,
+            )
+        if self.model_name == "stylegan2":
+            return self.generator.synthesize(ws, noise_mode=noise_mode)
+        raise ValueError(f"{self.model_name} does not expose style synthesis.")
+
+
 def load_generator(
     model_name,
     model_class,
@@ -103,16 +162,6 @@ def load_generator(
             f"Run {script_name} first."
         )
 
-    checkpoint = torch.load(
-        checkpoint_path,
-        map_location=device,
-        weights_only=True,
-    )
-    if not isinstance(checkpoint, dict):
-        raise ValueError(
-            f"Expected a metadata-rich checkpoint: {checkpoint_path}."
-        )
-
     expected_metadata = {
         "model_name": model_name,
         "format_version": expected_format_version,
@@ -121,61 +170,24 @@ def load_generator(
         "final_resolution": FINAL_RESOLUTION,
         "weights": "ema",
     }
-    for key, expected in expected_metadata.items():
-        if checkpoint.get(key) != expected:
-            raise ValueError(
-                f"{checkpoint_path} has {key}={checkpoint.get(key)!r}; "
-                f"expected {expected!r}. Retrain it with {script_name}."
-            )
-
-    model_config = checkpoint.get("model_config")
-    state_dict = checkpoint.get("state_dict")
-    if not isinstance(model_config, dict) or not isinstance(state_dict, dict):
-        raise ValueError(
-            f"Checkpoint metadata is incomplete: {checkpoint_path}."
+    try:
+        return load_model_weights(
+            checkpoint_path,
+            model_class,
+            device=device,
+            expected_metadata=expected_metadata,
         )
-
-    generator = model_class(**model_config).to(device)
-    generator.load_state_dict(state_dict, strict=True)
-    return generator.eval(), model_config
+    except ValueError as error:
+        raise ValueError(f"{error} Retrain it with {script_name}.") from error
 
 
-def synthesize_styles(generator, model_name, ws, noise_mode):
-    """Call the generation-specific synthesis signature explicitly."""
-    if model_name == "stylegan":
-        return generator.synthesize(
-            ws,
-            resolution=FINAL_RESOLUTION,
-            alpha=1.0,
-            noise_mode=noise_mode,
-        )
-    if model_name == "stylegan2":
-        return generator.synthesize(ws, noise_mode=noise_mode)
-    raise ValueError(f"{model_name} does not expose style synthesis.")
-
-
-def generate_in_chunks(inputs, generate):
-    """Run 128x128 inference in bounded batches and collect images on CPU."""
-    if inputs.shape[0] == 0:
-        raise ValueError("chunked inference requires at least one input.")
-    return torch.cat(
-        [
-            generate(batch).cpu()
-            for batch in inputs.split(INFERENCE_BATCH_SIZE)
-        ]
-    )
-
-
-def synthesize_styles_in_chunks(generator, model_name, ws, noise_mode):
+def synthesize_styles_in_chunks(adapter, ws, noise_mode):
     """Synthesize a W stack without exceeding the training microbatch."""
-    return generate_in_chunks(
+    return generate_in_batches(
         ws,
-        lambda batch: synthesize_styles(
-            generator,
-            model_name,
-            batch,
-            noise_mode,
-        ),
+        INFERENCE_BATCH_SIZE,
+        lambda batch: adapter.synthesize(batch, noise_mode=noise_mode),
+        module=adapter.generator,
     )
 
 
@@ -226,81 +238,61 @@ def spherical_interpolation(start, end, num_steps):
 
 
 @torch.inference_mode()
-def generate_fixed_samples(generators, fixed_z):
+def generate_fixed_samples(adapters, fixed_z):
     """Generate deterministic final-resolution samples from one shared z."""
     return {
-        "progan": generate_in_chunks(
+        model_name: generate_in_batches(
             fixed_z,
-            lambda batch: generators["progan"](
-                batch,
-                resolution=FINAL_RESOLUTION,
-                alpha=1.0,
-            ),
-        ),
-        "stylegan": generate_in_chunks(
-            fixed_z,
-            lambda batch: generators["stylegan"](
-                batch,
-                resolution=FINAL_RESOLUTION,
-                alpha=1.0,
-                noise_mode="fixed",
-            ),
-        ),
-        "stylegan2": generate_in_chunks(
-            fixed_z,
-            lambda batch: generators["stylegan2"](
-                batch,
-                noise_mode="fixed",
-            ),
-        ),
+            INFERENCE_BATCH_SIZE,
+            lambda batch, adapter=adapter: adapter.generate(batch),
+            module=adapter.generator,
+        )
+        for model_name, adapter in adapters.items()
     }
 
 
 @torch.inference_mode()
-def generate_noise_variations(generator, model_name, z):
+def generate_noise_variations(adapter, z):
     """Hold one W fixed while drawing independent per-layer noise."""
-    w = generator.mapping(z)
+    w = adapter.mapping(z)
     ws = w[:, None, :].repeat(
         NUM_NOISE_VARIATIONS,
-        generator.num_ws,
+        adapter.num_ws,
         1,
     )
     return synthesize_styles_in_chunks(
-        generator,
-        model_name,
+        adapter,
         ws,
         noise_mode="random",
     )
 
 
 @torch.inference_mode()
-def generate_style_mixing(generator, model_name, row_z, column_z):
+def generate_style_mixing(adapter, row_z, column_z):
     """Combine low-resolution row styles with high-resolution column styles."""
-    row_w = generator.mapping(row_z)
-    column_w = generator.mapping(column_z)
-    row_ws = row_w[:, None, :].repeat(1, generator.num_ws, 1)
-    column_ws = column_w[:, None, :].repeat(1, generator.num_ws, 1)
+    row_w = adapter.mapping(row_z)
+    column_w = adapter.mapping(column_z)
+    row_ws = row_w[:, None, :].repeat(1, adapter.num_ws, 1)
+    column_ws = column_w[:, None, :].repeat(1, adapter.num_ws, 1)
     row_images = synthesize_styles_in_chunks(
-        generator,
-        model_name,
+        adapter,
         row_ws,
         noise_mode="fixed",
     )
     column_images = synthesize_styles_in_chunks(
-        generator,
-        model_name,
+        adapter,
         column_ws,
         noise_mode="fixed",
     )
 
-    cutoff = generator.num_ws_for_resolution(STRUCTURE_MAX_RESOLUTION)
+    cutoff = adapter.num_ws_for_resolution(STRUCTURE_MAX_RESOLUTION)
     mixed_ws = torch.stack(
         [
             torch.cat(
                 [
                     row_w[row].repeat(cutoff, 1),
                     column_w[column].repeat(
-                        generator.num_ws - cutoff,
+                        adapter.num_ws - cutoff,
                         1,
                     ),
                 ]
@@ -310,8 +302,7 @@ def generate_style_mixing(generator, model_name, row_z, column_z):
         ]
     )
     mixed_images = synthesize_styles_in_chunks(
-        generator,
-        model_name,
+        adapter,
         mixed_ws,
         noise_mode="fixed",
     )
@@ -324,32 +315,17 @@ def generate_style_mixing(generator, model_name, row_z, column_z):
 
 
 @torch.inference_mode()
-def generate_truncation_samples(generator, model_name, z):
+def generate_truncation_samples(adapter, z):
     """Generate one fixed latent at each requested truncation psi."""
-    samples = []
-    for psi in TRUNCATION_PSIS:
-        if model_name == "stylegan":
-            sample = generator(
-                z,
-                resolution=FINAL_RESOLUTION,
-                alpha=1.0,
-                truncation_psi=psi,
-                noise_mode="fixed",
-            )
-        elif model_name == "stylegan2":
-            sample = generator(
-                z,
-                truncation_psi=psi,
-                noise_mode="fixed",
-            )
-        else:
-            raise ValueError(f"{model_name} does not support truncation.")
-        samples.append(sample[0].cpu())
+    samples = [
+        adapter.generate(z, truncation_psi=psi)[0].cpu()
+        for psi in TRUNCATION_PSIS
+    ]
     return torch.stack(samples)
 
 
 @torch.inference_mode()
-def generate_interpolations(generators, start_z, end_z):
+def generate_interpolations(adapters, start_z, end_z):
     """Expose each style model's intermediate W path beside its Z path."""
     z_path = spherical_interpolation(
         start_z,
@@ -358,36 +334,25 @@ def generate_interpolations(generators, start_z, end_z):
     )
     results = {
         "progan": [
-            generate_in_chunks(
+            generate_in_batches(
                 z_path,
-                lambda batch: generators["progan"](
-                    batch,
-                    resolution=FINAL_RESOLUTION,
-                    alpha=1.0,
-                ),
+                INFERENCE_BATCH_SIZE,
+                adapters["progan"].generate,
+                module=adapters["progan"].generator,
             )
         ]
     }
     for model_name in ("stylegan", "stylegan2"):
-        generator = generators[model_name]
-        if model_name == "stylegan":
-            z_images = generate_in_chunks(
-                z_path,
-                lambda batch: generator(
-                    batch,
-                    resolution=FINAL_RESOLUTION,
-                    alpha=1.0,
-                    noise_mode="fixed",
-                ),
-            )
-        else:
-            z_images = generate_in_chunks(
-                z_path,
-                lambda batch: generator(batch, noise_mode="fixed"),
-            )
+        adapter = adapters[model_name]
+        z_images = generate_in_batches(
+            z_path,
+            INFERENCE_BATCH_SIZE,
+            adapter.generate,
+            module=adapter.generator,
+        )
 
-        start_w = generator.mapping(start_z)
-        end_w = generator.mapping(end_z)
+        start_w = adapter.mapping(start_z)
+        end_w = adapter.mapping(end_z)
         fractions = torch.linspace(
             0,
             1,
@@ -396,10 +361,9 @@ def generate_interpolations(generators, start_z, end_z):
             dtype=start_z.dtype,
         )[:, None]
         w_path = torch.lerp(start_w, end_w, fractions)
-        ws = w_path[:, None, :].repeat(1, generator.num_ws, 1)
+        ws = w_path[:, None, :].repeat(1, adapter.num_ws, 1)
         w_images = synthesize_styles_in_chunks(
-            generator,
-            model_name,
+            adapter,
             ws,
             noise_mode="fixed",
         )
@@ -407,39 +371,59 @@ def generate_interpolations(generators, start_z, end_z):
     return results
 
 
+def save_shared_comparison(
+    destination_names,
+    filename,
+    image_rows,
+    row_labels,
+    *,
+    title,
+    column_labels,
+):
+    """Save one shared comparison under every participating model."""
+    for model_name in destination_names:
+        save_image_row_grid(
+            image_rows,
+            row_labels,
+            EVALUATION_DIRS[model_name] / filename,
+            title=title,
+            column_labels=column_labels,
+        )
+
+
 def save_fixed_samples(fixed_samples):
     """Save the shared-z comparison for all three generator families."""
     names = ("progan", "stylegan", "stylegan2")
-    for model_name in names:
-        save_image_row_grid(
-            [fixed_samples[name] for name in names],
-            ["ProGAN EMA", "StyleGAN EMA", "StyleGAN2 EMA"],
-            EVALUATION_DIRS[model_name] / "fixed_samples.png",
-            title=(
-                "Shared-z samples from independently trained generators "
-                "(no semantic alignment implied)"
-            ),
-            column_labels=[
-                f"Shared z {index + 1}" for index in range(NUM_FIXED_SAMPLES)
-            ],
-        )
+    save_shared_comparison(
+        names,
+        "fixed_samples.png",
+        [fixed_samples[name] for name in names],
+        ["ProGAN EMA", "StyleGAN EMA", "StyleGAN2 EMA"],
+        title=(
+            "Shared-z samples from independently trained generators "
+            "(no semantic alignment implied)"
+        ),
+        column_labels=[
+            f"Shared z {index + 1}" for index in range(NUM_FIXED_SAMPLES)
+        ],
+    )
 
 
 def save_noise_variations(noise_variations):
     """Save stochastic-noise rows while W remains unchanged."""
-    for model_name in ("stylegan", "stylegan2"):
-        save_image_row_grid(
-            [
-                noise_variations["stylegan"],
-                noise_variations["stylegan2"],
-            ],
-            ["StyleGAN EMA", "StyleGAN2 EMA"],
-            EVALUATION_DIRS[model_name] / "noise_variations.png",
-            title="One fixed W with independent stochastic layer noise",
-            column_labels=[
-                f"Noise {index + 1}" for index in range(NUM_NOISE_VARIATIONS)
-            ],
-        )
+    save_shared_comparison(
+        ("stylegan", "stylegan2"),
+        "noise_variations.png",
+        [
+            noise_variations["stylegan"],
+            noise_variations["stylegan2"],
+        ],
+        ["StyleGAN EMA", "StyleGAN2 EMA"],
+        title="One fixed W with independent stochastic layer noise",
+        column_labels=[
+            f"Noise {index + 1}" for index in range(NUM_NOISE_VARIATIONS)
+        ],
+    )
 
 
 def save_style_mixing(model_name, display_name, mixing_data):
@@ -469,17 +453,17 @@ def save_style_mixing(model_name, display_name, mixing_data):
 
 def save_truncation(truncation_samples):
     """Save learned-W-center interpolation for both style generators."""
-    for model_name in ("stylegan", "stylegan2"):
-        save_image_row_grid(
-            [
-                truncation_samples["stylegan"],
-                truncation_samples["stylegan2"],
-            ],
-            ["StyleGAN EMA", "StyleGAN2 EMA"],
-            EVALUATION_DIRS[model_name] / "truncation.png",
-            title="One fixed z interpolated toward each model's learned w_avg",
-            column_labels=[f"psi={psi:.1f}" for psi in TRUNCATION_PSIS],
-        )
+    save_shared_comparison(
+        ("stylegan", "stylegan2"),
+        "truncation.png",
+        [
+            truncation_samples["stylegan"],
+            truncation_samples["stylegan2"],
+        ],
+        ["StyleGAN EMA", "StyleGAN2 EMA"],
+        title="One fixed z interpolated toward each model's learned w_avg",
+        column_labels=[f"psi={psi:.1f}" for psi in TRUNCATION_PSIS],
+    )
 
 
 def save_interpolations(interpolations):
@@ -510,7 +494,7 @@ def main():
     set_seed(SEED)
     device = try_gpu()
 
-    generators = {}
+    adapters = {}
     configurations = {}
     for (
         model_name,
@@ -528,7 +512,7 @@ def main():
             format_version,
             device,
         )
-        generators[model_name] = generator
+        adapters[model_name] = GeneratorAdapter(model_name, generator)
         configurations[model_name] = model_config
 
     latent_dimensions = {
@@ -542,14 +526,13 @@ def main():
 
     torch.manual_seed(SEED)
     fixed_z = torch.randn(NUM_FIXED_SAMPLES, z_dim, device=device)
-    fixed_samples = generate_fixed_samples(generators, fixed_z)
+    fixed_samples = generate_fixed_samples(adapters, fixed_z)
 
     torch.manual_seed(SEED + 1)
     noise_z = torch.randn(1, z_dim, device=device)
     noise_variations = {
         model_name: generate_noise_variations(
-            generators[model_name],
-            model_name,
+            adapters[model_name],
             noise_z,
         )
         for model_name in ("stylegan", "stylegan2")
@@ -560,8 +543,7 @@ def main():
     column_z = torch.randn(NUM_STYLE_SOURCES, z_dim, device=device)
     style_mixing = {
         model_name: generate_style_mixing(
-            generators[model_name],
-            model_name,
+            adapters[model_name],
             row_z,
             column_z,
         )
@@ -572,8 +554,7 @@ def main():
     truncation_z = torch.randn(1, z_dim, device=device)
     truncation_samples = {
         model_name: generate_truncation_samples(
-            generators[model_name],
-            model_name,
+            adapters[model_name],
             truncation_z,
         )
         for model_name in ("stylegan", "stylegan2")
@@ -582,7 +563,7 @@ def main():
     torch.manual_seed(SEED + 4)
     interpolation_endpoints = torch.randn(2, z_dim, device=device)
     interpolations = generate_interpolations(
-        generators,
+        adapters,
         interpolation_endpoints[:1],
         interpolation_endpoints[1:],
     )

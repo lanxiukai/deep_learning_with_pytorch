@@ -45,22 +45,15 @@ Trainable total:          8.81 M params
 """
 
 import argparse
-import math
-import random
 from copy import deepcopy
 from itertools import islice
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torchvision import transforms
 from tqdm import tqdm
 
-from dl_utils.data.celeba import (
-    CELEBA_ALIGNED_CROP_SIZE,
-    CelebAAlignedDataset,
-)
+from dl_utils.data.celeba import make_aligned_celeba_loader
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
@@ -68,10 +61,18 @@ from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.stylegan2 import (
     StyleDiscriminator,
     StyleGenerator,
-    denormalize,
+)
+from dl_utils.gan.inference import generate_in_batches
+from dl_utils.gan.stylegan_common import denormalize
+from dl_utils.gan.stylegan_training import (
+    path_length_penalty,
+    r1_penalty,
+    sample_mixing_latents,
 )
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_grid
+from dl_utils.training.metrics import WeightedMetricAccumulator
+from dl_utils.training.optimization import update_ema_by_images
 from dl_utils.training.session import TrainingSession
 
 
@@ -153,70 +154,6 @@ def completed_batches(num_ticks):
     )
 
 
-def sample_mixing_latents(batch_size, z_dim, device):
-    """Usually return two z batches so adjacent styles cannot co-adapt."""
-    z = torch.randn(batch_size, z_dim, device=device)
-    mixing_z = (
-        torch.randn_like(z)
-        if random.random() < STYLE_MIXING_PROBABILITY
-        else None
-    )
-    return z, mixing_z
-
-
-def r1_penalty(real_scores, real_images):
-    """Measure squared discriminator gradients at real images."""
-    gradients = torch.autograd.grad(
-        real_scores.sum(),
-        real_images,
-        create_graph=True,
-    )[0]
-    return gradients.square().flatten(1).sum(dim=1).mean()
-
-
-def path_length_penalty(images, ws, running_mean, decay=0.01):
-    """Regularize image-space change per unit movement in W."""
-    noise = torch.randn_like(images) / math.sqrt(
-        images.shape[2] * images.shape[3]
-    )
-    gradients = torch.autograd.grad(
-        (images * noise).sum(),
-        ws,
-        create_graph=True,
-    )[0]
-    lengths = torch.sqrt(
-        gradients.square().sum(dim=2).mean(dim=1) + 1e-8
-    )
-    updated_mean = running_mean.lerp(lengths.mean().detach(), decay)
-    return (lengths - updated_mean).square().mean(), updated_mean
-
-
-def ema_decay(batch_size):
-    """Convert an image-count half-life into this update's EMA decay."""
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive.")
-    half_life_images = EMA_HALF_LIFE_KIMG * 1_000
-    return 0.5 ** (batch_size / half_life_images)
-
-
-@torch.no_grad()
-def update_ema(averaged_generator, generator, batch_size):
-    """Move StyleGAN2's sampling weights toward G after one image batch."""
-    decay = ema_decay(batch_size)
-    for averaged_parameter, parameter in zip(
-        averaged_generator.parameters(),
-        generator.parameters(),
-        strict=True,
-    ):
-        averaged_parameter.lerp_(parameter, 1 - decay)
-    for averaged_buffer, buffer in zip(
-        averaged_generator.buffers(),
-        generator.buffers(),
-        strict=True,
-    ):
-        averaged_buffer.copy_(buffer)
-
-
 def train_tick(
     generator,
     discriminator,
@@ -233,8 +170,7 @@ def train_tick(
     """Train one nominal 50-kimg tick with separate regularization passes."""
     if len(loader) < num_batches:
         raise ValueError("loader is shorter than one training tick.")
-    metric_sums = torch.zeros(len(METRIC_NAMES), device=device)
-    num_examples = 0
+    metrics = WeightedMetricAccumulator(METRIC_NAMES, device=device)
 
     for real, _ in islice(loader, num_batches):
         real = real.to(device, non_blocking=True)
@@ -245,6 +181,7 @@ def train_tick(
             batch_size,
             generator.z_dim,
             device,
+            STYLE_MIXING_PROBABILITY,
         )
         with torch.no_grad():
             fake = generator(z, mixing_z=mixing_z)
@@ -278,6 +215,7 @@ def train_tick(
                 batch_size,
                 generator.z_dim,
                 device,
+                STYLE_MIXING_PROBABILITY,
             )
             fake = generator(
                 z,
@@ -310,54 +248,42 @@ def train_tick(
                 weighted_path.backward()
                 optimizer_g.step()
             loss_g = loss_g_main.detach() + weighted_path.detach()
-            update_ema(averaged_generator, generator, batch_size)
+            update_ema_by_images(
+                averaged_generator,
+                generator,
+                batch_size,
+                EMA_HALF_LIFE_KIMG,
+            )
         finally:
             discriminator.requires_grad_(True)
 
-        metrics = torch.stack(
-            [
+        metrics.update(
+            (
                 loss_d,
                 loss_d_main.detach(),
                 loss_g,
                 loss_g_main.detach(),
                 weighted_r1.detach(),
                 weighted_path.detach(),
-            ]
+            ),
+            weight=batch_size,
         )
-        metric_sums += metrics * batch_size
-        num_examples += batch_size
         global_step += 1
 
         if progress_bar is not None:
             progress_bar.update(1)
 
-    tick_metrics = dict(
-        zip(
-            METRIC_NAMES,
-            (value / num_examples for value in metric_sums.tolist()),
-            strict=True,
-        )
-    )
-    return tick_metrics, path_mean, global_step
+    return metrics.compute(), path_mean, global_step
 
 
 def save_training_samples(generator, fixed_z, output_path, seen_kimg):
     """Save fixed-z samples with the same layer noise at every checkpoint."""
-    was_training = generator.training
-    generator.eval()
-    try:
-        with torch.inference_mode():
-            samples = torch.cat(
-                [
-                    generator(
-                        z_batch,
-                        noise_mode="fixed",
-                    ).cpu()
-                    for z_batch in fixed_z.split(SAMPLE_BATCH_SIZE)
-                ]
-            )
-    finally:
-        generator.train(was_training)
+    samples = generate_in_batches(
+        fixed_z,
+        SAMPLE_BATCH_SIZE,
+        lambda z_batch: generator(z_batch, noise_mode="fixed"),
+        module=generator,
+    )
     save_grid(
         denormalize(samples),
         output_path,
@@ -379,27 +305,12 @@ def main(resume_from=None):
 
     set_seed(SEED)
     device = try_gpu()
-    dataset = CelebAAlignedDataset(
+    loader = make_aligned_celeba_loader(
         DATA_DIR,
-        split="train",
-        transform=transforms.Compose(
-            [
-                transforms.CenterCrop(CELEBA_ALIGNED_CROP_SIZE),
-                transforms.Resize((128, 128), antialias=True),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5] * 3, [0.5] * 3),
-            ]
-        ),
-    )
-    loader = DataLoader(
-        dataset,
+        resolution=128,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        device=device,
         num_workers=NUM_WORKERS,
-        pin_memory=device.type == "cuda",
-        persistent_workers=NUM_WORKERS > 0,
-        drop_last=True,
     )
     if TOTAL_KIMG % TICK_KIMG:
         raise ValueError("TOTAL_KIMG must be divisible by TICK_KIMG.")

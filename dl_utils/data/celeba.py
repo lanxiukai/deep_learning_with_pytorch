@@ -5,7 +5,9 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from torch.utils.data import Dataset
+import torch
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 
 from dl_utils.data.images import load_rgb_image
 
@@ -75,8 +77,53 @@ class CelebAAlignedDataset(Dataset):
         return image, 0
 
 
+def make_aligned_celeba_loader(
+    root,
+    resolution: int,
+    batch_size: int,
+    device: torch.device,
+    *,
+    split: str = "train",
+    shuffle: bool = True,
+    num_workers: int = 4,
+    drop_last: bool = True,
+) -> DataLoader:
+    """Create a normalized, resolution-specific aligned CelebA loader."""
+    if resolution < 1 or batch_size < 1:
+        raise ValueError("resolution and batch_size must be positive.")
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative.")
+    transform = transforms.Compose(
+        [
+            transforms.CenterCrop(CELEBA_ALIGNED_CROP_SIZE),
+            transforms.Resize(
+                (resolution, resolution),
+                antialias=True,
+            ),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5] * 3, [0.5] * 3),
+        ]
+    )
+    dataset = CelebAAlignedDataset(
+        root,
+        split=split,
+        transform=transform,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
+        drop_last=drop_last,
+    )
+
+
 __all__ = [
     "CELEBA_ALIGNED_CROP_SIZE",
     "CELEBA_PARTITIONS",
     "CelebAAlignedDataset",
+    "make_aligned_celeba_loader",
 ]
