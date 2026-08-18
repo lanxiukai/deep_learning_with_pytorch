@@ -430,7 +430,7 @@ class StyleGANDiscriminator(nn.Module):
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
         if images.ndim != 4 or images.shape[1] != 3:
-            raise ValueError("expected RGB images in NCHW format.")
+            raise ValueError("expected RGB images in BCHW format.")
         if images.shape[-2:] != (resolution, resolution):
             raise ValueError(
                 f"expected {resolution}x{resolution} images, "

@@ -99,7 +99,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, inputs):
         if inputs.ndim != 4:
-            raise ValueError("SelfAttention expects an NCHW tensor.")
+            raise ValueError("SelfAttention expects an BCHW tensor.")
         batch, _, height, width = inputs.shape
         if min(height, width) < 2:
             raise ValueError("SelfAttention needs spatial dimensions >= 2.")

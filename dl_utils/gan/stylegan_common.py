@@ -105,6 +105,8 @@ class EqualizedLinear(nn.Module):
             if self.bias is not None
             else None
         )
+        # Store unscaled parameters self.weight and derive the effective weights
+        # self.weight * self.scale at each forward pass.
         return F.linear(inputs, self.weight * self.scale, bias)
 
 
@@ -156,13 +158,14 @@ class MinibatchStandardDeviation(nn.Module):
         self.maximum_group = int(maximum_group)
 
     def forward(self, inputs):
+        # inputs shape: (B, C, H, W)
         if inputs.ndim != 4 or inputs.shape[0] == 0:
             raise ValueError(
-                "MinibatchStandardDeviation expects a non-empty NCHW tensor."
+                "MinibatchStandardDeviation expects a non-empty BCHW tensor."
             )
-        batch, channels, height, width = inputs.shape
-        group = min(batch, self.maximum_group)
-        while batch % group:
+        batch_size, channels, height, width = inputs.shape
+        group = min(batch_size, self.maximum_group)
+        while batch_size % group:
             group -= 1
         grouped = inputs.float().view(
             group,
@@ -170,11 +173,11 @@ class MinibatchStandardDeviation(nn.Module):
             channels,
             height,
             width,
-        )
-        deviation = torch.sqrt(grouped.var(dim=0, unbiased=False) + 1e-8)
-        feature = deviation.mean(dim=(1, 2, 3), keepdim=True)
-        feature = feature.repeat(group, 1, height, width).to(inputs.dtype)
-        return torch.cat([inputs, feature], dim=1)
+        )  # (G, B // G, C, H, W)
+        deviation = torch.sqrt(grouped.var(dim=0, unbiased=False) + 1e-8)  # (B // G, C, H, W)
+        feature = deviation.mean(dim=(1, 2, 3), keepdim=True)  # (B // G, 1, 1, 1)
+        feature = feature.repeat(group, 1, height, width).to(inputs.dtype)  # (B, 1, H, W)
+        return torch.cat([inputs, feature], dim=1)  # (B, C + 1, H, W)
 
 
 class NoiseInjection(nn.Module):
@@ -239,7 +242,7 @@ class NoiseInjection(nn.Module):
 
 
 def _resample_kernel(
-    values: Sequence[float],
+    values: Sequence[float],  # both list and tuple
     *,
     device,
     dtype,
@@ -255,8 +258,9 @@ def _resample_kernel(
 
 def filter2d(inputs, kernel=(1, 3, 3, 1)):
     """Apply a channel-wise FIR low-pass filter without custom kernels."""
+    # inputs shape: (B, C, H, W)
     if inputs.ndim != 4:
-        raise ValueError("filter2d expects an NCHW tensor.")
+        raise ValueError("filter2d expects an BCHW tensor.")
     filter_kernel = _resample_kernel(
         kernel,
         device=inputs.device,
@@ -269,12 +273,13 @@ def filter2d(inputs, kernel=(1, 3, 3, 1)):
         inputs,
         (pad_before, pad_after, pad_before, pad_after),
         mode="replicate",
-    )
+    )  # padded shape: (B, C, H + size - 1, W + size - 1)
     channels = inputs.shape[1]
     weights = filter_kernel.view(1, 1, size, size).repeat(
         channels, 1, 1, 1
-    )
-    return F.conv2d(padded, weights, groups=channels)
+    )  # (1, 1, 4, 4) -> (C, 1, 4, 4)
+    # grouped convolution
+    return F.conv2d(padded, weights, groups=channels)  # (B, C, H, W)
 
 
 def filtered_upsample2d(inputs, kernel=(1, 3, 3, 1)):

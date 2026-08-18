@@ -45,10 +45,11 @@ class GeneratorInputBlock(nn.Module):
         )
 
     def forward(self, z):
+        # z shape: (B, z_dim)
         hidden = self.pixel_norm(z)
-        hidden = self.linear(hidden).view(z.shape[0], -1, 4, 4)
+        hidden = self.linear(hidden).view(z.shape[0], -1, 4, 4)  # (B, C, 4, 4)
         hidden = self.pixel_norm(F.leaky_relu(hidden, 0.2))
-        hidden = self.convolution(hidden)
+        hidden = self.convolution(hidden)                        # (B, C, 4, 4)
         return self.pixel_norm(F.leaky_relu(hidden, 0.2))
 
 
@@ -72,9 +73,10 @@ class GeneratorBlock(nn.Module):
         self.pixel_norm = PixelNorm()
 
     def forward(self, inputs):
-        hidden = filtered_upsample2d(inputs)
-        hidden = self.pixel_norm(F.leaky_relu(self.conv1(hidden), 0.2))
-        hidden = self.pixel_norm(F.leaky_relu(self.conv2(hidden), 0.2))
+        # inputs shape: (B, C_in, H, W)
+        hidden = filtered_upsample2d(inputs)  # (B, C_in, 2H, 2W)
+        hidden = self.pixel_norm(F.leaky_relu(self.conv1(hidden), 0.2))  # (B, C_out, 2H, 2W)
+        hidden = self.pixel_norm(F.leaky_relu(self.conv2(hidden), 0.2))  # (B, C_out, 2H, 2W)
         return hidden
 
 
@@ -92,7 +94,7 @@ class ProGANGenerator(nn.Module):
         self.input_block = GeneratorInputBlock(
             self.z_dim,
             self.channels[4],
-        )
+        )  # (B, z_dim) -> (B, channels[4], 4, 4)
         self.blocks = nn.ModuleDict(
             {
                 str(resolution): GeneratorBlock(
@@ -101,7 +103,7 @@ class ProGANGenerator(nn.Module):
                 )
                 for resolution in self.resolutions[1:]
             }
-        )
+        )  # Each block: (B, channels[R/2], R/2, R/2) -> (B, channels[R], R, R)
         self.to_rgbs = nn.ModuleDict(
             {
                 str(resolution): EqualizedConv2d(
@@ -112,9 +114,10 @@ class ProGANGenerator(nn.Module):
                 )
                 for resolution in self.resolutions
             }
-        )
+        )  # Each block: (B, channels[R], R, R) -> (B, 3, R, R)
 
     def forward(self, z, resolution=128, alpha=1.0):
+        # z shape: (B, z_dim)
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
         if z.ndim != 2 or z.shape[1] != self.z_dim:
@@ -122,22 +125,27 @@ class ProGANGenerator(nn.Module):
                 f"expected z shape [B, {self.z_dim}], got {tuple(z.shape)}"
             )
 
-        hidden = self.input_block(z)
+        hidden = self.input_block(z)  # (B, channels[4], 4, 4)
         if resolution == 4:
-            return self.to_rgbs["4"](hidden)
+            return self.to_rgbs["4"](hidden)  # (B, 3, 4, 4)
 
         for current_resolution in self.resolutions[1:]:
             previous = hidden
+            # (B, channels[R/2], R/2, R/2) -> (B, channels[R], R, R)
             hidden = self.blocks[str(current_resolution)](hidden)
-            if current_resolution != resolution:
-                continue
-            new_rgb = self.to_rgbs[str(current_resolution)](hidden)
-            if alpha == 1.0:
-                return new_rgb
-            old_rgb = self.to_rgbs[str(current_resolution // 2)](previous)
-            old_rgb = filtered_upsample2d(old_rgb)
-            return torch.lerp(old_rgb, new_rgb, alpha)
-        raise AssertionError("validated resolution was not reached")
+            if current_resolution == resolution:
+                break
+
+        # (B, channels[R], R, R) -> (B, 3, R, R)
+        new_rgb = self.to_rgbs[str(resolution)](hidden)
+        if alpha == 1.0:
+            return new_rgb
+        # (B, channels[R/2], R/2, R/2) -> (B, 3, R/2, R/2)
+        old_rgb = self.to_rgbs[str(resolution // 2)](previous)
+        old_rgb = filtered_upsample2d(old_rgb)  # (B, 3, R, R)
+        # RGB image-space fade-in blending:
+        # (1 - alpha) * old_rgb + alpha * new_rgb
+        return torch.lerp(old_rgb, new_rgb, alpha)
 
 
 class DiscriminatorBlock(nn.Module):
@@ -159,9 +167,10 @@ class DiscriminatorBlock(nn.Module):
         )
 
     def forward(self, inputs):
-        hidden = F.leaky_relu(self.conv1(inputs), 0.2)
-        hidden = F.leaky_relu(self.conv2(hidden), 0.2)
-        return filtered_downsample2d(hidden)
+        # inputs shape: (B, C_in, H, W)
+        hidden = F.leaky_relu(self.conv1(inputs), 0.2)  # (B, C_in, H, W)
+        hidden = F.leaky_relu(self.conv2(hidden), 0.2)  # (B, C_out, H, W)
+        return filtered_downsample2d(hidden)            # (B, C_out, H/2, W/2)
 
 
 class ProGANDiscriminator(nn.Module):
@@ -181,7 +190,7 @@ class ProGANDiscriminator(nn.Module):
                 )
                 for resolution in self.resolutions
             }
-        )
+        )  # Each block: (B, 3, R, R) -> (B, channels[R], R, R)
         self.blocks = nn.ModuleDict(
             {
                 str(resolution): DiscriminatorBlock(
@@ -190,7 +199,7 @@ class ProGANDiscriminator(nn.Module):
                 )
                 for resolution in self.resolutions[1:]
             }
-        )
+        )  # Each block: (B, channels[R], R, R) -> (B, channels[R/2], R/2, R/2)
         final_channels = self.channels[4]
         self.minibatch_std = MinibatchStandardDeviation()
         self.final_conv = EqualizedConv2d(
@@ -198,20 +207,21 @@ class ProGANDiscriminator(nn.Module):
             final_channels,
             3,
             padding=1,
-        )
+        )  # (B, final_channels + 1, 4, 4) -> (B, final_channels, 4, 4)
         self.final_linear = EqualizedLinear(
             final_channels * 4 * 4,
             final_channels,
             gain=math.sqrt(2),
-        )
-        self.output = EqualizedLinear(final_channels, 1)
+        )  # flatten (B, final_channels * 4 * 4) -> (B, final_channels)
+        self.output = EqualizedLinear(final_channels, 1)  # (B, 1)
 
     def forward(self, images, resolution=128, alpha=1.0):
+        # images shape: (B, 3, R, R)
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
         expected_shape = (resolution, resolution)
         if images.ndim != 4 or images.shape[1] != 3:
-            raise ValueError("expected RGB images in NCHW format.")
+            raise ValueError("expected RGB images in BCHW format.")
         if images.shape[-2:] != expected_shape:
             raise ValueError(
                 f"expected {resolution}x{resolution} images, "
@@ -220,29 +230,35 @@ class ProGANDiscriminator(nn.Module):
 
         current_index = self.resolutions.index(resolution)
         if resolution == 4:
+            # (B, 3, 4, 4) -> (B, channels[4], 4, 4)
             hidden = F.leaky_relu(self.from_rgbs["4"](images), 0.2)
         else:
             new_hidden = F.leaky_relu(
                 self.from_rgbs[str(resolution)](images),
                 0.2,
-            )
+            )  # (B, 3, R, R) -> (B, channels[R], R, R)
+            # (B, channels[R/2], R/2, R/2)
             new_hidden = self.blocks[str(resolution)](new_hidden)
+            # (B, 3, R, R) -> (B, 3, R/2, R/2)
             old_images = filtered_downsample2d(images)
             old_hidden = F.leaky_relu(
                 self.from_rgbs[str(resolution // 2)](old_images),
                 0.2,
-            )
+            )  # (B, 3, R/2, R/2) -> (B, channels[R/2], R/2, R/2)
+            # feature-space fade-in blending:
+            # (1 - alpha) * old_hidden + alpha * new_hidden
             hidden = torch.lerp(old_hidden, new_hidden, alpha)
 
             for index in range(current_index - 1, 0, -1):
                 block_resolution = self.resolutions[index]
-                hidden = self.blocks[str(block_resolution)](hidden)
+                hidden = self.blocks[str(block_resolution)](hidden)  # downsampling
 
+        # (B, channels[4], 4, 4) -> (B, channels[4] + 1, 4, 4)
         hidden = self.minibatch_std(hidden)
-        hidden = F.leaky_relu(self.final_conv(hidden), 0.2)
-        hidden = hidden.flatten(1)
-        hidden = F.leaky_relu(self.final_linear(hidden), 0.2)
-        return self.output(hidden).squeeze(1)
+        hidden = F.leaky_relu(self.final_conv(hidden), 0.2)  # (B, channels[4], 4, 4)
+        hidden = hidden.flatten(1)  # (B, channels[4] * 4 * 4)
+        hidden = F.leaky_relu(self.final_linear(hidden), 0.2)  # (B, channels[4])
+        return self.output(hidden).squeeze(1)  # (B, 1) -> (B,)
 
 
 __all__ = [
