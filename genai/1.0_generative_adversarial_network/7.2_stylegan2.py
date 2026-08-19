@@ -30,7 +30,7 @@ Outputs:
 Resume an interrupted run:
     python genai/1.0_generative_adversarial_network/7.2_stylegan2.py \
         --resume-from output/stylegan2/checkpoints/latest.pth
-    Checkpoints created before this epoch-based version are unsupported.
+    Checkpoints with a different epoch metric schema are unsupported.
 
 Training data -- aligned CelebA train split:
 Training images:         162,770
@@ -121,12 +121,10 @@ DISCRIMINATOR_CONFIG = {
 }
 
 METRIC_NAMES = (
-    "loss_d",
     "loss_d_main",
-    "loss_g",
     "loss_g_main",
-    "weighted_r1",
-    "weighted_path",
+    "r1_penalty",
+    "path_penalty",
 )
 
 
@@ -141,14 +139,21 @@ def train_epoch(
     global_step,
     num_batches,
     device,
-    progress_bar=None,
 ):
     """Train one data epoch with separate regularization passes."""
     if len(loader) < num_batches:
         raise ValueError("num_batches exceeds one data epoch.")
     metrics = WeightedMetricAccumulator(METRIC_NAMES, device=device)
 
-    for real, _ in islice(loader, num_batches):
+    batches = islice(loader, num_batches)
+    for real, _ in tqdm(
+        batches,
+        total=num_batches,
+        desc="Training",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    ):
         real = real.to(device, non_blocking=True)
         batch_size = real.shape[0]
 
@@ -182,8 +187,6 @@ def train_epoch(
             optimizer_d.zero_grad(set_to_none=True)
             weighted_r1.backward()
             optimizer_d.step()
-        loss_d = loss_d_main.detach() + weighted_r1.detach()
-
         discriminator.requires_grad_(False)
         try:
             # Main generator pass: non-saturating logistic objective.
@@ -223,7 +226,6 @@ def train_epoch(
                 optimizer_g.zero_grad(set_to_none=True)
                 weighted_path.backward()
                 optimizer_g.step()
-            loss_g = loss_g_main.detach() + weighted_path.detach()
             update_ema_by_images(
                 averaged_generator,
                 generator,
@@ -235,9 +237,7 @@ def train_epoch(
 
         metrics.update(
             (
-                loss_d,
                 loss_d_main.detach(),
-                loss_g,
                 loss_g_main.detach(),
                 weighted_r1.detach(),
                 weighted_path.detach(),
@@ -245,9 +245,6 @@ def train_epoch(
             weight=batch_size,
         )
         global_step += 1
-
-        if progress_bar is not None:
-            progress_bar.update(1)
 
     return metrics.compute(), path_mean, global_step
 
@@ -318,7 +315,7 @@ def main(resume_from=None):
     optimizers = {"generator": optimizer_g, "discriminator": optimizer_d}
     checkpoint = TrainingCheckpoint(
         CHECKPOINT_DIR / "latest.pth",
-        unit="epoch",
+        unit="epoch-main-metrics",
         models=models,
         optimizers=optimizers,
     )
@@ -346,56 +343,41 @@ def main(resume_from=None):
     path_mean = state["path_mean"].to(device)
     global_step = state["global_step"]
 
-    with tqdm(
-        total=TOTAL_BATCHES,
-        initial=global_step,
-        desc=(
-            f"StyleGAN2 | Epoch "
-            f"{min(completed_epochs + 1, total_epochs)}/{total_epochs}"
-        ),
-        unit="batch",
-        dynamic_ncols=True,
-        mininterval=1.0,
-    ) as progress_bar:
-        for epoch in range(completed_epochs + 1, total_epochs + 1):
-            progress_bar.set_description(
-                f"StyleGAN2 | Epoch {epoch}/{total_epochs}",
-                refresh=False,
-            )
-            num_batches = min(len(loader), TOTAL_BATCHES - global_step)
-            metrics, path_mean, global_step = train_epoch(
-                generator,
-                discriminator,
-                loader,
-                optimizer_g,
-                optimizer_d,
+    for epoch in range(completed_epochs + 1, total_epochs + 1):
+        print(f"Epoch {epoch}/{total_epochs}")
+        num_batches = min(len(loader), TOTAL_BATCHES - global_step)
+        metrics, path_mean, global_step = train_epoch(
+            generator,
+            discriminator,
+            loader,
+            optimizer_g,
+            optimizer_d,
+            averaged_generator,
+            path_mean,
+            global_step,
+            num_batches,
+            device,
+        )
+        seen_kimg = global_step * BATCH_SIZE / 1_000
+        loss_history["kimg"].append(seen_kimg)
+        for name, value in metrics.items():
+            loss_history[name].append(value)
+
+        if (
+            epoch == 1
+            or epoch % SAMPLE_EVERY_EPOCHS == 0
+            or epoch == total_epochs
+        ):
+            save_training_samples(
                 averaged_generator,
-                path_mean,
-                global_step,
-                num_batches,
-                device,
-                progress_bar=progress_bar,
+                fixed_z,
+                TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
+                seen_kimg,
             )
-            seen_kimg = global_step * BATCH_SIZE / 1_000
-            loss_history["kimg"].append(seen_kimg)
-            for name, value in metrics.items():
-                loss_history[name].append(value)
 
-            if (
-                epoch == 1
-                or epoch % SAMPLE_EVERY_EPOCHS == 0
-                or epoch == total_epochs
-            ):
-                save_training_samples(
-                    averaged_generator,
-                    fixed_z,
-                    TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
-                    seen_kimg,
-                )
-
-            state["path_mean"] = path_mean.detach().cpu()
-            state["global_step"] = global_step
-            checkpoint.save(epoch, state)
+        state["path_mean"] = path_mean.detach().cpu()
+        state["global_step"] = global_step
+        checkpoint.save(epoch, state)
 
     if global_step != TOTAL_BATCHES:
         raise RuntimeError("Training ended with an unexpected step count.")
@@ -410,22 +392,20 @@ def main(resume_from=None):
     save_loss_panels(
         loss_history["kimg"],
         {
-            "Discriminator objective": {
-                "D total loss": loss_history["loss_d"],
+            "Discriminator main objective": {
                 "D logistic loss": loss_history["loss_d_main"],
             },
-            "Generator objective": {
-                "G total loss": loss_history["loss_g"],
+            "Generator main objective": {
                 "G non-saturating loss": loss_history["loss_g_main"],
             },
             "R1 regularization": {
                 "Weighted lazy R1 contribution": loss_history[
-                    "weighted_r1"
+                    "r1_penalty"
                 ],
             },
             "Path length regularization": {
                 "Weighted lazy path contribution": loss_history[
-                    "weighted_path"
+                    "path_penalty"
                 ],
             },
         },

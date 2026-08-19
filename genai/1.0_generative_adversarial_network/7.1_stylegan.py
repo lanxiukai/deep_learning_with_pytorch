@@ -29,7 +29,7 @@ Outputs:
 Resume an interrupted run:
     python genai/1.0_generative_adversarial_network/7.1_stylegan.py \
         --resume-from output/stylegan/checkpoints/latest.pth
-    Checkpoints created before this phase-based version are unsupported.
+    Checkpoints with a different phase metric schema are unsupported.
 
 Training data -- aligned CelebA train split:
 Training images:         162,770
@@ -117,10 +117,9 @@ DISCRIMINATOR_CONFIG = {
 }
 
 METRIC_NAMES = (
-    "loss_d",
     "loss_d_main",
-    "loss_g",
-    "weighted_r1",
+    "loss_g_main",
+    "r1_penalty",
 )
 
 
@@ -153,12 +152,17 @@ def train_phase(
     averaged_generator,
     phase,
     device,
-    progress_bar=None,
 ):
     """Train one progressive phase with logistic and R1 objectives."""
     metrics = WeightedMetricAccumulator(METRIC_NAMES, device=device)
     batches = iter(loader)
-    for batch_index in range(phase.num_batches):
+    for batch_index in tqdm(
+        range(phase.num_batches),
+        desc="Training",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    ):
         try:
             real_images, _ = next(batches)
         except StopIteration:
@@ -220,14 +224,14 @@ def train_phase(
                 mixing_z=mixing_z,
                 update_w_avg=True,
             )
-            loss_g = F.softplus(
+            loss_g_main = F.softplus(
                 -discriminator(
                     fake_images,
                     resolution=phase.resolution,
                     alpha=alpha,
                 )
             ).mean()
-            loss_g.backward()
+            loss_g_main.backward()
             optimizer_g.step()
             update_ema_by_images(
                 averaged_generator,
@@ -239,12 +243,9 @@ def train_phase(
             discriminator.requires_grad_(True)
 
         metrics.update(
-            (loss_d, loss_d_main, loss_g, weighted_r1),
+            (loss_d_main, loss_g_main, weighted_r1),
             weight=batch_size,
         )
-
-        if progress_bar is not None:
-            progress_bar.update(1)
 
     return metrics.compute()
 
@@ -296,7 +297,6 @@ def main(resume_from=None):
     device = try_gpu()
     training_schedule = build_training_schedule()
     total_phases = len(training_schedule)
-    total_steps = sum(phase.num_batches for phase in training_schedule)
 
     generator = StyleGANGenerator(**MODEL_CONFIG).to(device)
     discriminator = StyleGANDiscriminator(**DISCRIMINATOR_CONFIG).to(device)
@@ -320,7 +320,7 @@ def main(resume_from=None):
     optimizers = {"generator": optimizer_g, "discriminator": optimizer_d}
     checkpoint = TrainingCheckpoint(
         CHECKPOINT_DIR / "latest.pth",
-        unit="phase",
+        unit="phase-main-metrics",
         models=models,
         optimizers=optimizers,
     )
@@ -345,51 +345,41 @@ def main(resume_from=None):
     fixed_z = state["fixed_z"].to(device)
 
     completed_schedule = training_schedule[:completed_phases]
-    completed_steps = sum(phase.num_batches for phase in completed_schedule)
     seen_images = sum(phase.num_images for phase in completed_schedule)
-    with tqdm(
-        total=total_steps,
-        initial=completed_steps,
-        unit="batch",
-        dynamic_ncols=True,
-        mininterval=1.0,
-    ) as progress_bar:
-        for phase_index, phase in enumerate(
-            training_schedule[completed_phases:],
-            start=completed_phases + 1,
-        ):
-            loader = make_loader(phase.resolution, phase.batch_size, device)
-            progress_bar.set_description(
-                f"StyleGAN | {phase.resolution}x{phase.resolution} "
-                f"{phase.name} | Phase {phase_index}/{total_phases}",
-                refresh=False,
-            )
-            metrics = train_phase(
-                generator,
-                discriminator,
-                loader,
-                optimizer_g,
-                optimizer_d,
-                averaged_generator,
-                phase,
-                device,
-                progress_bar=progress_bar,
-            )
-            seen_images += phase.num_images
-            seen_kimg = seen_images / 1_000
-            loss_history["kimg"].append(seen_kimg)
-            for name, value in metrics.items():
-                loss_history[name].append(value)
+    for phase_index, phase in enumerate(
+        training_schedule[completed_phases:],
+        start=completed_phases + 1,
+    ):
+        print(
+            f"Phase {phase_index}/{total_phases}: "
+            f"{phase.resolution}x{phase.resolution} {phase.name}"
+        )
+        loader = make_loader(phase.resolution, phase.batch_size, device)
+        metrics = train_phase(
+            generator,
+            discriminator,
+            loader,
+            optimizer_g,
+            optimizer_d,
+            averaged_generator,
+            phase,
+            device,
+        )
+        seen_images += phase.num_images
+        seen_kimg = seen_images / 1_000
+        loss_history["kimg"].append(seen_kimg)
+        for name, value in metrics.items():
+            loss_history[name].append(value)
 
-            save_training_samples(
-                averaged_generator,
-                fixed_z,
-                TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
-                phase,
-                seen_kimg,
-                phase_alpha(phase, phase.num_batches - 1),
-            )
-            checkpoint.save(phase_index, state)
+        save_training_samples(
+            averaged_generator,
+            fixed_z,
+            TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
+            phase,
+            seen_kimg,
+            phase_alpha(phase, phase.num_batches - 1),
+        )
+        checkpoint.save(phase_index, state)
 
     save_model_weights(
         averaged_generator,
@@ -402,15 +392,14 @@ def main(resume_from=None):
     save_loss_panels(
         loss_history["kimg"],
         {
-            "Logistic discriminator objective": {
-                "D total": loss_history["loss_d"],
+            "Discriminator main objective": {
                 "D logistic": loss_history["loss_d_main"],
             },
-            "Non-saturating generator objective": {
-                "G non-saturating": loss_history["loss_g"],
+            "Generator main objective": {
+                "G non-saturating": loss_history["loss_g_main"],
             },
             "R1 regularization": {
-                "Weighted R1 contribution": loss_history["weighted_r1"],
+                "Weighted R1 contribution": loss_history["r1_penalty"],
             },
         },
         OUT_DIR / "loss_curves.png",
