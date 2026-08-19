@@ -68,27 +68,21 @@ TRUNCATION_PSIS = (1.0, 0.7, 0.5, 0.0)
 MODEL_SPECS = (
     (
         "progan",
-        "ProGAN EMA",
         ProGANGenerator,
         MODEL_OUT_DIRS["progan"] / "progan_generator.pth",
         "7.0_progan.py",
-        7,
     ),
     (
         "stylegan",
-        "StyleGAN EMA",
         StyleGANGenerator,
         MODEL_OUT_DIRS["stylegan"] / "stylegan_generator.pth",
         "7.1_stylegan.py",
-        8,
     ),
     (
         "stylegan2",
-        "StyleGAN2 EMA",
         StyleGenerator,
         MODEL_OUT_DIRS["stylegan2"] / "stylegan2_generator.pth",
         "7.2_stylegan2.py",
-        8,
     ),
 )
 
@@ -152,7 +146,6 @@ def load_generator(
     model_class,
     checkpoint_path,
     script_name,
-    expected_format_version,
     device,
 ):
     """Load one EMA generator produced by the current lesson scripts."""
@@ -162,20 +155,12 @@ def load_generator(
             f"Run {script_name} first."
         )
 
-    expected_metadata = {
-        "model_name": model_name,
-        "format_version": expected_format_version,
-        "conditioning": "unconditional",
-        "dataset": "celeba_aligned_train",
-        "final_resolution": FINAL_RESOLUTION,
-        "weights": "ema",
-    }
     try:
         return load_model_weights(
             checkpoint_path,
             model_class,
             device=device,
-            expected_metadata=expected_metadata,
+            expected_metadata={"model_name": model_name},
         )
     except ValueError as error:
         raise ValueError(f"{error} Retrain it with {script_name}.") from error
@@ -498,18 +483,15 @@ def main():
     configurations = {}
     for (
         model_name,
-        _,
         model_class,
         path,
         script_name,
-        format_version,
     ) in MODEL_SPECS:
         generator, model_config = load_generator(
             model_name,
             model_class,
             path,
             script_name,
-            format_version,
             device,
         )
         adapters[model_name] = GeneratorAdapter(model_name, generator)

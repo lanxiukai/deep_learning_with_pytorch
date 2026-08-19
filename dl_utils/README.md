@@ -444,6 +444,15 @@ make_channel_map, validate_resolution, validate_alpha, PixelNorm,
 EqualizedLinear, EqualizedConv2d, MinibatchStandardDeviation, NoiseInjection,
 filter2d, filtered_upsample2d, filtered_downsample2d, denormalize.
 
+### dl_utils/gan/progressive_training.py
+
+Dependencies: __future__ (annotations), collections.abc (Mapping, Sequence),
+dataclasses.
+Public entries (__all__): ProgressivePhase, build_progressive_schedule,
+phase_alpha.
+The module describes complete fade-in and stabilization phases directly;
+checkpoint subdivisions are intentionally not part of the schedule.
+
 ### dl_utils/gan/progan.py
 
 Dependencies: math, torch, torch.nn.functional (as F), torch (nn),
@@ -561,11 +570,14 @@ Public entries: none (docstring-only package marker).
 Dependencies: random, tempfile, collections.abc (Mapping), os (PathLike),
 pathlib (Path), typing (Any), numpy, torch, torch (nn), torch.optim
 (Optimizer).
-Public entries (__all__): CHECKPOINT_FORMAT_VERSION, atomic_torch_save,
-capture_rng_state, load_training_checkpoint, make_training_checkpoint,
-restore_rng_state, save_model_weights, save_periodic_checkpoint.
+Public entries (__all__): CHECKPOINT_FORMAT_VERSION, TrainingCheckpoint,
+atomic_torch_save, capture_rng_state, load_training_checkpoint,
+make_training_checkpoint, restore_rng_state, save_model_weights,
+save_periodic_checkpoint.
 The helpers atomically save latest/archive checkpoints, restore named models,
 optimizers and RNG streams, and save metadata-rich final model weights.
+`TrainingCheckpoint` exposes only `resume` and `save` for lessons that need one
+latest full-state checkpoint without a separate scheduling abstraction.
 
 ### dl_utils/training/session.py
 

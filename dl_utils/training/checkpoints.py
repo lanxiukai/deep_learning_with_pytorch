@@ -19,6 +19,7 @@ CHECKPOINT_FORMAT_VERSION = 1
 
 __all__ = [
     "CHECKPOINT_FORMAT_VERSION",
+    "TrainingCheckpoint",
     "atomic_torch_save",
     "capture_rng_state",
     "load_model_weights",
@@ -28,6 +29,39 @@ __all__ = [
     "save_model_weights",
     "save_periodic_checkpoint",
 ]
+
+
+class TrainingCheckpoint:
+    """Save and resume one latest full-state training checkpoint."""
+
+    def __init__(self, path, *, unit, models, optimizers):
+        self.path = Path(path)
+        self.metadata = {"unit": unit}
+        self.models = dict(models)
+        self.optimizers = dict(optimizers)
+
+    def resume(self, resume_from=None, *, initial_state=None):
+        """Return completed units and state, restoring objects when requested."""
+        if resume_from is None:
+            return 0, dict(initial_state or {})
+        checkpoint = load_training_checkpoint(
+            resume_from,
+            models=self.models,
+            optimizers=self.optimizers,
+            expected_metadata=self.metadata,
+        )
+        return checkpoint["epoch"], dict(checkpoint["training_state"])
+
+    def save(self, completed_units, state=None):
+        """Replace the latest checkpoint after a phase or data epoch."""
+        payload = make_training_checkpoint(
+            epoch=completed_units,
+            models=self.models,
+            optimizers=self.optimizers,
+            training_state=state,
+            metadata=self.metadata,
+        )
+        return atomic_torch_save(payload, self.path)
 
 
 def atomic_torch_save(payload: Any, path: str | PathLike[str]) -> Path:

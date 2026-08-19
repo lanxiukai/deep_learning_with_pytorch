@@ -21,21 +21,19 @@ Data:
 Outputs:
     Fresh runs reset training/ and checkpoints/ before setup; --resume-from
     preserves both directories.
-    output/stylegan/training/kimg_*.png: fixed-z/noise EMA samples
-    output/stylegan/checkpoints/latest.pth: full recoverable training state
-    output/stylegan/checkpoints/epoch_*.pth: phase-boundary state archives
+    output/stylegan/training/kimg_*.png: phase-boundary fixed-z/noise samples
+    output/stylegan/checkpoints/latest.pth: latest phase-boundary training state
     output/stylegan/stylegan_generator.pth: final EMA generator with w_avg
-    output/stylegan/online_generator.pth: final non-averaged generator
-    output/stylegan/discriminator.pth: final discriminator and configuration
     output/stylegan/loss_curves.png: logistic objectives and R1 loss
 
 Resume an interrupted run:
     python genai/1.0_generative_adversarial_network/7.1_stylegan.py \
         --resume-from output/stylegan/checkpoints/latest.pth
+    Checkpoints created before this phase-based version are unsupported.
 
 Training data -- aligned CelebA train split:
 Training images:         162,770
-Progressive phases:      11 x 400 kimg (88 recoverable training ticks)
+Progressive phases:      11 x 400 kimg
 Real images shown to D:  4.4 million
 Optimizer updates:       96,875 D / 96,875 G (1:1)
 
@@ -46,18 +44,13 @@ Trainable total:          8.77 M params
 
 import argparse
 from copy import deepcopy
-from dataclasses import asdict
-from itertools import islice
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from dl_utils.data.celeba import (
-    CelebAAlignedDataset,
-    make_aligned_celeba_loader,
-)
+from dl_utils.data.celeba import make_aligned_celeba_loader
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
@@ -80,7 +73,10 @@ from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_grid
 from dl_utils.training.metrics import WeightedMetricAccumulator
 from dl_utils.training.optimization import update_ema_by_images
-from dl_utils.training.session import TrainingSession
+from dl_utils.training.checkpoints import (
+    TrainingCheckpoint,
+    save_model_weights,
+)
 
 
 PROJECT_ROOT = infer_project_root()
@@ -91,8 +87,6 @@ CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
 BATCH_SIZES = {4: 128, 8: 128, 16: 64, 32: 32, 64: 32, 128: 32}
 PHASE_KIMG = 400
-TICK_KIMG = 50
-TICKS_PER_PHASE = PHASE_KIMG // TICK_KIMG
 NUM_WORKERS = 4
 Z_DIM = 128
 STYLE_DIM = 128
@@ -108,9 +102,6 @@ EMA_HALF_LIFE_KIMG = 10.0
 SAMPLES_TO_DISPLAY = 64
 SAMPLE_GRID_COLUMNS = 8
 SAMPLE_BATCH_SIZE = 4
-SAMPLE_EVERY_TICKS = 4
-CHECKPOINT_EVERY_TICKS = 4
-ARCHIVE_EVERY_TICKS = TICKS_PER_PHASE
 SEED = 42
 
 MODEL_CONFIG = {
@@ -133,14 +124,12 @@ METRIC_NAMES = (
 )
 
 
-def build_training_schedule(num_examples):
-    """Build the lesson's progressive image-count schedule."""
+def build_training_schedule():
+    """Build the lesson's fade-in and stabilization phases."""
     return build_progressive_schedule(
-        num_examples,
         resolutions=RESOLUTIONS,
         batch_sizes=BATCH_SIZES,
         phase_kimg=PHASE_KIMG,
-        tick_kimg=TICK_KIMG,
     )
 
 
@@ -155,26 +144,27 @@ def make_loader(resolution, batch_size, device):
     )
 
 
-def train_tick(
+def train_phase(
     generator,
     discriminator,
     loader,
     optimizer_g,
     optimizer_d,
     averaged_generator,
-    tick,
+    phase,
     device,
     progress_bar=None,
 ):
-    """Train one image-count tick with logistic and R1 objectives."""
-    if len(loader) < tick.num_batches:
-        raise ValueError("loader is shorter than the scheduled training tick.")
-
+    """Train one progressive phase with logistic and R1 objectives."""
     metrics = WeightedMetricAccumulator(METRIC_NAMES, device=device)
-
-    batches = islice(loader, tick.num_batches)
-    for batch_index, (real_images, _) in enumerate(batches):
-        alpha = phase_alpha(tick, batch_index)
+    batches = iter(loader)
+    for batch_index in range(phase.num_batches):
+        try:
+            real_images, _ = next(batches)
+        except StopIteration:
+            batches = iter(loader)
+            real_images, _ = next(batches)
+        alpha = phase_alpha(phase, batch_index)
         real_images = real_images.to(device, non_blocking=True)
         real_images.requires_grad_(True)
         batch_size = real_images.shape[0]
@@ -188,18 +178,18 @@ def train_tick(
         with torch.no_grad():
             fake_images = generator(
                 z,
-                resolution=tick.resolution,
+                resolution=phase.resolution,
                 alpha=alpha,
                 mixing_z=mixing_z,
             )
         real_scores = discriminator(
             real_images,
-            resolution=tick.resolution,
+            resolution=phase.resolution,
             alpha=alpha,
         )
         fake_scores = discriminator(
             fake_images,
-            resolution=tick.resolution,
+            resolution=phase.resolution,
             alpha=alpha,
         )
         loss_d_main = F.softplus(-real_scores).mean()
@@ -225,7 +215,7 @@ def train_tick(
             )
             fake_images = generator(
                 z,
-                resolution=tick.resolution,
+                resolution=phase.resolution,
                 alpha=alpha,
                 mixing_z=mixing_z,
                 update_w_avg=True,
@@ -233,7 +223,7 @@ def train_tick(
             loss_g = F.softplus(
                 -discriminator(
                     fake_images,
-                    resolution=tick.resolution,
+                    resolution=phase.resolution,
                     alpha=alpha,
                 )
             ).mean()
@@ -263,7 +253,7 @@ def save_training_samples(
     generator,
     fixed_z,
     output_path,
-    tick,
+    phase,
     seen_kimg,
     alpha,
 ):
@@ -273,7 +263,7 @@ def save_training_samples(
         SAMPLE_BATCH_SIZE,
         lambda z_batch: generator(
             z_batch,
-            resolution=tick.resolution,
+            resolution=phase.resolution,
             alpha=alpha,
             noise_mode="fixed",
         ),
@@ -284,8 +274,8 @@ def save_training_samples(
         output_path,
         nrow=SAMPLE_GRID_COLUMNS,
         title=(
-            f"StyleGAN EMA fixed samples - {tick.resolution}x"
-            f"{tick.resolution} {tick.name} - {seen_kimg:.0f} kimg - "
+            f"StyleGAN EMA fixed samples - {phase.resolution}x"
+            f"{phase.resolution} {phase.name} - {seen_kimg:.0f} kimg - "
             f"alpha={alpha:.2f}"
         ),
     )
@@ -304,13 +294,9 @@ def main(resume_from=None):
 
     set_seed(SEED)
     device = try_gpu()
-    dataset_info = CelebAAlignedDataset(
-        DATA_DIR,
-        split="train",
-    )
-    training_schedule = build_training_schedule(len(dataset_info))
-    total_ticks = len(training_schedule)
-    total_steps = sum(tick.num_batches for tick in training_schedule)
+    training_schedule = build_training_schedule()
+    total_phases = len(training_schedule)
+    total_steps = sum(phase.num_batches for phase in training_schedule)
 
     generator = StyleGANGenerator(**MODEL_CONFIG).to(device)
     discriminator = StyleGANDiscriminator(**DISCRIMINATOR_CONFIG).to(device)
@@ -326,52 +312,21 @@ def main(resume_from=None):
         betas=(0.0, 0.99),
     )
 
-    schedule_metadata = [asdict(phase) for phase in training_schedule]
-    session = TrainingSession(
-        OUT_DIR,
-        total_epochs=total_ticks,
-        models={
-            "online_generator": generator,
-            "stylegan_generator": averaged_generator,
-            "discriminator": discriminator,
-        },
-        optimizers={"generator": optimizer_g, "discriminator": optimizer_d},
-        checkpoint_every_epochs=CHECKPOINT_EVERY_TICKS,
-        archive_every_epochs=ARCHIVE_EVERY_TICKS,
-        metadata={
-            "format_version": 8,
-            "conditioning": "unconditional",
-            "dataset": "celeba_aligned_train",
-            "final_resolution": RESOLUTIONS[-1],
-            "objective": "non_saturating_logistic_r1",
-            "progressive_training": True,
-            "training_schedule": schedule_metadata,
-            "phase_kimg": PHASE_KIMG,
-            "tick_kimg": TICK_KIMG,
-            "style_mixing_probability": STYLE_MIXING_PROBABILITY,
-            "ema_half_life_kimg": EMA_HALF_LIFE_KIMG,
-        },
-        model_metadata={
-            "online_generator": {
-                "model_name": "stylegan_online_generator",
-                "model_config": MODEL_CONFIG,
-                "weights": "online",
-            },
-            "stylegan_generator": {
-                "model_name": "stylegan",
-                "model_config": MODEL_CONFIG,
-                "weights": "ema",
-            },
-            "discriminator": {
-                "model_name": "stylegan_discriminator",
-                "model_config": DISCRIMINATOR_CONFIG,
-            },
-        },
+    models = {
+        "online_generator": generator,
+        "stylegan_generator": averaged_generator,
+        "discriminator": discriminator,
+    }
+    optimizers = {"generator": optimizer_g, "discriminator": optimizer_d}
+    checkpoint = TrainingCheckpoint(
+        CHECKPOINT_DIR / "latest.pth",
+        unit="phase",
+        models=models,
+        optimizers=optimizers,
     )
     fixed_z = torch.randn(SAMPLES_TO_DISPLAY, Z_DIM, device=device)
-    start_epoch, state = session.start(
+    completed_phases, state = checkpoint.resume(
         resume_from,
-        reset_output_dir=False,
         initial_state={
             "loss_history": {
                 "kimg": [],
@@ -380,27 +335,18 @@ def main(resume_from=None):
             "fixed_z": fixed_z.cpu(),
         },
     )
+    if resume_from is not None:
+        print(f"Resumed after phase {completed_phases}: {resume_from}")
+    if completed_phases > total_phases:
+        raise ValueError("Checkpoint phase exceeds the training schedule.")
+
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     loss_history = state["loss_history"]
     fixed_z = state["fixed_z"].to(device)
 
-    expected_kimg = []
-    expected_images = 0
-    for tick in training_schedule[: start_epoch - 1]:
-        expected_images += tick.num_images
-        expected_kimg.append(expected_images / 1_000)
-    if loss_history["kimg"] != expected_kimg:
-        raise ValueError("Checkpoint loss history does not match its tick.")
-    if tuple(fixed_z.shape) != (SAMPLES_TO_DISPLAY, Z_DIM):
-        raise ValueError("Checkpoint fixed z has an unexpected shape.")
-    if resume_from is not None:
-        print(f"Resumed training from tick {start_epoch - 1}: {resume_from}")
-
-    completed_ticks = training_schedule[: start_epoch - 1]
-    completed_steps = sum(tick.num_batches for tick in completed_ticks)
-    seen_images = sum(tick.num_images for tick in completed_ticks)
-    active_phase_key = None
-    loader = None
+    completed_schedule = training_schedule[:completed_phases]
+    completed_steps = sum(phase.num_batches for phase in completed_schedule)
+    seen_images = sum(phase.num_images for phase in completed_schedule)
     with tqdm(
         total=total_steps,
         initial=completed_steps,
@@ -408,63 +354,51 @@ def main(resume_from=None):
         dynamic_ncols=True,
         mininterval=1.0,
     ) as progress_bar:
-        for global_tick, tick in enumerate(
-            training_schedule,
-            start=1,
+        for phase_index, phase in enumerate(
+            training_schedule[completed_phases:],
+            start=completed_phases + 1,
         ):
-            if global_tick < start_epoch:
-                continue
-            phase_key = (tick.resolution, tick.name)
-            if phase_key != active_phase_key:
-                loader = make_loader(
-                    tick.resolution,
-                    tick.batch_size,
-                    device,
-                )
-                active_phase_key = phase_key
-            assert loader is not None
-
+            loader = make_loader(phase.resolution, phase.batch_size, device)
             progress_bar.set_description(
-                f"StyleGAN | {tick.resolution}x{tick.resolution} "
-                f"{tick.name} | Tick {global_tick}/{total_ticks}",
+                f"StyleGAN | {phase.resolution}x{phase.resolution} "
+                f"{phase.name} | Phase {phase_index}/{total_phases}",
                 refresh=False,
             )
-            metrics = train_tick(
+            metrics = train_phase(
                 generator,
                 discriminator,
                 loader,
                 optimizer_g,
                 optimizer_d,
                 averaged_generator,
-                tick,
+                phase,
                 device,
                 progress_bar=progress_bar,
             )
-            seen_images += tick.num_images
+            seen_images += phase.num_images
             seen_kimg = seen_images / 1_000
             loss_history["kimg"].append(seen_kimg)
             for name, value in metrics.items():
                 loss_history[name].append(value)
 
-            alpha = phase_alpha(tick, tick.num_batches - 1)
-            should_sample = (
-                tick.tick_index == 0
-                or global_tick % SAMPLE_EVERY_TICKS == 0
-                or global_tick == total_ticks
+            save_training_samples(
+                averaged_generator,
+                fixed_z,
+                TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
+                phase,
+                seen_kimg,
+                phase_alpha(phase, phase.num_batches - 1),
             )
-            if should_sample:
-                save_training_samples(
-                    averaged_generator,
-                    fixed_z,
-                    TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
-                    tick,
-                    seen_kimg,
-                    alpha,
-                )
+            checkpoint.save(phase_index, state)
 
-            session.checkpoint(global_tick, state)
-
-    session.finish()
+    save_model_weights(
+        averaged_generator,
+        OUT_DIR / "stylegan_generator.pth",
+        metadata={
+            "model_name": "stylegan",
+            "model_config": MODEL_CONFIG,
+        },
+    )
     save_loss_panels(
         loss_history["kimg"],
         {
