@@ -337,7 +337,6 @@ def main(resume_from=None):
     if completed_epochs > total_epochs:
         raise ValueError("Checkpoint epoch exceeds the training budget.")
 
-    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     loss_history = state["loss_history"]
     fixed_z = state["fixed_z"].to(device)
     path_mean = state["path_mean"].to(device)

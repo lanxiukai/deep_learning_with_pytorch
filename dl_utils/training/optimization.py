@@ -29,7 +29,11 @@ def update_ema(
         source.parameters(),
         strict=True,
     ):
+        # decay * target_parameter + (1 - decay) * source_parameter
         target_parameter.lerp_(source_parameter, 1 - decay)
+    # parameters() contains only trainable parameters optimized during training,
+    # whereas buffers() contains non-trainable module state that still affects
+    # the forward pass.
     if copy_buffers:
         for target_buffer, source_buffer in zip(
             target.buffers(),

@@ -196,20 +196,18 @@ class NoiseInjection(nn.Module):
             raise ValueError("channels and resolution must be positive.")
         self.resolution = int(resolution)
         weight_shape = (1, channels, 1, 1) if per_channel else ()
+        # Learned noise scaling, optionally with one strength per feature channel.
         self.weight = nn.Parameter(torch.zeros(weight_shape))
-        generator = torch.Generator().manual_seed(int(fixed_noise_seed))
+        random_generator = torch.Generator().manual_seed(int(fixed_noise_seed))
         fixed_noise = torch.randn(
-            1,
-            1,
-            self.resolution,
-            self.resolution,
-            generator=generator,
+            1, 1, self.resolution, self.resolution, generator=random_generator,
         )
         # Fixed noise is reproducible from the model configuration and should
         # not make otherwise compatible checkpoints fail to load.
         self.register_buffer("fixed_noise", fixed_noise, persistent=False)
 
     def forward(self, inputs, noise_mode="random"):
+        # inputs shape" (B, C, R, R)
         if noise_mode not in NOISE_MODES:
             modes = ", ".join(sorted(NOISE_MODES))
             raise ValueError(
@@ -226,12 +224,8 @@ class NoiseInjection(nn.Module):
             )
         if noise_mode == "random":
             noise = torch.randn(
-                inputs.shape[0],
-                1,
-                self.resolution,
-                self.resolution,
-                device=inputs.device,
-                dtype=inputs.dtype,
+                inputs.shape[0], 1, self.resolution, self.resolution,
+                device=inputs.device, dtype=inputs.dtype,
             )
         else:
             noise = self.fixed_noise.to(

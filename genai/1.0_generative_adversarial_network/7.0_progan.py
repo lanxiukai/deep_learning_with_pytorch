@@ -166,7 +166,7 @@ def train_phase(
         real_images = real_images.to(device, non_blocking=True)
         batch_size = real_images.shape[0]
 
-        z = torch.randn(batch_size, generator.z_dim, device=device)
+        z = torch.randn(batch_size, generator.z_dim, device=device)  # (B, z_dim)
         with torch.no_grad():
             fake_images = generator(
                 z,
@@ -328,7 +328,6 @@ def main(resume_from=None):
     if completed_phases > total_phases:
         raise ValueError("Checkpoint phase exceeds the training schedule.")
 
-    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     loss_history = state["loss_history"]
     fixed_z = state["fixed_z"].to(device)
 

@@ -123,26 +123,6 @@ METRIC_NAMES = (
 )
 
 
-def build_training_schedule():
-    """Build the lesson's fade-in and stabilization phases."""
-    return build_progressive_schedule(
-        resolutions=RESOLUTIONS,
-        batch_sizes=BATCH_SIZES,
-        phase_kimg=PHASE_KIMG,
-    )
-
-
-def make_loader(resolution, batch_size, device):
-    """Create one aligned CelebA loader for the active resolution."""
-    return make_aligned_celeba_loader(
-        DATA_DIR,
-        resolution,
-        batch_size=batch_size,
-        device=device,
-        num_workers=NUM_WORKERS,
-    )
-
-
 def train_phase(
     generator,
     discriminator,
@@ -295,7 +275,11 @@ def main(resume_from=None):
 
     set_seed(SEED)
     device = try_gpu()
-    training_schedule = build_training_schedule()
+    training_schedule = build_progressive_schedule(
+        resolutions=RESOLUTIONS,
+        batch_sizes=BATCH_SIZES,
+        phase_kimg=PHASE_KIMG,
+    )
     total_phases = len(training_schedule)
 
     generator = StyleGANGenerator(**MODEL_CONFIG).to(device)
@@ -340,7 +324,6 @@ def main(resume_from=None):
     if completed_phases > total_phases:
         raise ValueError("Checkpoint phase exceeds the training schedule.")
 
-    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     loss_history = state["loss_history"]
     fixed_z = state["fixed_z"].to(device)
 
@@ -354,7 +337,13 @@ def main(resume_from=None):
             f"Phase {phase_index}/{total_phases}: "
             f"{phase.resolution}x{phase.resolution} {phase.name}"
         )
-        loader = make_loader(phase.resolution, phase.batch_size, device)
+        loader = make_aligned_celeba_loader(
+            DATA_DIR,
+            phase.resolution,
+            batch_size=phase.batch_size,
+            device=device,
+            num_workers=NUM_WORKERS,
+        )
         metrics = train_phase(
             generator,
             discriminator,
