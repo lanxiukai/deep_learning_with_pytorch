@@ -33,6 +33,7 @@ def build_progressive_schedule(
     resolutions = tuple(int(value) for value in resolutions)
     if not resolutions:
         raise ValueError("resolutions must not be empty.")
+    # Reject repeated resolutions to keep the training schedule unambiguous.
     if len(set(resolutions)) != len(resolutions):
         raise ValueError("resolutions must not contain duplicates.")
 

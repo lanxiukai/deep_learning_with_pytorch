@@ -71,7 +71,7 @@ from dl_utils.gan.stylegan_training import (
 )
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_grid
-from dl_utils.training.metrics import WeightedMetricAccumulator
+from dl_utils.training.metrics import MetricAccumulator
 from dl_utils.training.optimization import update_ema_by_images
 from dl_utils.training.checkpoints import (
     TrainingCheckpoint,
@@ -154,7 +154,7 @@ def train_phase(
     device,
 ):
     """Train one progressive phase with logistic and R1 objectives."""
-    metrics = WeightedMetricAccumulator(METRIC_NAMES, device=device)
+    metrics = MetricAccumulator(METRIC_NAMES, device=device)
     batches = iter(loader)
     for batch_index in tqdm(
         range(phase.num_batches),
@@ -244,7 +244,7 @@ def train_phase(
 
         metrics.update(
             (loss_d_main, loss_g_main, weighted_r1),
-            weight=batch_size,
+            num_examples=batch_size,
         )
 
     return metrics.compute()

@@ -72,7 +72,7 @@ from dl_utils.gan.sn_gan import (
 from dl_utils.gan.update_schedule import UpdateRatioSchedule
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_training_samples
-from dl_utils.training.metrics import WeightedMetricAccumulator
+from dl_utils.training.metrics import MetricAccumulator
 from dl_utils.training.session import TrainingSession
 
 
@@ -132,11 +132,11 @@ def train_epoch(
             len(loader),
             NUM_EPOCHS,
         )
-    discriminator_metrics = WeightedMetricAccumulator(
+    discriminator_metrics = MetricAccumulator(
         ("loss",),
         device=device,
     )
-    generator_metrics = WeightedMetricAccumulator(
+    generator_metrics = MetricAccumulator(
         ("loss",),
         device=device,
     )
@@ -157,7 +157,7 @@ def train_epoch(
         loss_d.backward()
         opt_d.step()
 
-        discriminator_metrics.update((loss_d,), weight=batch_size)
+        discriminator_metrics.update((loss_d,), num_examples=batch_size)
         discriminator_steps += 1
 
         should_update_generator = update_schedule.generator_due(
@@ -184,7 +184,7 @@ def train_epoch(
             finally:
                 discriminator.requires_grad_(True)
 
-            generator_metrics.update((loss_g,), weight=batch_size)
+            generator_metrics.update((loss_g,), num_examples=batch_size)
 
         if progress_bar is not None:
             progress_bar.update(1)

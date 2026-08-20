@@ -64,7 +64,7 @@ from dl_utils.gan.progressive_training import (
 from dl_utils.gan.stylegan_common import RESOLUTIONS, denormalize
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_grid
-from dl_utils.training.metrics import WeightedMetricAccumulator
+from dl_utils.training.metrics import MetricAccumulator
 from dl_utils.training.optimization import update_ema_by_images
 from dl_utils.training.checkpoints import (
     TrainingCheckpoint,
@@ -111,26 +111,6 @@ METRIC_NAMES = (
 )
 
 
-def build_training_schedule():
-    """Build the lesson's fade-in and stabilization phases."""
-    return build_progressive_schedule(
-        resolutions=RESOLUTIONS,
-        batch_sizes=BATCH_SIZES,
-        phase_kimg=PHASE_KIMG,
-    )
-
-
-def make_loader(resolution, batch_size, device):
-    """Create a resolution-specific aligned CelebA loader."""
-    return make_aligned_celeba_loader(
-        DATA_DIR,
-        resolution,
-        batch_size=batch_size,
-        device=device,
-        num_workers=NUM_WORKERS,
-    )
-
-
 def gradient_penalty(
     discriminator,
     real_images,
@@ -140,13 +120,7 @@ def gradient_penalty(
 ):
     """Penalize critic gradients away from unit norm on interpolated images."""
     batch_size = real_images.shape[0]
-    epsilon = torch.rand(
-        batch_size,
-        1,
-        1,
-        1,
-        device=real_images.device,
-    )
+    epsilon = torch.rand(batch_size, 1, 1, 1, device=real_images.device)
     interpolated = torch.lerp(fake_images, real_images, epsilon)
     interpolated.requires_grad_(True)
     scores = discriminator(
@@ -174,7 +148,7 @@ def train_phase(
     device,
 ):
     """Train one progressive phase with the WGAN-GP objectives visible."""
-    metrics = WeightedMetricAccumulator(METRIC_NAMES, device=device)
+    metrics = MetricAccumulator(METRIC_NAMES, device=device)
     batches = iter(loader)
     for batch_index in tqdm(
         range(phase.num_batches),
@@ -255,7 +229,7 @@ def train_phase(
                 loss_g_main,
                 weighted_gp,
             ),
-            weight=batch_size,
+            num_examples=batch_size,
         )
 
     return metrics.compute()
@@ -305,7 +279,11 @@ def main(resume_from=None):
 
     set_seed(SEED)
     device = try_gpu()
-    training_schedule = build_training_schedule()
+    training_schedule = build_progressive_schedule(
+        resolutions=RESOLUTIONS,
+        batch_sizes=BATCH_SIZES,
+        phase_kimg=PHASE_KIMG,
+    )
     total_phases = len(training_schedule)
 
     generator = ProGANGenerator(**MODEL_CONFIG).to(device)
@@ -364,7 +342,13 @@ def main(resume_from=None):
             f"Phase {phase_index}/{total_phases}: "
             f"{phase.resolution}x{phase.resolution} {phase.name}"
         )
-        loader = make_loader(phase.resolution, phase.batch_size, device)
+        loader = make_aligned_celeba_loader(
+            DATA_DIR,
+            phase.resolution,
+            batch_size=phase.batch_size,
+            device=device,
+            num_workers=NUM_WORKERS,
+        )
         metrics = train_phase(
             generator,
             discriminator,

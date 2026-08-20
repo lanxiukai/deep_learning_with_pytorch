@@ -69,7 +69,7 @@ from dl_utils.gan.stylegan_training import (
 )
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_grid
-from dl_utils.training.metrics import WeightedMetricAccumulator
+from dl_utils.training.metrics import MetricAccumulator
 from dl_utils.training.optimization import update_ema_by_images
 from dl_utils.training.checkpoints import (
     TrainingCheckpoint,
@@ -143,7 +143,7 @@ def train_epoch(
     """Train one data epoch with separate regularization passes."""
     if len(loader) < num_batches:
         raise ValueError("num_batches exceeds one data epoch.")
-    metrics = WeightedMetricAccumulator(METRIC_NAMES, device=device)
+    metrics = MetricAccumulator(METRIC_NAMES, device=device)
 
     batches = islice(loader, num_batches)
     for real, _ in tqdm(
@@ -242,7 +242,7 @@ def train_epoch(
                 weighted_r1.detach(),
                 weighted_path.detach(),
             ),
-            weight=batch_size,
+            num_examples=batch_size,
         )
         global_step += 1
 
