@@ -27,22 +27,9 @@ def build_progressive_schedule(
     phase_kimg: int,
 ) -> tuple[ProgressivePhase, ...]:
     """Build the fade-in and stabilization phases used by ProGAN."""
-    if phase_kimg < 1:
-        raise ValueError("phase_kimg must be positive.")
-
     resolutions = tuple(int(value) for value in resolutions)
-    if not resolutions:
-        raise ValueError("resolutions must not be empty.")
-    # Reject repeated resolutions to keep the training schedule unambiguous.
-    if len(set(resolutions)) != len(resolutions):
-        raise ValueError("resolutions must not contain duplicates.")
-
     phases = []
     for resolution in resolutions:
-        if resolution not in batch_sizes:
-            raise ValueError(
-                f"batch size is missing for resolution {resolution}."
-            )
         batch_size = int(batch_sizes[resolution])
         target_images = phase_kimg * 1_000
         if batch_size < 1 or target_images % batch_size:
@@ -68,8 +55,6 @@ def build_progressive_schedule(
 
 def phase_alpha(phase: ProgressivePhase, batch_index: int) -> float:
     """Return the linear fade-in coefficient for one phase batch."""
-    if not 0 <= batch_index < phase.num_batches:
-        raise ValueError("batch_index must identify a batch in the phase.")
     if phase.name != "fade-in" or phase.num_batches == 1:
         return 1.0
     return batch_index / (phase.num_batches - 1)

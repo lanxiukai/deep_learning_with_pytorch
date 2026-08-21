@@ -28,10 +28,6 @@ class MappingNetwork(nn.Module):
 
     def __init__(self, z_dim, style_dim, layers=8):
         super().__init__()
-        if layers <= 0:
-            raise ValueError("mapping network must contain at least one layer.")
-        if z_dim <= 0 or style_dim <= 0:
-            raise ValueError("z_dim and style_dim must be positive.")
         modules = [PixelNorm()]
         in_features = z_dim
         for _ in range(layers):
@@ -50,25 +46,29 @@ class MappingNetwork(nn.Module):
         self.net = nn.Sequential(*modules)
 
     def forward(self, z):
+        # input: (B, z_dim), output: (B, style_dim)
         return self.net(z)
 
 
 class AdaptiveInstanceNorm(nn.Module):
-    """Normalize features, then apply sample-specific scale and bias from W."""
+    """(AdaIN) Normalize features, then apply sample-specific scale and bias from W."""
 
     def __init__(self, channels, style_dim):
         super().__init__()
         self.channels = int(channels)
+        # The first C values are for scaling, and the second C values are for bias.
+        # (B, style_dim) → (B, 2C)
         self.affine = EqualizedLinear(style_dim, self.channels * 2)
 
     def forward(self, inputs, style):
-        mean = inputs.mean(dim=(2, 3), keepdim=True)
-        variance = inputs.var(dim=(2, 3), unbiased=False, keepdim=True)
-        normalized = (inputs - mean) * torch.rsqrt(variance + 1e-8)
-        scale, bias = self.affine(style).chunk(2, dim=1)
-        scale = scale.view(-1, self.channels, 1, 1) + 1.0
-        bias = bias.view(-1, self.channels, 1, 1)
-        return normalized * scale + bias
+        # inputs: (B, C, H, W), style: (B, style_dim)
+        mean = inputs.mean(dim=(2, 3), keepdim=True)  # (B, C, 1, 1)
+        variance = inputs.var(dim=(2, 3), unbiased=False, keepdim=True)  # (B, C, 1, 1)
+        normalized = (inputs - mean) * torch.rsqrt(variance + 1e-8)  # (B, C, H, W)
+        scale, bias = self.affine(style).chunk(2, dim=1)  # scale: (B, C), bias: (B, C)
+        scale = scale.view(-1, self.channels, 1, 1) + 1.0  # (B, C, 1, 1)
+        bias = bias.view(-1, self.channels, 1, 1)  # (B, C, 1, 1)
+        return normalized * scale + bias  # (B, C, H, W)
 
 
 class StyledActivation(nn.Module):
@@ -82,17 +82,14 @@ class StyledActivation(nn.Module):
         fixed_noise_seed,
     ):
         super().__init__()
-        self.noise = NoiseInjection(
-            channels,
-            resolution,
-            fixed_noise_seed,
-        )
+        self.noise = NoiseInjection(channels, resolution, fixed_noise_seed)
         self.adain = AdaptiveInstanceNorm(channels, style_dim)
 
     def forward(self, inputs, style, noise_mode="random"):
+        # inputs: (B, C, R, R), style: (B, style_dim)
         hidden = self.noise(inputs, noise_mode)
         hidden = F.leaky_relu(hidden, 0.2)
-        return self.adain(hidden, style)
+        return self.adain(hidden, style)  # (B, C, R, R)
 
 
 class SynthesisBlock(nn.Module):
@@ -140,14 +137,14 @@ class SynthesisBlock(nn.Module):
         )
 
     def forward(self, inputs, styles, noise_mode="random"):
+        # inputs: (B, C_in, R/2, R/2), style: (B, 2, style_dim)
         if self.first:
-            hidden = inputs
+            hidden = inputs  # (B, C_out, 4, 4)
         else:
-            hidden = filtered_upsample2d(inputs)
-            assert self.conv1 is not None
-            hidden = self.conv1(hidden)
+            hidden = filtered_upsample2d(inputs)  # (B, C_in, R, R)
+            hidden = self.conv1(hidden)           # (B, C_out, R, R)
         hidden = self.activation1(hidden, styles[:, 0], noise_mode)
-        hidden = self.conv2(hidden)
+        hidden = self.conv2(hidden)               # (B, C_out, R, R)
         return self.activation2(hidden, styles[:, 1], noise_mode)
 
 
@@ -168,13 +165,10 @@ class StyleGANGenerator(nn.Module):
         self.z_dim = int(z_dim)
         self.style_dim = int(style_dim)
         self.base_channels = int(base_channels)
-        if min(self.z_dim, self.style_dim, self.base_channels) <= 0:
-            raise ValueError(
-                "z_dim, style_dim, and base_channels must be positive."
-            )
         self.w_avg_beta = float(w_avg_beta)
         self.resolutions = RESOLUTIONS
         self.styles_per_block = 2
+        # Style vectors, ws.shape: (B, 12, style_dim)
         self.num_ws = len(self.resolutions) * self.styles_per_block
         self.channels = make_channel_map(self.base_channels, self.resolutions)
         self.mapping = MappingNetwork(
@@ -182,10 +176,11 @@ class StyleGANGenerator(nn.Module):
             self.style_dim,
             mapping_layers,
         )
+        # self.w_avg.shape: (style_dim,)
         self.register_buffer("w_avg", torch.zeros(self.style_dim))
         self.constant = nn.Parameter(
             torch.randn(1, self.channels[4], 4, 4)
-        )
+        )  # (1, C[4], 4, 4)
         self.blocks = nn.ModuleList(
             [
                 SynthesisBlock(
@@ -219,6 +214,7 @@ class StyleGANGenerator(nn.Module):
             self.resolutions.index(resolution) + 1
         ) * self.styles_per_block
 
+    # z (B, z_dim) -> style tensor (B, num_ws, style_dim)
     def make_ws(
         self,
         z,
@@ -231,43 +227,30 @@ class StyleGANGenerator(nn.Module):
         truncation_cutoff=None,
     ):
         resolution = validate_resolution(resolution, self.resolutions)
-        if z.ndim != 2 or z.shape[1] != self.z_dim:
-            raise ValueError(
-                f"expected z shape [B, {self.z_dim}], got {tuple(z.shape)}"
-            )
-        first_w = self.mapping(z)
+        first_w = self.mapping(z)  # (B, style_dim)
         if update_w_avg:
             with torch.no_grad():
-                batch_average = first_w.detach().mean(dim=0)
+                batch_average = first_w.detach().mean(dim=0)  # (style_dim,)
+                # w_avg <- w_avg + (1 - w_avg_beta) * (batch_average - w_avg)
                 self.w_avg.lerp_(batch_average, 1.0 - self.w_avg_beta)
-        ws = first_w[:, None, :].repeat(1, self.num_ws, 1)
-
+        ws = first_w[:, None, :].repeat(1, self.num_ws, 1)  # (B, num_ws, style_dim)
         active_ws = self.num_ws_for_resolution(resolution)
+
         if mixing_z is not None:
+            # mixing_z: (B, z_dim)
             if mixing_z.shape != z.shape:
                 raise ValueError("mixing_z must have the same shape as z.")
-            second_w = self.mapping(mixing_z)
+            second_w = self.mapping(mixing_z)  # (B, style_dim)
             if mixing_cutoff is None:
-                mixing_cutoff = random.randint(1, active_ws - 1)
+                mixing_cutoff = random.randint(1, active_ws - 1)  # [1, active_ws)
             if not 0 < mixing_cutoff < active_ws:
                 raise ValueError(
                     "mixing_cutoff must be inside the active style stack"
                 )
-            ws = torch.cat(
-                [
-                    ws[:, :mixing_cutoff],
-                    second_w[:, None, :].repeat(
-                        1,
-                        self.num_ws - mixing_cutoff,
-                        1,
-                    ),
-                ],
-                dim=1,
-            )
+            second_ws = second_w[:, None, :].repeat(1, self.num_ws - mixing_cutoff, 1)
+            ws = torch.cat([ws[:, :mixing_cutoff], second_ws], dim=1)
 
         truncation_psi = float(truncation_psi)
-        if truncation_psi < 0:
-            raise ValueError("truncation_psi must be non-negative.")
         if truncation_cutoff is None:
             truncation_cutoff = active_ws
         if not 0 <= truncation_cutoff <= active_ws:
@@ -275,13 +258,14 @@ class StyleGANGenerator(nn.Module):
                 "truncation_cutoff is outside the active style stack."
             )
         if truncation_psi != 1.0 and truncation_cutoff > 0:
+            # w_avg + truncation_psi * (ws - w_avg)
             truncated = torch.lerp(
-                self.w_avg.view(1, 1, -1),
-                ws[:, :truncation_cutoff],
+                self.w_avg.view(1, 1, -1),  # (1, 1, style_dim)
+                ws[:, :truncation_cutoff],  # (B, truncation_cutoff, style_dim)
                 truncation_psi,
             )
             ws = torch.cat([truncated, ws[:, truncation_cutoff:]], dim=1)
-        return ws
+        return ws  # (B, num_ws, style_dim)
 
     def synthesize(
         self,
@@ -293,40 +277,33 @@ class StyleGANGenerator(nn.Module):
     ):
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
-        if ws.ndim != 3 or ws.shape[1:] != (
-            self.num_ws,
-            self.style_dim,
-        ):
-            raise ValueError(
-                f"expected ws shape [B, {self.num_ws}, {self.style_dim}]"
-            )
 
-        hidden = self.constant.expand(ws.shape[0], -1, -1, -1)
+        hidden = self.constant.expand(ws.shape[0], -1, -1, -1)  # (B, C[4], 4, 4)
         hidden = self.blocks[0](
             hidden,
-            ws[:, : self.styles_per_block],
+            ws[:, :self.styles_per_block],
             noise_mode,
-        )
+        )  # (B, C[4], 4, 4)
         if resolution == 4:
-            return self.to_rgbs[0](hidden)
+            return self.to_rgbs[0](hidden)  # (B, 3, 4, 4)
 
         target_index = self.resolutions.index(resolution)
         for index in range(1, target_index + 1):
-            previous = hidden
+            previous = hidden  # (B, C[R/2], R/2, R/2)
             start = index * self.styles_per_block
             hidden = self.blocks[index](
                 hidden,
                 ws[:, start : start + self.styles_per_block],
                 noise_mode,
-            )
-            if index != target_index:
-                continue
-            new_rgb = self.to_rgbs[index](hidden)
-            if alpha == 1.0:
-                return new_rgb
-            old_rgb = filtered_upsample2d(self.to_rgbs[index - 1](previous))
-            return torch.lerp(old_rgb, new_rgb, alpha)
-        raise AssertionError("validated resolution was not reached")
+            )  # (B, C[R], R, R)
+            if index == target_index:
+                break
+        new_rgb = self.to_rgbs[index](hidden)  # (B, 3, R, R)
+        if alpha == 1.0:
+            return new_rgb
+        old_rgb = filtered_upsample2d(self.to_rgbs[index - 1](previous))
+        # old_rgb + alpha * (new_rgb - old_rgb)
+        return torch.lerp(old_rgb, new_rgb, alpha)  # (B, 3, R, R)
 
     def forward(
         self,
@@ -379,9 +356,10 @@ class DiscriminatorBlock(nn.Module):
         )
 
     def forward(self, inputs):
+        # (B, C_in, R, R)
         hidden = F.leaky_relu(self.conv1(inputs), 0.2)
         hidden = F.leaky_relu(self.conv2(hidden), 0.2)
-        return filtered_downsample2d(hidden)
+        return filtered_downsample2d(hidden)  # (B, C_out, R/2, R/2)
 
 
 class StyleGANDiscriminator(nn.Module):
@@ -427,6 +405,7 @@ class StyleGANDiscriminator(nn.Module):
         self.output = EqualizedLinear(final_channels, 1)
 
     def forward(self, images, resolution=128, alpha=1.0):
+        # images: (B, 3, R, R)
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
         if images.ndim != 4 or images.shape[1] != 3:
@@ -439,28 +418,29 @@ class StyleGANDiscriminator(nn.Module):
 
         current_index = self.resolutions.index(resolution)
         if resolution == 4:
-            hidden = F.leaky_relu(self.from_rgbs["4"](images), 0.2)
+            hidden = F.leaky_relu(self.from_rgbs["4"](images), 0.2)  # (B, C[4], 4, 4)
         else:
             new_hidden = F.leaky_relu(
                 self.from_rgbs[str(resolution)](images),
                 0.2,
-            )
-            new_hidden = self.blocks[str(resolution)](new_hidden)
-            old_images = filtered_downsample2d(images)
+            )  # (B, C[R], R, R)
+            new_hidden = self.blocks[str(resolution)](new_hidden)  # (B, C[R/2], R/2, R/2)
+            old_images = filtered_downsample2d(images)  # (B, 3, R/2, R/2)
             old_hidden = F.leaky_relu(
                 self.from_rgbs[str(resolution // 2)](old_images),
                 0.2,
-            )
+            )  # (B, C[R/2], R/2, R/2)
+            # old_hidden + alpha * (new_hidden - old_hidden)
             hidden = torch.lerp(old_hidden, new_hidden, alpha)
             for index in range(current_index - 1, 0, -1):
                 block_resolution = self.resolutions[index]
-                hidden = self.blocks[str(block_resolution)](hidden)
+                hidden = self.blocks[str(block_resolution)](hidden)  # (B, C[4], 4, 4)
 
-        hidden = self.minibatch_std(hidden)
-        hidden = F.leaky_relu(self.final_conv(hidden), 0.2)
-        hidden = hidden.flatten(1)
-        hidden = F.leaky_relu(self.final_linear(hidden), 0.2)
-        return self.output(hidden).squeeze(1)
+        hidden = self.minibatch_std(hidden)  # (B, C[4] + 1, 4, 4)
+        hidden = F.leaky_relu(self.final_conv(hidden), 0.2)  # (B, C[4], 4, 4)
+        hidden = hidden.flatten(1)  # (B, C[4] * 4 * 4)
+        hidden = F.leaky_relu(self.final_linear(hidden), 0.2)  # (B, C[4])
+        return self.output(hidden).squeeze(1)  # (B, 1) -> (B,)
 
 
 __all__ = [

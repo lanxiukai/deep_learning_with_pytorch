@@ -87,8 +87,6 @@ class ProGANGenerator(nn.Module):
         super().__init__()
         self.z_dim = int(z_dim)
         self.base_channels = int(base_channels)
-        if self.z_dim <= 0:
-            raise ValueError("z_dim must be positive.")
         self.resolutions = RESOLUTIONS
         self.channels = make_channel_map(self.base_channels, self.resolutions)
         self.input_block = GeneratorInputBlock(
@@ -120,10 +118,6 @@ class ProGANGenerator(nn.Module):
         # z shape: (B, z_dim)
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
-        if z.ndim != 2 or z.shape[1] != self.z_dim:
-            raise ValueError(
-                f"expected z shape [B, {self.z_dim}], got {tuple(z.shape)}"
-            )
 
         hidden = self.input_block(z)  # (B, channels[4], 4, 4)
         if resolution == 4:

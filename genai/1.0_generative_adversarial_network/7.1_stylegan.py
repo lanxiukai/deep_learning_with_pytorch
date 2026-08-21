@@ -150,6 +150,7 @@ def train_phase(
             real_images, _ = next(batches)
         alpha = phase_alpha(phase, batch_index)
         real_images = real_images.to(device, non_blocking=True)
+        # For compute R1
         real_images.requires_grad_(True)
         batch_size = real_images.shape[0]
 
@@ -176,8 +177,10 @@ def train_phase(
             resolution=phase.resolution,
             alpha=alpha,
         )
-        loss_d_main = F.softplus(-real_scores).mean()
-        loss_d_main = loss_d_main + F.softplus(fake_scores).mean()
+        loss_d_main = (
+            F.softplus(-real_scores).mean()
+            + F.softplus(fake_scores).mean()
+        )
         weighted_r1 = 0.5 * R1_GAMMA * r1_penalty(
             real_scores,
             real_images,

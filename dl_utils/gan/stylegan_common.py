@@ -28,8 +28,6 @@ NOISE_MODES = frozenset({"random", "fixed", "none"})
 def make_channel_map(base_channels, resolutions=RESOLUTIONS):
     """Scale the compact 128x128 feature schedule from one base width."""
     base_channels = int(base_channels)
-    if base_channels <= 0:
-        raise ValueError("base_channels must be positive.")
     resolutions = tuple(int(value) for value in resolutions)
     unknown = sorted(set(resolutions) - set(CHANNEL_MULTIPLIERS))
     if unknown:
@@ -153,16 +151,10 @@ class MinibatchStandardDeviation(nn.Module):
 
     def __init__(self, maximum_group=4):
         super().__init__()
-        if maximum_group <= 0:
-            raise ValueError("maximum_group must be positive.")
         self.maximum_group = int(maximum_group)
 
     def forward(self, inputs):
         # inputs shape: (B, C, H, W)
-        if inputs.ndim != 4 or inputs.shape[0] == 0:
-            raise ValueError(
-                "MinibatchStandardDeviation expects a non-empty BCHW tensor."
-            )
         batch_size, channels, height, width = inputs.shape
         group = min(batch_size, self.maximum_group)
         while batch_size % group:
@@ -192,8 +184,6 @@ class NoiseInjection(nn.Module):
         per_channel=True,
     ):
         super().__init__()
-        if channels <= 0 or resolution <= 0:
-            raise ValueError("channels and resolution must be positive.")
         self.resolution = int(resolution)
         weight_shape = (1, channels, 1, 1) if per_channel else ()
         # Learned noise scaling, optionally with one strength per feature channel.
@@ -207,7 +197,9 @@ class NoiseInjection(nn.Module):
         self.register_buffer("fixed_noise", fixed_noise, persistent=False)
 
     def forward(self, inputs, noise_mode="random"):
-        # inputs shape" (B, C, R, R)
+        # inputs shape: (B, C, R, R)
+        # noise shape: (B, 1, R, R) if noise_mode != "none" or None
+        # weight shape: (1, C, 1, 1) if per_channel else ()
         if noise_mode not in NOISE_MODES:
             modes = ", ".join(sorted(NOISE_MODES))
             raise ValueError(
@@ -232,7 +224,7 @@ class NoiseInjection(nn.Module):
                 device=inputs.device,
                 dtype=inputs.dtype,
             )
-        return inputs + self.weight * noise
+        return inputs + self.weight * noise  # (B, C, R, R)
 
 
 def _resample_kernel(
@@ -253,8 +245,6 @@ def _resample_kernel(
 def filter2d(inputs, kernel=(1, 3, 3, 1)):
     """Apply a channel-wise FIR low-pass filter without custom kernels."""
     # inputs shape: (B, C, H, W)
-    if inputs.ndim != 4:
-        raise ValueError("filter2d expects an BCHW tensor.")
     filter_kernel = _resample_kernel(
         kernel,
         device=inputs.device,
@@ -279,14 +269,14 @@ def filter2d(inputs, kernel=(1, 3, 3, 1)):
 def filtered_upsample2d(inputs, kernel=(1, 3, 3, 1)):
     """Upsample by two and suppress nearest-neighbor imaging artifacts."""
     upsampled = F.interpolate(inputs, scale_factor=2, mode="nearest")
-    return filter2d(upsampled, kernel)
+    return filter2d(upsampled, kernel)  # (B, C, 2H, 2W)
 
 
 def filtered_downsample2d(inputs, kernel=(1, 3, 3, 1)):
     """Low-pass filter before reducing spatial resolution by two."""
     if min(inputs.shape[-2:]) < 2:
         raise ValueError("filtered_downsample2d needs spatial size >= 2.")
-    return F.avg_pool2d(filter2d(inputs, kernel), kernel_size=2)
+    return F.avg_pool2d(filter2d(inputs, kernel), kernel_size=2)  # (B, C, H/2, W/2)
 
 
 def denormalize(images):
