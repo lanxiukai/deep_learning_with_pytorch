@@ -60,12 +60,11 @@ from dl_utils.gan.stylegan import (
     StyleGANGenerator,
 )
 from dl_utils.gan.inference import generate_in_batches
-from dl_utils.gan.progressive_training import (
+from dl_utils.gan.stylegan_common import (
+    RESOLUTIONS,
     build_progressive_schedule,
+    denormalize,
     phase_alpha,
-)
-from dl_utils.gan.stylegan_common import RESOLUTIONS, denormalize
-from dl_utils.gan.stylegan_training import (
     r1_penalty,
     sample_mixing_latents,
 )

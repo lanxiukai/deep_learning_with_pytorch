@@ -437,21 +437,16 @@ init_spectral_norm_state, spectral_norm_scratch_minimal.
 
 ### dl_utils/gan/stylegan_common.py
 
-Dependencies: math, collections.abc (Sequence), torch,
-torch.nn.functional (as F), torch (nn).
+Dependencies: math, random, collections.abc (Mapping, Sequence), dataclasses,
+torch, torch.nn.functional (as F), torch (nn).
 Public entries: RESOLUTIONS, CHANNEL_MULTIPLIERS, NOISE_MODES,
 make_channel_map, validate_resolution, validate_alpha, PixelNorm,
 EqualizedLinear, EqualizedConv2d, MinibatchStandardDeviation, NoiseInjection,
-filter2d, filtered_upsample2d, filtered_downsample2d, denormalize.
-
-### dl_utils/gan/progressive_training.py
-
-Dependencies: __future__ (annotations), collections.abc (Mapping, Sequence),
-dataclasses.
-Public entries (__all__): ProgressivePhase, build_progressive_schedule,
-phase_alpha.
-The module describes complete fade-in and stabilization phases directly;
-checkpoint subdivisions are intentionally not part of the schedule.
+filter2d, filtered_upsample2d, filtered_downsample2d, denormalize,
+ProgressivePhase, build_progressive_schedule, phase_alpha,
+sample_mixing_latents, r1_penalty, path_length_penalty.
+Progressive schedules describe complete fade-in and stabilization phases
+directly; checkpoint subdivisions are intentionally not part of the schedule.
 
 ### dl_utils/gan/progan.py
 
@@ -596,8 +591,9 @@ Public entries: NumericScalar, MetricHistory, Accumulator, accuracy, evaluate_ac
 
 ### dl_utils/training/optimization.py
 
-Dependencies: torch, torch.nn.
-Public entries: sgd, grad_clipping.
+Dependencies: dataclasses, torch, torch.nn.
+Public entries: UpdateRatioSchedule, ema_decay_for_batch, update_ema,
+update_ema_by_images, sgd, grad_clipping.
 
 ### dl_utils/training/parameters.py
 

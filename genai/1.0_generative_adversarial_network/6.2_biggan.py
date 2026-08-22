@@ -73,11 +73,10 @@ from dl_utils.gan.sn_gan import (
     discriminator_hinge_loss,
     generator_hinge_loss,
 )
-from dl_utils.gan.update_schedule import UpdateRatioSchedule
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_training_samples
 from dl_utils.training.metrics import MetricAccumulator
-from dl_utils.training.optimization import update_ema
+from dl_utils.training.optimization import UpdateRatioSchedule, update_ema
 from dl_utils.training.session import TrainingSession
 
 

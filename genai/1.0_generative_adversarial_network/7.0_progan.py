@@ -57,11 +57,12 @@ from dl_utils.gan.progan import (
     ProGANGenerator,
 )
 from dl_utils.gan.inference import generate_in_batches
-from dl_utils.gan.progressive_training import (
+from dl_utils.gan.stylegan_common import (
+    RESOLUTIONS,
     build_progressive_schedule,
+    denormalize,
     phase_alpha,
 )
-from dl_utils.gan.stylegan_common import RESOLUTIONS, denormalize
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_grid
 from dl_utils.training.metrics import MetricAccumulator

@@ -61,8 +61,8 @@ from dl_utils.gan.stylegan2 import (
     StyleGenerator,
 )
 from dl_utils.gan.inference import generate_in_batches
-from dl_utils.gan.stylegan_common import denormalize
-from dl_utils.gan.stylegan_training import (
+from dl_utils.gan.stylegan_common import (
+    denormalize,
     path_length_penalty,
     r1_penalty,
     sample_mixing_latents,
