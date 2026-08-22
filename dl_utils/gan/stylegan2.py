@@ -17,45 +17,15 @@ from dl_utils.gan.stylegan_common import (
     RESOLUTIONS,
     EqualizedConv2d,
     EqualizedLinear,
+    MappingNetwork,
     MinibatchStandardDeviation,
     NoiseInjection,
-    PixelNorm,
     denormalize,
     filtered_downsample2d,
     filtered_upsample2d,
     make_channel_map,
     validate_resolution,
 )
-
-
-class MappingNetwork(nn.Module):
-    """Map normalized Z vectors into StyleGAN2's intermediate W space."""
-
-    def __init__(self, z_dim, style_dim, layers=8):
-        super().__init__()
-        if layers <= 0:
-            raise ValueError("mapping network must contain at least one layer.")
-        if z_dim <= 0 or style_dim <= 0:
-            raise ValueError("z_dim and style_dim must be positive.")
-        modules = [PixelNorm()]
-        in_features = z_dim
-        for _ in range(layers):
-            modules.extend(
-                [
-                    EqualizedLinear(
-                        in_features,
-                        style_dim,
-                        learning_rate_multiplier=0.01,
-                        gain=math.sqrt(2),
-                    ),
-                    nn.LeakyReLU(0.2, inplace=True),
-                ]
-            )
-            in_features = style_dim
-        self.net = nn.Sequential(*modules)
-
-    def forward(self, z):
-        return self.net(z)
 
 
 class ModulatedConv2d(nn.Module):

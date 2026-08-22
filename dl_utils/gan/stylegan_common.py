@@ -225,6 +225,34 @@ class EqualizedLinear(nn.Module):
         return F.linear(inputs, self.weight * self.scale, bias)
 
 
+class MappingNetwork(nn.Module):
+    """Map normalized Z vectors into an intermediate W space."""
+
+    def __init__(self, z_dim, style_dim, layers=8):
+        super().__init__()
+        modules = [PixelNorm()]
+        in_features = z_dim
+        for _ in range(layers):
+            modules.extend(
+                [
+                    EqualizedLinear(
+                        in_features,
+                        style_dim,
+                        learning_rate_multiplier=0.01,
+                        gain=math.sqrt(2),
+                    ),
+                    nn.LeakyReLU(0.2, inplace=True),
+                ]
+            )
+            in_features = style_dim
+        self.net = nn.Sequential(*modules)
+
+    def forward(self, z):
+        # latent vector (input): (B, z_dim)
+        # style vector/W latent vector (output): (B, style_dim)
+        return self.net(z)
+
+
 class EqualizedConv2d(nn.Module):
     """Convolution with ProGAN-style equalized learning-rate scaling."""
 
@@ -405,6 +433,7 @@ __all__ = [
     "CHANNEL_MULTIPLIERS",
     "EqualizedConv2d",
     "EqualizedLinear",
+    "MappingNetwork",
     "MinibatchStandardDeviation",
     "NOISE_MODES",
     "NoiseInjection",

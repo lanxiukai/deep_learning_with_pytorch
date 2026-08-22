@@ -441,7 +441,8 @@ Dependencies: math, random, collections.abc (Mapping, Sequence), dataclasses,
 torch, torch.nn.functional (as F), torch (nn).
 Public entries: RESOLUTIONS, CHANNEL_MULTIPLIERS, NOISE_MODES,
 make_channel_map, validate_resolution, validate_alpha, PixelNorm,
-EqualizedLinear, EqualizedConv2d, MinibatchStandardDeviation, NoiseInjection,
+EqualizedLinear, MappingNetwork, EqualizedConv2d,
+MinibatchStandardDeviation, NoiseInjection,
 filter2d, filtered_upsample2d, filtered_downsample2d, denormalize,
 ProgressivePhase, build_progressive_schedule, phase_alpha,
 sample_mixing_latents, r1_penalty, path_length_penalty.

@@ -11,9 +11,9 @@ from dl_utils.gan.stylegan_common import (
     RESOLUTIONS,
     EqualizedConv2d,
     EqualizedLinear,
+    MappingNetwork,
     MinibatchStandardDeviation,
     NoiseInjection,
-    PixelNorm,
     denormalize,
     filtered_downsample2d,
     filtered_upsample2d,
@@ -21,33 +21,6 @@ from dl_utils.gan.stylegan_common import (
     validate_alpha,
     validate_resolution,
 )
-
-
-class MappingNetwork(nn.Module):
-    """Map normalized Z vectors into StyleGAN's intermediate W space."""
-
-    def __init__(self, z_dim, style_dim, layers=8):
-        super().__init__()
-        modules = [PixelNorm()]
-        in_features = z_dim
-        for _ in range(layers):
-            modules.extend(
-                [
-                    EqualizedLinear(
-                        in_features,
-                        style_dim,
-                        learning_rate_multiplier=0.01,
-                        gain=math.sqrt(2),
-                    ),
-                    nn.LeakyReLU(0.2, inplace=True),
-                ]
-            )
-            in_features = style_dim
-        self.net = nn.Sequential(*modules)
-
-    def forward(self, z):
-        # input: (B, z_dim), output: (B, style_dim)
-        return self.net(z)
 
 
 class AdaptiveInstanceNorm(nn.Module):
@@ -238,8 +211,6 @@ class StyleGANGenerator(nn.Module):
 
         if mixing_z is not None:
             # mixing_z: (B, z_dim)
-            if mixing_z.shape != z.shape:
-                raise ValueError("mixing_z must have the same shape as z.")
             second_w = self.mapping(mixing_z)  # (B, style_dim)
             if mixing_cutoff is None:
                 mixing_cutoff = random.randint(1, active_ws - 1)  # [1, active_ws)
@@ -251,20 +222,21 @@ class StyleGANGenerator(nn.Module):
             ws = torch.cat([ws[:, :mixing_cutoff], second_ws], dim=1)
 
         truncation_psi = float(truncation_psi)
-        if truncation_cutoff is None:
-            truncation_cutoff = active_ws
-        if not 0 <= truncation_cutoff <= active_ws:
-            raise ValueError(
-                "truncation_cutoff is outside the active style stack."
-            )
-        if truncation_psi != 1.0 and truncation_cutoff > 0:
-            # w_avg + truncation_psi * (ws - w_avg)
-            truncated = torch.lerp(
-                self.w_avg.view(1, 1, -1),  # (1, 1, style_dim)
-                ws[:, :truncation_cutoff],  # (B, truncation_cutoff, style_dim)
-                truncation_psi,
-            )
-            ws = torch.cat([truncated, ws[:, truncation_cutoff:]], dim=1)
+        if truncation_psi != 1.0:
+            if truncation_cutoff is None:
+                truncation_cutoff = active_ws
+            if not 0 <= truncation_cutoff <= active_ws:
+                raise ValueError(
+                    "truncation_cutoff is outside the active style stack."
+                )
+            if truncation_cutoff > 0:
+                # w_avg + truncation_psi * (ws - w_avg)
+                truncated = torch.lerp(
+                    self.w_avg.view(1, 1, -1),  # (1, 1, style_dim)
+                    ws[:, :truncation_cutoff],  # (B, truncation_cutoff, style_dim)
+                    truncation_psi,
+                )
+                ws = torch.cat([truncated, ws[:, truncation_cutoff:]], dim=1)
         return ws  # (B, num_ws, style_dim)
 
     def synthesize(
@@ -408,8 +380,6 @@ class StyleGANDiscriminator(nn.Module):
         # images: (B, 3, R, R)
         resolution = validate_resolution(resolution, self.resolutions)
         alpha = validate_alpha(alpha)
-        if images.ndim != 4 or images.shape[1] != 3:
-            raise ValueError("expected RGB images in BCHW format.")
         if images.shape[-2:] != (resolution, resolution):
             raise ValueError(
                 f"expected {resolution}x{resolution} images, "
