@@ -211,15 +211,15 @@ class StyleGANGenerator(nn.Module):
 
         if mixing_z is not None:
             # mixing_z: (B, z_dim)
-            second_w = self.mapping(mixing_z)  # (B, style_dim)
+            mixing_w = self.mapping(mixing_z)  # (B, style_dim)
             if mixing_cutoff is None:
                 mixing_cutoff = random.randint(1, active_ws - 1)  # [1, active_ws)
             if not 0 < mixing_cutoff < active_ws:
                 raise ValueError(
                     "mixing_cutoff must be inside the active style stack"
                 )
-            second_ws = second_w[:, None, :].repeat(1, self.num_ws - mixing_cutoff, 1)
-            ws = torch.cat([ws[:, :mixing_cutoff], second_ws], dim=1)
+            mixing_ws = mixing_w[:, None, :].repeat(1, self.num_ws - mixing_cutoff, 1)
+            ws = torch.cat([ws[:, :mixing_cutoff], mixing_ws], dim=1)
 
         truncation_psi = float(truncation_psi)
         if truncation_psi != 1.0:
