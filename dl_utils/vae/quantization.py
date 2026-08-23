@@ -268,6 +268,123 @@ class VQVAE32(nn.Module):
         return self.decoder(z_st), indices, quantizer_loss, diagnostics
 
 
+class VQVAE2(nn.Module):
+    """Two-level VQ tokenizer with 4x4 top and 8x8 bottom index grids."""
+
+    def __init__(
+        self,
+        *,
+        hidden_channels: int = 128,
+        embedding_dim: int = 64,
+        top_codebook_size: int = 512,
+        bottom_codebook_size: int = 512,
+        commitment: float = 0.25,
+    ) -> None:
+        super().__init__()
+        self.hidden_channels = hidden_channels
+        self.embedding_dim = embedding_dim
+        self.bottom_encoder = ImageEncoder32(
+            hidden_channels, hidden_channels=hidden_channels
+        )
+        self.top_encoder = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, 4, 2, 1),
+            ResidualBlock(hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, embedding_dim, 1),
+        )
+        self.top_quantizer = VectorQuantizer(
+            top_codebook_size, embedding_dim, commitment
+        )
+        self.top_to_bottom = nn.Sequential(
+            nn.Conv2d(embedding_dim, hidden_channels, 3, padding=1),
+            ResidualBlock(hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(hidden_channels, hidden_channels, 4, 2, 1),
+        )
+        self.bottom_projection = nn.Sequential(
+            nn.Conv2d(2 * hidden_channels, hidden_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, embedding_dim, 1),
+        )
+        self.bottom_quantizer = VectorQuantizer(
+            bottom_codebook_size, embedding_dim, commitment
+        )
+        self.decoder = ImageDecoder32(
+            hidden_channels + embedding_dim,
+            hidden_channels=hidden_channels,
+        )
+
+    def encode(
+        self, x: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        bottom_features = self.bottom_encoder(x)
+        top_e = self.top_encoder(bottom_features)
+        top_st, top_indices, top_loss, top_diagnostics = (
+            self.top_quantizer(top_e)
+        )
+        top_condition = self.top_to_bottom(top_st)
+        bottom_e = self.bottom_projection(
+            torch.cat((bottom_features, top_condition), dim=1)
+        )
+        bottom_st, bottom_indices, bottom_loss, bottom_diagnostics = (
+            self.bottom_quantizer(bottom_e)
+        )
+        diagnostics = {
+            "top_perplexity": top_diagnostics["perplexity"],
+            "top_active": top_diagnostics["active_codes"],
+            "top_quantization_mse": top_diagnostics["quantization_mse"],
+            "bottom_perplexity": bottom_diagnostics["perplexity"],
+            "bottom_active": bottom_diagnostics["active_codes"],
+            "bottom_quantization_mse": bottom_diagnostics[
+                "quantization_mse"
+            ],
+        }
+        return (
+            top_condition,
+            bottom_st,
+            top_indices,
+            bottom_indices,
+            top_loss + bottom_loss,
+            diagnostics,
+        )
+
+    def top_condition_from_indices(self, top_indices: Tensor) -> Tensor:
+        return self.top_to_bottom(self.top_quantizer.lookup(top_indices))
+
+    def decode_indices(
+        self, top_indices: Tensor, bottom_indices: Tensor
+    ) -> Tensor:
+        top_condition = self.top_condition_from_indices(top_indices)
+        bottom = self.bottom_quantizer.lookup(bottom_indices)
+        return self.decoder(torch.cat((top_condition, bottom), dim=1))
+
+    def reconstruct(self, x: Tensor) -> Tensor:
+        top_condition, bottom, _, _, _, _ = self.encode(x)
+        return self.decoder(torch.cat((top_condition, bottom), dim=1))
+
+    def forward(
+        self, x: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        (
+            top_condition,
+            bottom,
+            top_indices,
+            bottom_indices,
+            vq_loss,
+            diagnostics,
+        ) = self.encode(x)
+        reconstruction = self.decoder(
+            torch.cat((top_condition, bottom), dim=1)
+        )
+        return (
+            reconstruction,
+            top_indices,
+            bottom_indices,
+            vq_loss,
+            diagnostics,
+        )
+
+
 class FSQAutoencoder32(nn.Module):
     """Same 32x32 tokenizer architecture with FSQ replacing learned VQ."""
 
@@ -314,6 +431,7 @@ __all__ = [
     "ResidualBlock",
     "TokenUsageAccumulator",
     "VQVAE32",
+    "VQVAE2",
     "VectorQuantizer",
     "token_usage",
 ]

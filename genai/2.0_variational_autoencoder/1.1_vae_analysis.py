@@ -1,304 +1,245 @@
-"""
-Analyze a previously trained Variational AutoEncoder checkpoint.
+"""Analyze the frozen standard-VAE baseline without retraining it.
+
+The script keeps three image paths separate:
+
+* posterior-mean reconstruction is deterministic and reads a real image;
+* posterior-sample reconstruction also reads a real image;
+* prior generation decodes an independent ``N(0, I)`` draw.
+
+Latent interpolation is retained as a local decoder diagnostic, not evidence
+of independent semantic factors. The training script and its 256x256 model
+remain unchanged as the introductory baseline for later compact lessons.
 """
 
-from dl_utils.plot._backend import pyplot as plt
-import numpy as np
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
 import torch
-import torchvision
+from torch import Tensor
+from torchvision.utils import save_image
 
 from dl_utils.data.vision import image_folder_loader
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.filesystem.directories import reset_dir
-from dl_utils.vae.vae import VAE, device
-from dl_utils.plot.images import vae_sample_grid
+from dl_utils.runtime.randomness import set_seed
+from dl_utils.vae.vae import VAE, device, diagonal_gaussian_kl, reparameterize
 
-def main():
-    root = infer_project_root()
-    out_dir = root / "output" / "vae" / "vae_analysis"
-    reset_dir(str(out_dir))
 
-    checkpoint_path = root / "output/vae/VAEglasses.pth"
-    if not checkpoint_path.exists():
+PROJECT_ROOT = infer_project_root()
+
+
+class PosteriorAccumulator:
+    """Accumulate standard-VAE posterior diagnostics without storing samples."""
+
+    def __init__(self, latent_dims: int) -> None:
+        self.mu_total = torch.zeros(latent_dims, dtype=torch.float64)
+        self.mu_square_total = torch.zeros_like(self.mu_total)
+        self.std_square_total = torch.zeros_like(self.mu_total)
+        self.kl_total = torch.zeros_like(self.mu_total)
+        self.examples = 0
+
+    def update(self, mu: Tensor, std: Tensor) -> None:
+        self.mu_total += mu.detach().double().sum(dim=0).cpu()
+        self.mu_square_total += mu.detach().double().square().sum(dim=0).cpu()
+        self.std_square_total += std.detach().double().square().sum(dim=0).cpu()
+        self.kl_total += diagonal_gaussian_kl(mu, std).detach().double().sum(dim=0).cpu()
+        self.examples += mu.shape[0]
+
+    def metrics(self, *, active_variance_threshold: float) -> dict[str, object]:
+        if self.examples == 0:
+            raise ValueError("no posterior values were accumulated")
+        mean = self.mu_total / self.examples
+        variance_of_mu = (
+            self.mu_square_total / self.examples - mean.square()
+        ).clamp_min(0.0)
+        posterior_variance = self.std_square_total / self.examples
+        kl_per_dimension = self.kl_total / self.examples
+        return {
+            "examples": self.examples,
+            "posterior_mean_by_dimension": mean.tolist(),
+            "posterior_mean_std_by_dimension": variance_of_mu.sqrt().tolist(),
+            "posterior_std_by_dimension": posterior_variance.sqrt().tolist(),
+            "kl_nats_per_dimension": kl_per_dimension.tolist(),
+            "kl_nats_per_image": float(kl_per_dimension.sum()),
+            "active_variance_threshold": active_variance_threshold,
+            "active_dimensions": int(
+                (variance_of_mu > active_variance_threshold).sum()
+            ),
+        }
+
+
+def infer_latent_dims(state_dict: dict[str, Tensor]) -> int:
+    weight = state_dict.get("encoder.linear2.weight")
+    if weight is None or weight.ndim != 2:
+        raise ValueError("checkpoint does not contain the baseline posterior head")
+    return weight.shape[0]
+
+
+@torch.inference_mode()
+def evaluate(
+    model: VAE,
+    loader,
+    *,
+    latent_dims: int,
+    maximum_batches: int,
+    active_variance_threshold: float,
+) -> tuple[dict[str, object], Tensor, Tensor, Tensor]:
+    model.eval()
+    accumulator = PosteriorAccumulator(latent_dims)
+    squared_error = 0.0
+    absolute_error = 0.0
+    elements = 0
+    comparison = None
+    interpolation = None
+    for batch_index, (images, _) in enumerate(loader):
+        if batch_index >= maximum_batches:
+            break
+        images = images.to(device)
+        mu, std = model.encoder.statistics(images)
+        mean_reconstruction = model.decoder(mu)
+        sample_reconstruction = model.decoder(reparameterize(mu, std))
+        squared_error += float((mean_reconstruction - images).square().sum())
+        absolute_error += float((mean_reconstruction - images).abs().sum())
+        elements += images.numel()
+        accumulator.update(mu, std)
+        if comparison is None:
+            count = min(8, images.shape[0])
+            comparison = torch.cat(
+                (
+                    images[:count],
+                    mean_reconstruction[:count],
+                    sample_reconstruction[:count],
+                )
+            ).cpu()
+            if count >= 2:
+                weights = torch.linspace(0, 1, 7, device=device)[:, None]
+                path = (1.0 - weights) * mu[0] + weights * mu[1]
+                interpolation = model.decoder(path).cpu()
+    if elements == 0 or comparison is None:
+        raise ValueError("cannot analyze an empty loader")
+    if interpolation is None:
+        raise ValueError("at least two images are required for interpolation")
+    mse = squared_error / elements
+    metrics = {
+        "posterior_mean_reconstruction": {
+            "pixel_l1": absolute_error / elements,
+            "pixel_mse": mse,
+            "psnr_for_zero_to_one_range": 10.0
+            * torch.log10(torch.tensor(1.0 / max(mse, 1e-12))).item(),
+        },
+        "posterior": accumulator.metrics(
+            active_variance_threshold=active_variance_threshold
+        ),
+        "path_boundaries": {
+            "posterior_mean_reconstruction": "reads a real image",
+            "posterior_sample_reconstruction": "reads a real image",
+            "prior_generation": "decodes an independent standard-normal draw",
+            "interpolation": "local decoder diagnostic, not unconditional generation",
+        },
+    }
+    prior_samples = model.decoder(
+        torch.randn(18, latent_dims, device=device)
+    ).cpu()
+    return metrics, comparison, prior_samples, interpolation
+
+
+def smoke_test() -> None:
+    torch.manual_seed(7)
+    model = VAE(latent_dims=2).eval()
+    images = torch.rand(2, 3, 256, 256)
+    with torch.inference_mode():
+        mu, std = model.encoder.statistics(images)
+        mean_reconstruction = model.decoder(mu)
+        sample_reconstruction = model.decoder(reparameterize(mu, std))
+        prior = model.decoder(torch.randn(2, 2))
+    accumulator = PosteriorAccumulator(2)
+    accumulator.update(mu, std)
+    metrics = accumulator.metrics(active_variance_threshold=1e-2)
+    assert mean_reconstruction.shape == sample_reconstruction.shape == images.shape
+    assert prior.shape == images.shape
+    assert float(metrics["kl_nats_per_image"]) >= 0
+    print("smoke test passed: reconstruction and prior paths are distinct")
+
+
+def analyze(args: argparse.Namespace) -> None:
+    if not args.checkpoint.is_file():
         raise FileNotFoundError(
-            f"Checkpoint not found at {checkpoint_path}. Run 1.0_vae_train.py first."
+            f"checkpoint not found at {args.checkpoint}; run 1.0_vae_train.py first"
         )
-
-    latent_dims = 100
-    vae = VAE().to(device)
-    vae.load_state_dict(torch.load(
-        checkpoint_path, map_location=device, weights_only=True))
-    vae.eval()
-    loader = image_folder_loader(
-        root / "data/glasses-256", batch_size=16, shuffle=False
-        )
-
-    # ---- compare original images with reconstructions ----
-    imgs, _ = next(iter(loader))
-    imgs = imgs.to(device)
-    mu, std, out = vae(imgs) # reconstruct imgs
-    # ---- interleave original and reconstruction blocks ----
-    nrow = 8
-    images_list = []
-    for i in range(0, imgs.shape[0], nrow):
-        images_list.append(imgs[i:i+nrow])   # original blocks
-        images_list.append(out[i:i+nrow])    # reconstruction blocks（under the original blocks）
-    images = torch.cat(images_list, dim=0).detach().cpu()
-    images = torchvision.utils.make_grid(images, nrow, 4)
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=300)
-    plt.imshow(np.transpose(images, (1, 2, 0)))
-    plt.axis("off")
-    fig.savefig(
-        out_dir / "vae_original_vs_reconstructed.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- generate random faces from latent space ----
-    vae_sample_grid(
-        vae.decoder, latent_dims, device,
-        out_dir / "vae_samples_grid.png",
+    state_dict = torch.load(
+        args.checkpoint, map_location=device, weights_only=True
     )
+    latent_dims = infer_latent_dims(state_dict)
+    model = VAE(latent_dims=latent_dims).to(device)
+    model.load_state_dict(state_dict, strict=True)
+    loader = image_folder_loader(
+        args.data,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=device.type == "cuda",
+    )
+    metrics, comparison, prior_samples, interpolation = evaluate(
+        model,
+        loader,
+        latent_dims=latent_dims,
+        maximum_batches=args.maximum_batches,
+        active_variance_threshold=args.active_variance_threshold,
+    )
+    args.output.mkdir(parents=True, exist_ok=True)
+    save_image(
+        comparison,
+        args.output / "real_mean_and_sample_reconstruction.png",
+        nrow=comparison.shape[0] // 3,
+    )
+    save_image(
+        prior_samples,
+        args.output / "standard_normal_prior_samples.png",
+        nrow=6,
+    )
+    save_image(
+        interpolation,
+        args.output / "posterior_mean_interpolation_not_generation.png",
+        nrow=len(interpolation),
+    )
+    with (args.output / "metrics.json").open("w", encoding="utf-8") as handle:
+        json.dump(metrics, handle, indent=2)
+    print(json.dumps(metrics, indent=2))
 
-    # ============================================================
-    # Encoding arithmetic — manipulate latent vectors for attribute control
-    # ============================================================
 
-    # access the underlying dataset for individual image lookup
-    data = loader.dataset
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=PROJECT_ROOT / "output" / "vae" / "VAEglasses.pth",
+    )
+    parser.add_argument(
+        "--data", type=Path, default=PROJECT_ROOT / "data" / "glasses-256"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=PROJECT_ROOT / "output" / "vae" / "vae_analysis",
+    )
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--maximum-batches", type=int, default=100)
+    parser.add_argument("--active-variance-threshold", type=float, default=1e-2)
+    parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
 
-    # ---- take the first 25 samples (glasses) and the last 25 (noglasses),
-    #       then manually pick three men / three women from each group ----
-    torch.manual_seed(0)  # set the cpu seed
-    glasses = []
-    plt.figure(figsize=(12, 12))
-    for i in range(25):
-        img, label = data[i]
-        glasses.append(img)
-        plt.subplot(5, 5, i + 1)  # place each image in a 5×5 subplot grid
-        plt.imshow(img.numpy().transpose((1, 2, 0)))  # -> (H, W, C)
-        plt.axis("off")
-    plt.savefig(out_dir / "glasses_grid.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
 
-    # select three men's images with glasses
-    men_g = [glasses[0], glasses[3], glasses[14]]
-    # select three women's images with glasses
-    women_g = [glasses[2], glasses[15], glasses[23]]
-
-    noglasses = []
-    plt.figure(figsize=(12, 12))
-    for i in range(25):
-        img, label = data[-i - 1]
-        noglasses.append(img)
-        plt.subplot(5, 5, i + 1)
-        plt.imshow(img.numpy().transpose((1, 2, 0)))
-        plt.axis("off")
-    plt.savefig(out_dir / "noglasses_grid.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # select three men's images without glasses
-    men_ng = [noglasses[1], noglasses[3], noglasses[11]]
-    # select three women's images without glasses
-    women_ng = [noglasses[7], noglasses[9], noglasses[14]]
-
-    # ---- encode each group and obtain average latent vector ----
-    men_g_batch = torch.cat((
-        men_g[0].unsqueeze(0), men_g[1].unsqueeze(0), men_g[2].unsqueeze(0)),
-        dim=0).to(device)  # -> (3, 3, 256, 256)
-    _, _, men_g_encodings = vae.encoder(men_g_batch)  # (3, 100)
-    men_g_encoding = men_g_encodings.mean(dim=0)      # (100,)
-    men_g_recon = vae.decoder(men_g_encoding.unsqueeze(0))  # (1, 100) -> (1, 3, 256, 256)
-
-    women_g_batch = torch.cat((
-        women_g[0].unsqueeze(0), women_g[1].unsqueeze(0), women_g[2].unsqueeze(0)),
-        dim=0).to(device)
-    _, _, women_g_encodings = vae.encoder(women_g_batch)
-    women_g_encoding = women_g_encodings.mean(dim=0)
-    women_g_recon = vae.decoder(women_g_encoding.unsqueeze(0))
-
-    men_ng_batch = torch.cat((
-        men_ng[0].unsqueeze(0), men_ng[1].unsqueeze(0), men_ng[2].unsqueeze(0)),
-        dim=0).to(device)
-    _, _, men_ng_encodings = vae.encoder(men_ng_batch)
-    men_ng_encoding = men_ng_encodings.mean(dim=0)
-    men_ng_recon = vae.decoder(men_ng_encoding.unsqueeze(0))
-
-    women_ng_batch = torch.cat((
-        women_ng[0].unsqueeze(0), women_ng[1].unsqueeze(0), women_ng[2].unsqueeze(0)),
-        dim=0).to(device)
-    _, _, women_ng_encodings = vae.encoder(women_ng_batch)
-    women_ng_encoding = women_ng_encodings.mean(dim=0)
-    women_ng_recon = vae.decoder(women_ng_encoding.unsqueeze(0))
-
-    # ---- display the four group reconstructions ----
-    imgs = torch.cat(
-        (men_g_recon, women_g_recon, men_ng_recon, women_ng_recon),
-        dim=0)  # (4, 3, 256, 256)
-    # make_grid (nrow=4, padding=1), -> (3, H+2, W*4+5)
-    imgs = torchvision.utils.make_grid(imgs, 4, 1).cpu().numpy()
-    # C,H,W → H,W,C for imshow
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(figsize=(8, 2), dpi=300)
-    plt.imshow(imgs)
-    plt.title("encode each group and obtain average latent vector",
-          fontsize=10, c="r")
-    plt.axis("off")
-    fig.savefig(
-        out_dir / "vae_average_latent_vector.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- encoding arithmetic: man without glasses ----
-    z = men_g_encoding - women_g_encoding + women_ng_encoding
-    out = vae.decoder(z.unsqueeze(0))
-    imgs = torch.cat((men_g_recon, women_g_recon, women_ng_recon, out), dim=0)
-    imgs = torchvision.utils.make_grid(imgs, 4, 1).cpu().numpy()
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(figsize=(8, 2), dpi=300)
-    plt.imshow(imgs)
-    plt.title("man with glasses - woman with glasses "
-              "+ woman without glasses = man without glasses",
-              fontsize=10, c="r")
-    plt.axis("off")
-    fig.savefig(
-        out_dir / "vae_exercise_7_1_0.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- Exercise 7.1 (i): woman with glasses ----
-    z = men_g_encoding - men_ng_encoding + women_ng_encoding
-    out = vae.decoder(z.unsqueeze(0))
-    imgs = torch.cat((men_g_recon, men_ng_recon, women_ng_recon, out), dim=0)
-    imgs = torchvision.utils.make_grid(imgs, 4, 1).cpu().numpy()
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(figsize=(8, 2), dpi=300)
-    plt.imshow(imgs)
-    plt.title("man with glasses - man without glasses "
-              "+ woman without glasses = woman with glasses",
-              fontsize=10, c="r")
-    plt.axis("off")
-    fig.savefig(
-        out_dir / "vae_exercise_7_1_i.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- Exercise 7.1 (ii): man with glasses ----
-    z = men_ng_encoding - women_ng_encoding + women_g_encoding
-    out = vae.decoder(z.unsqueeze(0))
-    imgs = torch.cat((men_ng_recon, women_ng_recon, women_g_recon, out), dim=0)
-    imgs = torchvision.utils.make_grid(imgs, 4, 1).cpu().numpy()
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(figsize=(8, 2), dpi=300)
-    plt.imshow(imgs)
-    plt.title("man without glasses - woman without glasses "
-              "+ woman with glasses = man with glasses",
-              fontsize=10, c="r")
-    plt.axis("off")
-    fig.savefig(
-        out_dir / "vae_exercise_7_1_ii.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- Exercise 7.1 (iii): woman with glasses ----
-    z = women_ng_encoding - men_ng_encoding + men_g_encoding
-    out = vae.decoder(z.unsqueeze(0))
-    imgs = torch.cat((women_ng_recon, men_ng_recon, men_g_recon, out), dim=0)
-    imgs = torchvision.utils.make_grid(imgs, 4, 1).cpu().numpy()
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(figsize=(8, 2), dpi=300)
-    plt.imshow(imgs)
-    plt.title("woman without glasses - man without glasses "
-              "+ man with glasses = woman with glasses",
-              fontsize=10, c="r")
-    plt.axis("off")
-    fig.savefig(
-        out_dir / "vae_exercise_7_1_iii.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- interpolation: woman with glasses → woman without glasses ----
-    results = []
-    for w in [0, 0.2, 0.4, 0.6, 0.8, 1.0]:
-        z = w * women_ng_encoding + (1 - w) * women_g_encoding
-        out = vae.decoder(z.unsqueeze(0))  # (1, 100) -> (1, 3, H, W)
-        results.append(out)
-    imgs = torch.cat(results, dim=0)  # -> (6, 3, H, W)
-    imgs = torchvision.utils.make_grid(imgs, 6, 1).cpu().numpy()
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(dpi=300)
-    plt.imshow(imgs)
-    plt.axis("off")
-    plt.title("woman with glasses → woman without glasses")
-    fig.savefig(
-        out_dir / "vae_exercise_7_2_0.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- Exercise 7.2 (i): man with glasses → man without glasses ----
-    results = []
-    for w in [0, 0.2, 0.4, 0.6, 0.8, 1.0]:
-        z = w * men_ng_encoding + (1 - w) * men_g_encoding
-        out = vae.decoder(z.unsqueeze(0))
-        results.append(out)
-    imgs = torch.cat(results, dim=0)
-    imgs = torchvision.utils.make_grid(imgs, 6, 1).cpu().numpy()
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(dpi=300)
-    plt.imshow(imgs)
-    plt.axis("off")
-    plt.title("man with glasses → man without glasses")
-    fig.savefig(
-        out_dir / "vae_exercise_7_2_i.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- Exercise 7.2 (ii): woman without glasses → man without glasses ----
-    results = []
-    for w in [0, 0.2, 0.4, 0.6, 0.8, 1.0]:
-        z = w * men_ng_encoding + (1 - w) * women_ng_encoding
-        out = vae.decoder(z.unsqueeze(0))
-        results.append(out)
-    imgs = torch.cat(results, dim=0)
-    imgs = torchvision.utils.make_grid(imgs, 6, 1).cpu().numpy()
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(dpi=300)
-    plt.imshow(imgs)
-    plt.axis("off")
-    plt.title("woman without glasses → man without glasses")
-    fig.savefig(
-        out_dir / "vae_exercise_7_2_ii.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
-
-    # ---- Exercise 7.2 (iii): woman with glasses → man with glasses ----
-    results = []
-    for w in [0, 0.2, 0.4, 0.6, 0.8, 1.0]:
-        z = w * men_g_encoding + (1 - w) * women_g_encoding
-        out = vae.decoder(z.unsqueeze(0))
-        results.append(out)
-    imgs = torch.cat(results, dim=0)
-    imgs = torchvision.utils.make_grid(imgs, 6, 1).cpu().numpy()
-    imgs = np.transpose(imgs, (1, 2, 0))
-    fig, ax = plt.subplots(dpi=300)
-    plt.imshow(imgs)
-    plt.axis("off")
-    plt.title("woman with glasses → man with glasses")
-    fig.savefig(
-        out_dir / "vae_exercise_7_2_iii.png",
-        bbox_inches="tight")
-    plt.close(fig)
-    # plt.show()
+def main() -> None:
+    args = parse_args()
+    set_seed(args.seed)
+    if args.smoke_test:
+        smoke_test()
+    else:
+        analyze(args)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ The priors are deliberately small PixelCNNs rather than the paper's large
 PixelSNAIL-inspired systems; they preserve the two-stage, top-before-bottom
 algorithm while fitting comfortably on a 12 GB card.  A coarse/fine semantic
 split is an empirical outcome to inspect, not a structural guarantee.  To
-keep hierarchy as the visible increment, this lesson reuses 3.0's gradient-
+keep hierarchy as the visible increment, this lesson reuses 6.0's gradient-
 updated codebooks; the paper tokenizer used EMA codebook updates.
 """
 
@@ -23,115 +23,21 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
-from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.vae.quantization import (
-    ImageDecoder32,
-    ImageEncoder32,
-    ResidualBlock,
-    TokenUsageAccumulator,
-    VectorQuantizer,
+from dl_utils.data.cifar10 import (
+    make_cifar10_loader,
+    normalized_cifar10_transform,
 )
+from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import model_state_fingerprint
+from dl_utils.vae.quantization import TokenUsageAccumulator, VQVAE2
 from dl_utils.vae.token_prior import PixelCNNPrior
 
 
 PROJECT_ROOT = infer_project_root()
-
-
-class VQVAE2(nn.Module):
-    """Two-level VQ tokenizer with 4x4 top and 8x8 bottom index grids."""
-
-    def __init__(
-        self,
-        *,
-        hidden_channels: int = 128,
-        embedding_dim: int = 64,
-        top_codebook_size: int = 512,
-        bottom_codebook_size: int = 512,
-        commitment: float = 0.25,
-    ) -> None:
-        super().__init__()
-        self.hidden_channels = hidden_channels
-        self.bottom_encoder = ImageEncoder32(
-            hidden_channels, hidden_channels=hidden_channels
-        )
-        self.top_encoder = nn.Sequential(
-            nn.Conv2d(hidden_channels, hidden_channels, 4, 2, 1),
-            ResidualBlock(hidden_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_channels, embedding_dim, 1),
-        )
-        self.top_quantizer = VectorQuantizer(
-            top_codebook_size, embedding_dim, commitment
-        )
-        self.top_to_bottom = nn.Sequential(
-            nn.Conv2d(embedding_dim, hidden_channels, 3, padding=1),
-            ResidualBlock(hidden_channels),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_channels, hidden_channels, 4, 2, 1),
-        )
-        self.bottom_projection = nn.Sequential(
-            nn.Conv2d(2 * hidden_channels, hidden_channels, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_channels, embedding_dim, 1),
-        )
-        self.bottom_quantizer = VectorQuantizer(
-            bottom_codebook_size, embedding_dim, commitment
-        )
-        self.decoder = ImageDecoder32(
-            hidden_channels + embedding_dim, hidden_channels=hidden_channels
-        )
-
-    def encode(
-        self, x: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
-        bottom_features = self.bottom_encoder(x)
-        top_e = self.top_encoder(bottom_features)
-        top_st, top_indices, top_loss, top_diagnostics = self.top_quantizer(top_e)
-        top_condition = self.top_to_bottom(top_st)
-        bottom_e = self.bottom_projection(
-            torch.cat((bottom_features, top_condition), dim=1)
-        )
-        bottom_st, bottom_indices, bottom_loss, bottom_diagnostics = (
-            self.bottom_quantizer(bottom_e)
-        )
-        diagnostics = {
-            "top_perplexity": top_diagnostics["perplexity"],
-            "top_active": top_diagnostics["active_codes"],
-            "top_quantization_mse": top_diagnostics["quantization_mse"],
-            "bottom_perplexity": bottom_diagnostics["perplexity"],
-            "bottom_active": bottom_diagnostics["active_codes"],
-            "bottom_quantization_mse": bottom_diagnostics["quantization_mse"],
-        }
-        return (
-            top_condition,
-            bottom_st,
-            top_indices,
-            bottom_indices,
-            top_loss + bottom_loss,
-            diagnostics,
-        )
-
-    def top_condition_from_indices(self, top_indices: Tensor) -> Tensor:
-        return self.top_to_bottom(self.top_quantizer.lookup(top_indices))
-
-    def decode_indices(self, top_indices: Tensor, bottom_indices: Tensor) -> Tensor:
-        top_condition = self.top_condition_from_indices(top_indices)
-        bottom = self.bottom_quantizer.lookup(bottom_indices)
-        return self.decoder(torch.cat((top_condition, bottom), dim=1))
-
-    def forward(
-        self, x: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
-        top_condition, bottom, top_indices, bottom_indices, vq_loss, diagnostics = (
-            self.encode(x)
-        )
-        reconstruction = self.decoder(torch.cat((top_condition, bottom), dim=1))
-        return reconstruction, top_indices, bottom_indices, vq_loss, diagnostics
 
 
 def smoke_test() -> None:
@@ -169,31 +75,132 @@ def smoke_test() -> None:
     )
 
 
-def make_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
-    dataset = datasets.CIFAR10(
-        PROJECT_ROOT / "data" / "cifar10",
-        train=True,
-        download=True,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,) * 3, (0.5,) * 3),
-            ]
+def make_loaders(
+    args: argparse.Namespace, device: torch.device
+) -> tuple[DataLoader, DataLoader]:
+    transform = normalized_cifar10_transform(horizontal_flip=False)
+    data_root = PROJECT_ROOT / "data" / "cifar10"
+    return (
+        make_cifar10_loader(
+            data_root,
+            args.batch_size,
+            device,
+            train=True,
+            transform=transform,
+            num_workers=args.workers,
+        ),
+        make_cifar10_loader(
+            data_root,
+            args.batch_size,
+            device,
+            train=False,
+            transform=transform,
+            num_workers=args.workers,
         ),
     )
-    return DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=device.type == "cuda",
-        drop_last=True,
+
+
+@torch.inference_mode()
+def evaluate_tokenizer(
+    model: VQVAE2,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+) -> dict[str, float]:
+    model.eval()
+    top_vocabulary = model.top_quantizer.codebook_size
+    bottom_vocabulary = model.bottom_quantizer.codebook_size
+    distortion = 0.0
+    top_quantization = 0.0
+    bottom_quantization = 0.0
+    examples = 0
+    top_usage = TokenUsageAccumulator(top_vocabulary)
+    bottom_usage = TokenUsageAccumulator(bottom_vocabulary)
+    for x, _ in loader:
+        x = x.to(device, non_blocking=True)
+        reconstruction, top, bottom, _, diagnostics = model(x)
+        distortion += float(F.mse_loss(reconstruction, x)) * x.shape[0]
+        top_quantization += (
+            float(diagnostics["top_quantization_mse"]) * x.shape[0]
+        )
+        bottom_quantization += (
+            float(diagnostics["bottom_quantization_mse"]) * x.shape[0]
+        )
+        top_usage.update(top)
+        bottom_usage.update(bottom)
+        examples += x.shape[0]
+    top_statistics = top_usage.statistics()
+    bottom_statistics = bottom_usage.statistics()
+    top_entropy = (
+        float(top_statistics["token_entropy_nats"]) / math.log(2)
     )
+    bottom_entropy = (
+        float(bottom_statistics["token_entropy_nats"]) / math.log(2)
+    )
+    return {
+        "mse": distortion / examples,
+        "top_quantization_mse": top_quantization / examples,
+        "bottom_quantization_mse": bottom_quantization / examples,
+        "top_perplexity": float(top_statistics["perplexity"]),
+        "bottom_perplexity": float(bottom_statistics["perplexity"]),
+        "top_active_codes": float(top_statistics["active_codes"]),
+        "bottom_active_codes": float(bottom_statistics["active_codes"]),
+        "top_entropy_bits_per_token": top_entropy,
+        "bottom_entropy_bits_per_token": bottom_entropy,
+        "marginal_entropy_bits_per_image": (
+            16 * top_entropy + 64 * bottom_entropy
+        ),
+        "fixed_length_bits_per_image": (
+            16 * math.ceil(math.log2(top_vocabulary))
+            + 64 * math.ceil(math.log2(bottom_vocabulary))
+        ),
+    }
+
+
+@torch.inference_mode()
+def evaluate_priors(
+    tokenizer: VQVAE2,
+    top_prior: PixelCNNPrior,
+    bottom_prior: PixelCNNPrior,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+) -> dict[str, float]:
+    tokenizer.eval()
+    top_prior.eval()
+    bottom_prior.eval()
+    top_nll = 0.0
+    bottom_nll = 0.0
+    examples = 0
+    for x, _ in loader:
+        x = x.to(device, non_blocking=True)
+        _, _, top, bottom, _, _ = tokenizer.encode(x)
+        condition = tokenizer.top_condition_from_indices(top)
+        top_loss = F.cross_entropy(top_prior(top), top)
+        bottom_loss = F.cross_entropy(
+            bottom_prior(bottom, condition), bottom
+        )
+        top_nll += float(top_loss) * x.shape[0]
+        bottom_nll += float(bottom_loss) * x.shape[0]
+        examples += x.shape[0]
+    top_nll /= examples
+    bottom_nll /= examples
+    return {
+        "top_nll_nats_per_token": top_nll,
+        "bottom_nll_nats_per_token": bottom_nll,
+        "top_bits_per_token": top_nll / math.log(2),
+        "bottom_bits_per_token": bottom_nll / math.log(2),
+        "bits_per_image": (
+            16 * top_nll / math.log(2)
+            + 64 * bottom_nll / math.log(2)
+        ),
+    }
 
 
 def train_tokenizer(
     args: argparse.Namespace,
-    loader: DataLoader,
+    train_loader: DataLoader,
+    validation_loader: DataLoader,
     device: torch.device,
     out_dir: Path,
 ) -> VQVAE2:
@@ -217,7 +224,7 @@ def train_tokenizer(
         examples = 0
         top_usage = TokenUsageAccumulator(args.top_codebook_size)
         bottom_usage = TokenUsageAccumulator(args.bottom_codebook_size)
-        for x, _ in loader:
+        for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             reconstruction, top, bottom, vq_loss, diagnostics = model(x)
             distortion = F.mse_loss(reconstruction, x)
@@ -247,22 +254,43 @@ def train_tokenizer(
             f"{bottom_statistics['perplexity'].item():.1f}/"
             f"{bottom_statistics['active_codes'].item()}"
         )
-        save_image(
-            torch.cat((x[:8], reconstruction[:8])).mul(0.5).add(0.5),
-            out_dir / f"tokenizer_{epoch:03d}.png",
-            nrow=8,
-        )
+        if epoch == 1 or epoch % args.sample_every == 0:
+            save_image(
+                torch.cat((x[:8], reconstruction[:8])).mul(0.5).add(0.5),
+                out_dir / f"tokenizer_{epoch:03d}.png",
+                nrow=8,
+            )
+    validation = evaluate_tokenizer(
+        model, validation_loader, device=device
+    )
+    interface_id = model_state_fingerprint(model)
     torch.save(
         {
-            "format_version": 1,
+            "format_version": 2,
             "model_name": "vq_vae_2_tokenizer",
+            "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "model_config": config,
             "top_grid": (4, 4),
             "bottom_grid": (8, 8),
             "index_order": "row-major",
+            "dataset": "CIFAR-10",
+            "image_size": 32,
+            "value_range": [-1.0, 1.0],
+            "uniform_prior_kl_nats_per_image": (
+                16 * math.log(args.top_codebook_size)
+                + 64 * math.log(args.bottom_codebook_size)
+            ),
+            "validation_metrics": validation,
         },
         out_dir / "tokenizer.pth",
+    )
+    print(
+        f"validation tokenizer: MSE={validation['mse']:.4f}, "
+        f"entropy={validation['marginal_entropy_bits_per_image']:.1f} "
+        f"bits/image, active(top,bottom)="
+        f"({validation['top_active_codes']:.0f},"
+        f"{validation['bottom_active_codes']:.0f})"
     )
     return model.eval().requires_grad_(False)
 
@@ -273,13 +301,18 @@ def load_tokenizer(path: Path, device: torch.device) -> VQVAE2:
         raise ValueError("checkpoint is not a VQ-VAE-2 tokenizer")
     model = VQVAE2(**checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
+    if checkpoint.get("interface_id") != model_state_fingerprint(model):
+        raise ValueError(
+            "tokenizer checkpoint has no valid interface identity; retrain stage 1"
+        )
     return model.eval().requires_grad_(False)
 
 
 def train_priors(
     args: argparse.Namespace,
     tokenizer: VQVAE2,
-    loader: DataLoader,
+    train_loader: DataLoader,
+    validation_loader: DataLoader,
     device: torch.device,
     out_dir: Path,
 ) -> None:
@@ -305,7 +338,7 @@ def train_priors(
         bottom_prior.train()
         top_sum = bottom_sum = 0.0
         examples = 0
-        for x, _ in loader:
+        for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             with torch.inference_mode():
                 _, _, top, bottom, _, _ = tokenizer.encode(x)
@@ -352,7 +385,21 @@ def train_priors(
                 nrow=8,
             )
 
-    common = {"format_version": 1, "tokenizer_checkpoint": "tokenizer.pth"}
+    validation = evaluate_priors(
+        tokenizer,
+        top_prior,
+        bottom_prior,
+        validation_loader,
+        device=device,
+    )
+    tokenizer_interface_id = model_state_fingerprint(tokenizer)
+    common = {
+        "format_version": 2,
+        "tokenizer_checkpoint": "tokenizer.pth",
+        "tokenizer_interface_id": tokenizer_interface_id,
+        "dataset": "CIFAR-10",
+        "validation_metrics": validation,
+    }
     torch.save(
         {
             **common,
@@ -380,22 +427,36 @@ def train_priors(
         },
         out_dir / "bottom_prior.pth",
     )
+    print(
+        f"validation priors: top={validation['top_bits_per_token']:.3f}, "
+        f"bottom|top={validation['bottom_bits_per_token']:.3f} "
+        f"bits/token, total={validation['bits_per_image']:.1f} bits/image"
+    )
 
 
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vq_vae_2"
     out_dir.mkdir(parents=True, exist_ok=True)
-    loader = make_loader(args, device)
+    train_loader, validation_loader = make_loaders(args, device)
     path = out_dir / "tokenizer.pth"
     if args.stage in {"tokenizer", "all"}:
-        tokenizer = train_tokenizer(args, loader, device, out_dir)
+        tokenizer = train_tokenizer(
+            args, train_loader, validation_loader, device, out_dir
+        )
     else:
         if not path.is_file():
             raise FileNotFoundError("train --stage tokenizer before the priors")
         tokenizer = load_tokenizer(path, device)
     if args.stage in {"prior", "all"}:
-        train_priors(args, tokenizer, loader, device, out_dir)
+        train_priors(
+            args,
+            tokenizer,
+            train_loader,
+            validation_loader,
+            device,
+            out_dir,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -423,7 +484,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    torch.manual_seed(args.seed)
+    set_seed(args.seed)
     if args.smoke_test:
         smoke_test()
     else:

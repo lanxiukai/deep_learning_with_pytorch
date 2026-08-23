@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 import tempfile
 from collections.abc import Callable, Mapping
@@ -25,10 +26,31 @@ __all__ = [
     "load_model_weights",
     "load_training_checkpoint",
     "make_training_checkpoint",
+    "model_state_fingerprint",
     "restore_rng_state",
     "save_model_weights",
     "save_periodic_checkpoint",
 ]
+
+
+def model_state_fingerprint(model: nn.Module) -> str:
+    """Return a stable SHA-256 identity for a module's tensors and buffers."""
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be an nn.Module.")
+    digest = hashlib.sha256()
+    for name, value in sorted(model.state_dict().items()):
+        if not torch.is_tensor(value):
+            raise TypeError(f"state_dict entry {name!r} is not a tensor")
+        tensor = value.detach().cpu().contiguous()
+        fields = (name, str(tensor.dtype), repr(tuple(tensor.shape)))
+        for field in fields:
+            encoded = field.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+        digest.update(
+            tensor.reshape(-1).view(torch.uint8).numpy().tobytes(order="C")
+        )
+    return f"sha256:{digest.hexdigest()}"
 
 
 class TrainingCheckpoint:

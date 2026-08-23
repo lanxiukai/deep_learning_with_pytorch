@@ -1,4 +1,4 @@
-"""CIFAR-10 dataset and loader construction for GAN lessons."""
+"""CIFAR-10 dataset and loader construction for 32x32 generative lessons."""
 
 from __future__ import annotations
 

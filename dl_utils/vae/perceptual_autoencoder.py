@@ -243,7 +243,7 @@ class RandomFeaturePerceptualLoss(nn.Module):
 
 
 class VGGPerceptualLoss(nn.Module):
-    """Frozen ImageNet-VGG16 feature distance used as a compact LPIPS proxy."""
+    """Frozen ImageNet-VGG16 multi-layer feature L1 distance."""
 
     def __init__(self) -> None:
         super().__init__()

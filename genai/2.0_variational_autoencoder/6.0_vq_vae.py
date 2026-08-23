@@ -12,9 +12,9 @@ paths.  Under the stage-one fixed uniform prior, every position's KL is the
 parameter-independent constant ``log(codebook_size)`` and is omitted.
 
 Examples:
-    python genai/2.0_variational_autoencoder/3.0_vq_vae.py --smoke-test
-    python genai/2.0_variational_autoencoder/3.0_vq_vae.py --stage tokenizer
-    python genai/2.0_variational_autoencoder/3.0_vq_vae.py --stage prior
+    python genai/2.0_variational_autoencoder/6.0_vq_vae.py --smoke-test
+    python genai/2.0_variational_autoencoder/6.0_vq_vae.py --stage tokenizer
+    python genai/2.0_variational_autoencoder/6.0_vq_vae.py --stage prior
 """
 
 from __future__ import annotations
@@ -26,10 +26,15 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+from dl_utils.data.cifar10 import (
+    make_cifar10_loader,
+    normalized_cifar10_transform,
+)
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import model_state_fingerprint
 from dl_utils.vae.quantization import TokenUsageAccumulator, VQVAE32
 from dl_utils.vae.token_prior import PixelCNNPrior
 
@@ -72,31 +77,99 @@ def smoke_test() -> None:
     )
 
 
-def make_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
-    dataset = datasets.CIFAR10(
-        PROJECT_ROOT / "data" / "cifar10",
-        train=True,
-        download=True,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,) * 3, (0.5,) * 3),
-            ]
+def make_loaders(
+    args: argparse.Namespace, device: torch.device
+) -> tuple[DataLoader, DataLoader]:
+    transform = normalized_cifar10_transform(horizontal_flip=False)
+    data_root = PROJECT_ROOT / "data" / "cifar10"
+    return (
+        make_cifar10_loader(
+            data_root,
+            args.batch_size,
+            device,
+            train=True,
+            transform=transform,
+            num_workers=args.workers,
+        ),
+        make_cifar10_loader(
+            data_root,
+            args.batch_size,
+            device,
+            train=False,
+            transform=transform,
+            num_workers=args.workers,
         ),
     )
-    return DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=device.type == "cuda",
-        drop_last=True,
-    )
+
+
+@torch.inference_mode()
+def evaluate_tokenizer(
+    model: VQVAE32,
+    loader: DataLoader,
+    *,
+    vocabulary_size: int,
+    device: torch.device,
+) -> dict[str, float]:
+    model.eval()
+    distortion = 0.0
+    quantization_mse = 0.0
+    examples = 0
+    usage = TokenUsageAccumulator(vocabulary_size)
+    for x, _ in loader:
+        x = x.to(device, non_blocking=True)
+        reconstruction, indices, _, diagnostics = model(x)
+        distortion += float(F.mse_loss(reconstruction, x)) * x.shape[0]
+        quantization_mse += (
+            float(diagnostics["quantization_mse"]) * x.shape[0]
+        )
+        usage.update(indices)
+        examples += x.shape[0]
+    statistics = usage.statistics()
+    entropy_bits = float(statistics["token_entropy_nats"]) / math.log(2)
+    return {
+        "mse": distortion / examples,
+        "quantization_mse": quantization_mse / examples,
+        "perplexity": float(statistics["perplexity"]),
+        "active_codes": float(statistics["active_codes"]),
+        "usage_fraction": float(statistics["usage_fraction"]),
+        "marginal_entropy_bits_per_token": entropy_bits,
+        "marginal_entropy_bits_per_image": 64 * entropy_bits,
+        "fixed_length_bits_per_image": (
+            64 * math.ceil(math.log2(vocabulary_size))
+        ),
+    }
+
+
+@torch.inference_mode()
+def evaluate_prior(
+    tokenizer: VQVAE32,
+    prior: PixelCNNPrior,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+) -> dict[str, float]:
+    tokenizer.eval()
+    prior.eval()
+    nll = 0.0
+    examples = 0
+    for x, _ in loader:
+        x = x.to(device, non_blocking=True)
+        _, indices, _, _ = tokenizer.encode(x)
+        loss = F.cross_entropy(prior(indices), indices)
+        nll += float(loss) * x.shape[0]
+        examples += x.shape[0]
+    nll /= examples
+    return {
+        "nll_nats_per_token": nll,
+        "bits_per_token": nll / math.log(2),
+        "bits_per_image": 64 * nll / math.log(2),
+    }
 
 
 def train_tokenizer(
     args: argparse.Namespace,
-    loader: DataLoader,
+    train_loader: DataLoader,
+    validation_loader: DataLoader,
     device: torch.device,
     out_dir: Path,
 ) -> VQVAE32:
@@ -115,7 +188,7 @@ def train_tokenizer(
         sums = torch.zeros(4, device=device)
         examples = 0
         usage = TokenUsageAccumulator(args.codebook_size)
-        for x, _ in loader:
+        for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             reconstruction, indices, quantizer_loss, diagnostics = model(x)
             loss, distortion = tokenizer_loss(reconstruction, x, quantizer_loss)
@@ -139,21 +212,43 @@ def train_tokenizer(
             f"PPL={epoch_usage['perplexity'].item():.1f}, "
             f"active={epoch_usage['active_codes'].item()}/{args.codebook_size}"
         )
-        save_image(
-            torch.cat((x[:8], reconstruction[:8])).mul(0.5).add(0.5),
-            out_dir / f"tokenizer_{epoch:03d}.png",
-            nrow=8,
-        )
+        if epoch == 1 or epoch % args.sample_every == 0:
+            save_image(
+                torch.cat((x[:8], reconstruction[:8])).mul(0.5).add(0.5),
+                out_dir / f"tokenizer_{epoch:03d}.png",
+                nrow=8,
+            )
+    validation = evaluate_tokenizer(
+        model,
+        validation_loader,
+        vocabulary_size=args.codebook_size,
+        device=device,
+    )
+    interface_id = model_state_fingerprint(model)
     torch.save(
         {
-            "format_version": 1,
+            "format_version": 2,
             "model_name": "vq_vae_tokenizer",
+            "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "model_config": config,
             "token_grid": (8, 8),
             "index_order": "row-major",
+            "dataset": "CIFAR-10",
+            "image_size": 32,
+            "value_range": [-1.0, 1.0],
+            "uniform_prior_kl_nats_per_image": (
+                64 * math.log(args.codebook_size)
+            ),
+            "validation_metrics": validation,
         },
         out_dir / "tokenizer.pth",
+    )
+    print(
+        f"validation tokenizer: MSE={validation['mse']:.4f}, "
+        f"entropy={validation['marginal_entropy_bits_per_token']:.3f} "
+        f"bits/token, active={validation['active_codes']:.0f}/"
+        f"{args.codebook_size}"
     )
     return model.eval().requires_grad_(False)
 
@@ -164,13 +259,18 @@ def load_tokenizer(checkpoint_path: Path, device: torch.device) -> VQVAE32:
         raise ValueError("checkpoint is not a VQ-VAE tokenizer")
     model = VQVAE32(**checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
+    if checkpoint.get("interface_id") != model_state_fingerprint(model):
+        raise ValueError(
+            "tokenizer checkpoint has no valid interface identity; retrain stage 1"
+        )
     return model.eval().requires_grad_(False)
 
 
 def train_prior(
     args: argparse.Namespace,
     tokenizer: VQVAE32,
-    loader: DataLoader,
+    train_loader: DataLoader,
+    validation_loader: DataLoader,
     device: torch.device,
     out_dir: Path,
 ) -> PixelCNNPrior:
@@ -186,7 +286,7 @@ def train_prior(
         prior.train()
         nll_sum = 0.0
         examples = 0
-        for x, _ in loader:
+        for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             with torch.inference_mode():
                 _, indices, _, _ = tokenizer.encode(x)
@@ -216,9 +316,13 @@ def train_prior(
                 out_dir / f"prior_{epoch:03d}.png",
                 nrow=8,
             )
+    validation = evaluate_prior(
+        tokenizer, prior, validation_loader, device=device
+    )
+    tokenizer_interface_id = model_state_fingerprint(tokenizer)
     torch.save(
         {
-            "format_version": 1,
+            "format_version": 2,
             "model_name": "vq_vae_pixelcnn_prior",
             "state_dict": prior.state_dict(),
             "model_config": {
@@ -227,9 +331,16 @@ def train_prior(
                 "layers": args.prior_layers,
             },
             "tokenizer_checkpoint": "tokenizer.pth",
+            "tokenizer_interface_id": tokenizer_interface_id,
             "token_grid": (8, 8),
+            "dataset": "CIFAR-10",
+            "validation_metrics": validation,
         },
         out_dir / "pixelcnn_prior.pth",
+    )
+    print(
+        f"validation prior: {validation['bits_per_token']:.3f} "
+        f"bits/token, {validation['bits_per_image']:.1f} bits/image"
     )
     return prior
 
@@ -238,16 +349,25 @@ def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vq_vae"
     out_dir.mkdir(parents=True, exist_ok=True)
-    loader = make_loader(args, device)
+    train_loader, validation_loader = make_loaders(args, device)
     checkpoint_path = out_dir / "tokenizer.pth"
     if args.stage in {"tokenizer", "all"}:
-        tokenizer = train_tokenizer(args, loader, device, out_dir)
+        tokenizer = train_tokenizer(
+            args, train_loader, validation_loader, device, out_dir
+        )
     else:
         if not checkpoint_path.is_file():
             raise FileNotFoundError("train --stage tokenizer before the prior")
         tokenizer = load_tokenizer(checkpoint_path, device)
     if args.stage in {"prior", "all"}:
-        train_prior(args, tokenizer, loader, device, out_dir)
+        train_prior(
+            args,
+            tokenizer,
+            train_loader,
+            validation_loader,
+            device,
+            out_dir,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -274,7 +394,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    torch.manual_seed(args.seed)
+    set_seed(args.seed)
     if args.smoke_test:
         smoke_test()
     else:

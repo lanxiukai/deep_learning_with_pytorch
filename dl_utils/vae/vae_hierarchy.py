@@ -1,4 +1,4 @@
-"""Reusable two-level Gaussian hierarchy for the HVAE/Ladder lessons."""
+"""Reusable two-level Gaussian hierarchy for the HVAE and Ladder lessons."""
 
 from __future__ import annotations
 
@@ -8,65 +8,127 @@ from torch import Tensor, nn
 
 from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
+    fuse_diagonal_gaussians,
     reparameterize_logvar,
     split_gaussian_parameters,
 )
 
 
-class CompactHierarchicalVAE(nn.Module):
-    """Two-level HVAE with a top-down conditional posterior.
+class HierarchicalVAE32(nn.Module):
+    """Two-level q(z2 | x) q(z1 | z2, x) teaching baseline."""
 
-    The posterior factorization is ``q(z2 | x) q(z1 | z2, x)`` and therefore
-    matches the direction of ``p(z2) p(z1 | z2) p(x | z1)``.  The Ladder
-    lesson subclasses this model and changes only how the lower posterior is
-    constructed.
-    """
+    posterior_family = "conditional_network"
 
-    def __init__(self, z1_dim: int = 32, z2_dim: int = 16) -> None:
+    def __init__(
+        self,
+        *,
+        z1_dim: int = 24,
+        z2_dim: int = 12,
+        hidden_channels: int = 64,
+        context_dim: int = 192,
+    ) -> None:
         super().__init__()
+        if hidden_channels % 8:
+            raise ValueError("hidden_channels must be divisible by 8")
         self.z1_dim = z1_dim
         self.z2_dim = z2_dim
-        self.bottom_up_1 = nn.Sequential(
+        self.hidden_channels = hidden_channels
+        self.context_dim = context_dim
+        self.bottom_up_image = nn.Sequential(
+            nn.Conv2d(1, hidden_channels // 2, 4, 2, 1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_channels // 2, hidden_channels, 4, 2, 1),
+            nn.GroupNorm(8, hidden_channels),
+            nn.SiLU(),
+            nn.Conv2d(hidden_channels, hidden_channels * 2, 4, 2, 1),
+            nn.GroupNorm(8, hidden_channels * 2),
+            nn.SiLU(),
             nn.Flatten(),
-            nn.Linear(28 * 28, 512),
-            nn.ELU(inplace=True),
         )
-        self.bottom_up_2 = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ELU(inplace=True),
+        self.bottom_up_lower = nn.Sequential(
+            nn.Linear(hidden_channels * 2 * 4 * 4, context_dim),
+            nn.SiLU(),
         )
-        self.top_posterior = nn.Linear(256, 2 * z2_dim)
+        self.bottom_up_top = nn.Sequential(
+            nn.Linear(context_dim, context_dim),
+            nn.SiLU(),
+        )
+        self.top_posterior = nn.Linear(context_dim, 2 * z2_dim)
         self.lower_prior = nn.Sequential(
-            nn.Linear(z2_dim, 256),
-            nn.ELU(inplace=True),
-            nn.Linear(256, 2 * z1_dim),
+            nn.Linear(z2_dim, context_dim),
+            nn.SiLU(),
+            nn.Linear(context_dim, 2 * z1_dim),
         )
         self.lower_posterior = nn.Sequential(
-            nn.Linear(512 + z2_dim, 256),
-            nn.ELU(inplace=True),
-            nn.Linear(256, 2 * z1_dim),
+            nn.Linear(context_dim + z2_dim, context_dim),
+            nn.SiLU(),
+            nn.Linear(context_dim, 2 * z1_dim),
+        )
+        self.decoder_input = nn.Sequential(
+            nn.Linear(z1_dim, hidden_channels * 2 * 4 * 4),
+            nn.SiLU(),
         )
         self.decoder = nn.Sequential(
-            nn.Linear(z1_dim, 512),
-            nn.ELU(inplace=True),
-            nn.Linear(512, 28 * 28),
+            nn.Unflatten(1, (hidden_channels * 2, 4, 4)),
+            nn.ConvTranspose2d(
+                hidden_channels * 2, hidden_channels, 4, 2, 1
+            ),
+            nn.GroupNorm(8, hidden_channels),
+            nn.SiLU(),
+            nn.ConvTranspose2d(
+                hidden_channels, hidden_channels // 2, 4, 2, 1
+            ),
+            nn.GroupNorm(8, hidden_channels // 2),
+            nn.SiLU(),
+            nn.ConvTranspose2d(hidden_channels // 2, 1, 4, 2, 1),
             nn.Sigmoid(),
         )
 
-    def infer(self, x: Tensor, *, sample: bool = True) -> dict[str, Tensor]:
-        h1 = self.bottom_up_1(x)
-        h2 = self.bottom_up_2(h1)
-
-        # The top posterior is parameterized by bottom-up evidence alone.  It
-        # is compared with N(0, I), but is not multiplied by that prior.
-        q2_mu, q2_logvar = split_gaussian_parameters(self.top_posterior(h2))
-        z2 = reparameterize_logvar(q2_mu, q2_logvar) if sample else q2_mu
-
-        p1_mu, p1_logvar = split_gaussian_parameters(self.lower_prior(z2))
-        q1_mu, q1_logvar = split_gaussian_parameters(
-            self.lower_posterior(torch.cat((h1, z2), dim=1))
+    def bottom_up(
+        self, x: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        if x.ndim != 4 or x.shape[1:] != (1, 32, 32):
+            raise ValueError("x must have shape [batch, 1, 32, 32]")
+        lower_evidence = self.bottom_up_lower(self.bottom_up_image(x))
+        top_evidence = self.bottom_up_top(lower_evidence)
+        q2_mu, q2_logvar = split_gaussian_parameters(
+            self.top_posterior(top_evidence)
         )
-        z1 = reparameterize_logvar(q1_mu, q1_logvar) if sample else q1_mu
+        return lower_evidence, q2_mu, q2_logvar
+
+    def lower_distributions(
+        self,
+        lower_evidence: Tensor,
+        z2: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Return p(z1 | z2) and q(z1 | z2, x) parameters."""
+        p1_mu, p1_logvar = split_gaussian_parameters(
+            self.lower_prior(z2)
+        )
+        q1_mu, q1_logvar = split_gaussian_parameters(
+            self.lower_posterior(
+                torch.cat((lower_evidence, z2), dim=1)
+            )
+        )
+        return p1_mu, p1_logvar, q1_mu, q1_logvar
+
+    def infer_from_top(
+        self,
+        lower_evidence: Tensor,
+        q2_mu: Tensor,
+        q2_logvar: Tensor,
+        z2: Tensor,
+        *,
+        sample_lower: bool,
+    ) -> dict[str, Tensor]:
+        p1_mu, p1_logvar, q1_mu, q1_logvar = (
+            self.lower_distributions(lower_evidence, z2)
+        )
+        z1 = (
+            reparameterize_logvar(q1_mu, q1_logvar)
+            if sample_lower
+            else q1_mu
+        )
         return {
             "z1": z1,
             "z2": z2,
@@ -78,11 +140,31 @@ class CompactHierarchicalVAE(nn.Module):
             "q2_logvar": q2_logvar,
             "p2_mu": torch.zeros_like(q2_mu),
             "p2_logvar": torch.zeros_like(q2_logvar),
-            "bottom_up_h1": h1,
+            "lower_evidence": lower_evidence,
         }
 
+    def infer(self, x: Tensor, *, sample: bool = True) -> dict[str, Tensor]:
+        lower_evidence, q2_mu, q2_logvar = self.bottom_up(x)
+        z2 = (
+            reparameterize_logvar(q2_mu, q2_logvar)
+            if sample
+            else q2_mu
+        )
+        return self.infer_from_top(
+            lower_evidence,
+            q2_mu,
+            q2_logvar,
+            z2,
+            sample_lower=sample,
+        )
+
     def decode(self, z1: Tensor) -> Tensor:
-        return self.decoder(z1).reshape(-1, 1, 28, 28)
+        if z1.shape[-1] != self.z1_dim:
+            raise ValueError("the final z1 dimension must equal z1_dim")
+        leading_shape = z1.shape[:-1]
+        flat_z1 = z1.reshape(-1, self.z1_dim)
+        images = self.decoder(self.decoder_input(flat_z1))
+        return images.reshape(*leading_shape, 1, 32, 32)
 
     def reconstruct(self, x: Tensor, *, sample: bool = False) -> Tensor:
         return self.decode(self.infer(x, sample=sample)["z1"])
@@ -93,9 +175,59 @@ class CompactHierarchicalVAE(nn.Module):
 
     def sample(self, count: int, *, device: torch.device) -> Tensor:
         z2 = torch.randn(count, self.z2_dim, device=device)
-        p1_mu, p1_logvar = split_gaussian_parameters(self.lower_prior(z2))
+        p1_mu, p1_logvar = split_gaussian_parameters(
+            self.lower_prior(z2)
+        )
         z1 = reparameterize_logvar(p1_mu, p1_logvar)
         return self.decode(z1)
+
+
+class LadderVAE32(HierarchicalVAE32):
+    """Replace the lower conditional network with prior-evidence fusion."""
+
+    posterior_family = "ladder_precision_fusion"
+
+    def __init__(
+        self,
+        *,
+        z1_dim: int = 24,
+        z2_dim: int = 12,
+        hidden_channels: int = 64,
+        context_dim: int = 192,
+    ) -> None:
+        super().__init__(
+            z1_dim=z1_dim,
+            z2_dim=z2_dim,
+            hidden_channels=hidden_channels,
+            context_dim=context_dim,
+        )
+        del self.lower_posterior
+        self.lower_evidence_distribution = nn.Sequential(
+            nn.Linear(context_dim, context_dim),
+            nn.SiLU(),
+            nn.Linear(context_dim, 2 * z1_dim),
+        )
+
+    def lower_distributions(
+        self,
+        lower_evidence: Tensor,
+        z2: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        p1_mu, p1_logvar = split_gaussian_parameters(
+            self.lower_prior(z2)
+        )
+        evidence_mu, evidence_logvar = split_gaussian_parameters(
+            self.lower_evidence_distribution(lower_evidence)
+        )
+        # Gradients remain live through both the generative prior and the
+        # bottom-up evidence path.
+        q1_mu, q1_logvar = fuse_diagonal_gaussians(
+            p1_mu,
+            p1_logvar,
+            evidence_mu,
+            evidence_logvar,
+        )
+        return p1_mu, p1_logvar, q1_mu, q1_logvar
 
 
 class ActiveUnitAccumulator:
@@ -125,7 +257,9 @@ class ActiveUnitAccumulator:
         self.top_square_sum += top.square().sum(dim=0)
         self.count += lower.shape[0]
 
-    def counts(self, *, variance_threshold: float = 1e-2) -> tuple[int, int]:
+    def counts(
+        self, *, variance_threshold: float = 1e-2
+    ) -> tuple[int, int]:
         if self.count < 2 or self.lower_sum is None:
             return 0, 0
         assert self.lower_square_sum is not None
@@ -136,31 +270,31 @@ class ActiveUnitAccumulator:
             - (self.lower_sum / self.count).square()
         )
         top_variance = (
-            self.top_square_sum / self.count - (self.top_sum / self.count).square()
+            self.top_square_sum / self.count
+            - (self.top_sum / self.count).square()
         )
         return (
-            int((lower_variance > variance_threshold).sum().item()),
-            int((top_variance > variance_threshold).sum().item()),
+            int((lower_variance > variance_threshold).sum()),
+            int((top_variance > variance_threshold).sum()),
         )
 
 
 def hierarchical_vae_loss(
     reconstruction: Tensor,
-    x: Tensor,
+    target: Tensor,
     latents: dict[str, Tensor],
     *,
     kl_weight: float,
     free_bits: float,
 ) -> tuple[Tensor, dict[str, Tensor]]:
-    """Negative hierarchical ELBO with group-wise free bits.
-
-    Each layer's KL is first summed per sample and averaged over the batch.
-    The free-bits threshold is applied *after* that batch expectation.
-    """
-    if kl_weight < 0 or free_bits < 0:
-        raise ValueError("kl_weight and free_bits must be non-negative")
-    distortion = F.binary_cross_entropy(reconstruction, x, reduction="none")
-    distortion = distortion.flatten(1).sum(dim=1).mean()
+    """Negative two-level ELBO with group-wise free bits after batch means."""
+    if not 0.0 <= kl_weight <= 1.0:
+        raise ValueError("kl_weight must be between zero and one")
+    if free_bits < 0:
+        raise ValueError("free_bits must be non-negative")
+    distortion = F.binary_cross_entropy(
+        reconstruction, target, reduction="none"
+    ).flatten(1).sum(dim=1).mean()
     kl_z1 = diagonal_gaussian_kl_from_logvar(
         latents["q1_mu"],
         latents["q1_logvar"],
@@ -170,39 +304,36 @@ def hierarchical_vae_loss(
     kl_z2 = diagonal_gaussian_kl_from_logvar(
         latents["q2_mu"], latents["q2_logvar"]
     ).sum(dim=1).mean()
-
     threshold = distortion.new_tensor(float(free_bits))
-    kl_objective = torch.maximum(kl_z1, threshold) + torch.maximum(
-        kl_z2, threshold
-    )
+    kl_objective_z1 = torch.maximum(kl_z1, threshold)
+    kl_objective_z2 = torch.maximum(kl_z2, threshold)
+    kl_objective = kl_objective_z1 + kl_objective_z2
     loss = distortion + float(kl_weight) * kl_objective
     return loss, {
         "distortion": distortion.detach(),
         "kl_z1": kl_z1.detach(),
         "kl_z2": kl_z2.detach(),
-        "kl_objective": kl_objective.detach(),
+        "kl_objective_z1": kl_objective_z1.detach(),
+        "kl_objective_z2": kl_objective_z2.detach(),
+        "kl_weight": distortion.new_tensor(float(kl_weight)),
     }
 
 
-def active_units(
-    latents: dict[str, Tensor], *, variance_threshold: float = 1e-2
-) -> tuple[Tensor, Tensor]:
-    """Count batch-active top units and lower posterior corrections."""
-    if latents["q2_mu"].shape[0] < 2:
-        zero = latents["q2_mu"].new_zeros((), dtype=torch.long)
-        return zero, zero
-    top = latents["q2_mu"].var(dim=0, unbiased=False)
-    lower_correction = latents["q1_mu"] - latents["p1_mu"]
-    lower = lower_correction.var(dim=0, unbiased=False)
-    return (
-        (lower > variance_threshold).sum().detach(),
-        (top > variance_threshold).sum().detach(),
-    )
+def model_config(
+    model: HierarchicalVAE32,
+) -> dict[str, int]:
+    return {
+        "z1_dim": model.z1_dim,
+        "z2_dim": model.z2_dim,
+        "hidden_channels": model.hidden_channels,
+        "context_dim": model.context_dim,
+    }
 
 
 __all__ = [
     "ActiveUnitAccumulator",
-    "CompactHierarchicalVAE",
-    "active_units",
+    "HierarchicalVAE32",
+    "LadderVAE32",
     "hierarchical_vae_loss",
+    "model_config",
 ]

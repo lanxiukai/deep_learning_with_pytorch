@@ -1,6 +1,6 @@
 """VQGAN: VQ-VAE tokenizer plus perceptual and patch-adversarial losses.
 
-The first stage adds three ideas to ``3.0_vq_vae.py``:
+The first stage adds three ideas to ``6.0_vq_vae.py``:
 
 * frozen pretrained VGG features as a compact perceptual-loss proxy;
 * a PatchGAN discriminator with hinge loss and delayed activation;
@@ -23,10 +23,15 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+from dl_utils.data.cifar10 import (
+    make_cifar10_loader,
+    normalized_cifar10_transform,
+)
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import model_state_fingerprint
 from dl_utils.vae.perceptual_autoencoder import (
     PatchDiscriminator32,
     RandomFeaturePerceptualLoss,
@@ -86,7 +91,7 @@ def vqgan_autoencoder_step(
     return reconstruction.detach(), indices.detach(), {
         "autoencoder": loss.detach(),
         "pixel_l1": pixel_l1.detach(),
-        "perceptual_vgg": feature_loss.detach(),
+        "frozen_feature": feature_loss.detach(),
         "vq": vq_loss.detach(),
         "generator_adversarial": adversarial.detach(),
         "adaptive_weight": adaptive.detach(),
@@ -103,16 +108,21 @@ def vqgan_discriminator_step(
     *,
     step: int,
     discriminator_start: int,
-) -> Tensor:
+) -> dict[str, Tensor]:
     if step < discriminator_start:
-        return x.new_zeros(())
-    loss = discriminator_hinge_loss(
-        discriminator(x), discriminator(reconstruction.detach())
-    )
+        zero = x.new_zeros(())
+        return {"discriminator": zero, "real_logit": zero, "fake_logit": zero}
+    real_logits = discriminator(x)
+    fake_logits = discriminator(reconstruction.detach())
+    loss = discriminator_hinge_loss(real_logits, fake_logits)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
-    return loss.detach()
+    return {
+        "discriminator": loss.detach(),
+        "real_logit": real_logits.mean().detach(),
+        "fake_logit": fake_logits.mean().detach(),
+    }
 
 
 def smoke_test() -> None:
@@ -137,7 +147,7 @@ def smoke_test() -> None:
         vq_weight=1.0,
         discriminator_weight=1.0,
     )
-    d_loss = vqgan_discriminator_step(
+    d_metrics = vqgan_discriminator_step(
         discriminator,
         x,
         reconstruction,
@@ -157,31 +167,116 @@ def smoke_test() -> None:
     assert discriminator.head[-1].weight.grad is not None
     print(
         f"smoke test passed: AE={metrics['autoencoder'].item():.3f}, "
-        f"D={d_loss.item():.3f}, prior={prior_loss.item():.3f}, "
+        f"D={d_metrics['discriminator'].item():.3f}, "
+        f"prior={prior_loss.item():.3f}, "
         f"adaptive={metrics['adaptive_weight'].item():.3f}"
     )
 
 
-def make_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
-    dataset = datasets.CIFAR10(
-        PROJECT_ROOT / "data" / "cifar10",
-        train=True,
-        download=True,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,) * 3, (0.5,) * 3),
-            ]
+def make_loaders(
+    args: argparse.Namespace, device: torch.device
+) -> tuple[DataLoader, DataLoader]:
+    transform = normalized_cifar10_transform(horizontal_flip=False)
+    root = PROJECT_ROOT / "data" / "cifar10"
+    return (
+        make_cifar10_loader(
+            root,
+            args.batch_size,
+            device,
+            train=True,
+            transform=transform,
+            num_workers=args.workers,
+        ),
+        make_cifar10_loader(
+            root,
+            args.batch_size,
+            device,
+            train=False,
+            transform=transform,
+            num_workers=args.workers,
         ),
     )
-    return DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=device.type == "cuda",
-        drop_last=True,
+
+
+@torch.inference_mode()
+def evaluate_tokenizer(
+    model: VQPerceptualAutoencoder32,
+    discriminator: PatchDiscriminator32,
+    perceptual: nn.Module,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+) -> dict[str, float]:
+    model.eval()
+    discriminator.eval()
+    perceptual.eval()
+    vocabulary_size = model.quantizer.codebook_size
+    totals = torch.zeros(5, device=device)
+    examples = 0
+    usage = TokenUsageAccumulator(vocabulary_size)
+    for x, _ in loader:
+        x = x.to(device, non_blocking=True)
+        reconstruction, indices, _, diagnostics = model(x)
+        totals += torch.stack(
+            [
+                F.l1_loss(reconstruction, x),
+                perceptual(reconstruction, x),
+                diagnostics["quantization_mse"],
+                discriminator(x).mean(),
+                discriminator(reconstruction).mean(),
+            ]
+        ) * x.shape[0]
+        usage.update(indices)
+        examples += x.shape[0]
+    values = (totals / examples).tolist()
+    statistics = usage.statistics()
+    entropy_bits = (
+        float(statistics["token_entropy_nats"]) / math.log(2)
     )
+    return {
+        "pixel_l1": values[0],
+        "feature_distance": values[1],
+        "quantization_mse": values[2],
+        "real_logit": values[3],
+        "reconstruction_logit": values[4],
+        "perplexity": float(statistics["perplexity"]),
+        "active_codes": float(statistics["active_codes"]),
+        "usage_fraction": float(statistics["usage_fraction"]),
+        "marginal_entropy_bits_per_token": entropy_bits,
+        "marginal_entropy_bits_per_image": 64 * entropy_bits,
+        "fixed_length_bits_per_image": (
+            64 * math.ceil(math.log2(vocabulary_size))
+        ),
+    }
+
+
+@torch.inference_mode()
+def evaluate_prior(
+    tokenizer: VQPerceptualAutoencoder32,
+    prior: CausalTransformerPrior,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+) -> dict[str, float]:
+    tokenizer.eval()
+    prior.eval()
+    nll = 0.0
+    examples = 0
+    for x, _ in loader:
+        x = x.to(device, non_blocking=True)
+        _, indices, _, _ = tokenizer.encode(x)
+        logits, targets = prior.teacher_forcing(indices)
+        loss = F.cross_entropy(
+            logits.flatten(0, 1), targets.flatten()
+        )
+        nll += float(loss) * x.shape[0]
+        examples += x.shape[0]
+    nll /= examples
+    return {
+        "nll_nats_per_token": nll,
+        "bits_per_token": nll / math.log(2),
+        "bits_per_image": 64 * nll / math.log(2),
+    }
 
 
 def build_perceptual(name: str, device: torch.device) -> nn.Module:
@@ -195,7 +290,8 @@ def build_perceptual(name: str, device: torch.device) -> nn.Module:
 
 def train_tokenizer(
     args: argparse.Namespace,
-    loader: DataLoader,
+    train_loader: DataLoader,
+    validation_loader: DataLoader,
     device: torch.device,
     out_dir: Path,
 ) -> VQPerceptualAutoencoder32:
@@ -220,10 +316,10 @@ def train_tokenizer(
     for epoch in range(1, args.tokenizer_epochs + 1):
         model.train()
         discriminator.train()
-        sums = torch.zeros(7, device=device)
+        sums = torch.zeros(9, device=device)
         examples = 0
         usage = TokenUsageAccumulator(args.codebook_size)
-        for x, _ in loader:
+        for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             reconstruction, indices, metrics = vqgan_autoencoder_step(
                 model,
@@ -237,7 +333,7 @@ def train_tokenizer(
                 vq_weight=args.vq_weight,
                 discriminator_weight=args.discriminator_weight,
             )
-            d_loss = vqgan_discriminator_step(
+            d_metrics = vqgan_discriminator_step(
                 discriminator,
                 x,
                 reconstruction,
@@ -248,11 +344,13 @@ def train_tokenizer(
             values = [
                 metrics["autoencoder"],
                 metrics["pixel_l1"],
-                metrics["perceptual_vgg"],
+                metrics["frozen_feature"],
                 metrics["vq"],
                 metrics["generator_adversarial"],
                 metrics["adaptive_weight"],
-                d_loss,
+                d_metrics["discriminator"],
+                d_metrics["real_logit"],
+                d_metrics["fake_logit"],
             ]
             sums += torch.stack(values) * x.shape[0]
             usage.update(indices)
@@ -262,34 +360,65 @@ def train_tokenizer(
         epoch_usage = usage.statistics()
         print(
             f"tokenizer {epoch:03d}: AE={means[0]:.4f}, L1={means[1]:.4f}, "
-            f"VGG={means[2]:.4f}, VQ={means[3]:.4f}, G={means[4]:.4f}, "
+            f"feature={means[2]:.4f}, VQ={means[3]:.4f}, G={means[4]:.4f}, "
             f"lambda={means[5]:.3f}, PPL/active="
             f"{epoch_usage['perplexity'].item():.1f}/"
-            f"{epoch_usage['active_codes'].item()}, D={means[6]:.4f}"
+            f"{epoch_usage['active_codes'].item()}, D={means[6]:.4f}, "
+            f"logits(real,fake)=({means[7]:.3f},{means[8]:.3f})"
         )
-        save_image(
-            torch.cat((x[:8], reconstruction[:8])).mul(0.5).add(0.5),
-            out_dir / f"tokenizer_{epoch:03d}.png",
-            nrow=8,
-        )
+        if epoch == 1 or epoch % args.sample_every == 0:
+            save_image(
+                torch.cat((x[:8], reconstruction[:8])).mul(0.5).add(0.5),
+                out_dir / f"tokenizer_{epoch:03d}.png",
+                nrow=8,
+            )
+    validation = evaluate_tokenizer(
+        model,
+        discriminator,
+        perceptual,
+        validation_loader,
+        device=device,
+    )
+    interface_id = model_state_fingerprint(model)
     torch.save(
         {
-            "format_version": 1,
+            "format_version": 2,
             "model_name": "vqgan_tokenizer",
+            "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "discriminator_state_dict": discriminator.state_dict(),
+            "discriminator_config": {
+                "base_channels": args.discriminator_channels,
+            },
             "model_config": config,
             "token_grid": (8, 8),
             "index_order": "row-major",
             "perceptual_network": args.perceptual,
+            "perceptual_metric_name": (
+                "frozen torchvision VGG16 feature L1"
+                if args.perceptual == "vgg"
+                else "random frozen feature debug distance"
+            ),
             "discriminator_start": args.discriminator_start,
             "global_step": global_step,
-            "optimizer_states": {
-                "autoencoder": ae_optimizer.state_dict(),
-                "discriminator": d_optimizer.state_dict(),
+            "loss_weights": {
+                "perceptual": args.perceptual_weight,
+                "vq": args.vq_weight,
+                "discriminator": args.discriminator_weight,
             },
+            "dataset": "CIFAR-10",
+            "image_size": 32,
+            "value_range": [-1.0, 1.0],
+            "validation_metrics": validation,
         },
         out_dir / "tokenizer.pth",
+    )
+    print(
+        f"validation tokenizer: L1={validation['pixel_l1']:.4f}, "
+        f"feature={validation['feature_distance']:.4f}, "
+        f"entropy={validation['marginal_entropy_bits_per_token']:.3f} "
+        f"bits/token, active={validation['active_codes']:.0f}/"
+        f"{args.codebook_size}"
     )
     return model.eval().requires_grad_(False)
 
@@ -300,13 +429,18 @@ def load_tokenizer(path: Path, device: torch.device) -> VQPerceptualAutoencoder3
         raise ValueError("checkpoint is not a VQGAN tokenizer")
     model = VQPerceptualAutoencoder32(**checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
+    if checkpoint.get("interface_id") != model_state_fingerprint(model):
+        raise ValueError(
+            "tokenizer checkpoint has no valid interface identity; retrain stage 1"
+        )
     return model.eval().requires_grad_(False)
 
 
 def train_prior(
     args: argparse.Namespace,
     tokenizer: VQPerceptualAutoencoder32,
-    loader: DataLoader,
+    train_loader: DataLoader,
+    validation_loader: DataLoader,
     device: torch.device,
     out_dir: Path,
 ) -> None:
@@ -325,7 +459,7 @@ def train_prior(
         prior.train()
         nll_sum = 0.0
         examples = 0
-        for x, _ in loader:
+        for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             with torch.inference_mode():
                 _, indices, _, _ = tokenizer.encode(x)
@@ -352,9 +486,13 @@ def train_prior(
                 out_dir / f"prior_{epoch:03d}.png",
                 nrow=8,
             )
+    validation = evaluate_prior(
+        tokenizer, prior, validation_loader, device=device
+    )
+    tokenizer_interface_id = model_state_fingerprint(tokenizer)
     torch.save(
         {
-            "format_version": 1,
+            "format_version": 2,
             "model_name": "vqgan_transformer_prior",
             "state_dict": prior.state_dict(),
             "model_config": {
@@ -366,8 +504,15 @@ def train_prior(
                 "dropout": args.prior_dropout,
             },
             "tokenizer_checkpoint": "tokenizer.pth",
+            "tokenizer_interface_id": tokenizer_interface_id,
+            "dataset": "CIFAR-10",
+            "validation_metrics": validation,
         },
         out_dir / "transformer_prior.pth",
+    )
+    print(
+        f"validation prior: {validation['bits_per_token']:.3f} "
+        f"bits/token, {validation['bits_per_image']:.1f} bits/image"
     )
 
 
@@ -375,16 +520,29 @@ def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vqgan"
     out_dir.mkdir(parents=True, exist_ok=True)
-    loader = make_loader(args, device)
+    train_loader, validation_loader = make_loaders(args, device)
     path = out_dir / "tokenizer.pth"
     if args.stage in {"tokenizer", "all"}:
-        tokenizer = train_tokenizer(args, loader, device, out_dir)
+        tokenizer = train_tokenizer(
+            args,
+            train_loader,
+            validation_loader,
+            device,
+            out_dir,
+        )
     else:
         if not path.is_file():
             raise FileNotFoundError("train --stage tokenizer before the prior")
         tokenizer = load_tokenizer(path, device)
     if args.stage in {"prior", "all"}:
-        train_prior(args, tokenizer, loader, device, out_dir)
+        train_prior(
+            args,
+            tokenizer,
+            train_loader,
+            validation_loader,
+            device,
+            out_dir,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -420,7 +578,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    torch.manual_seed(args.seed)
+    set_seed(args.seed)
     if args.smoke_test:
         smoke_test()
     else:

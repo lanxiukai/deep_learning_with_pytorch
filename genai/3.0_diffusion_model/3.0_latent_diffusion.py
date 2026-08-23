@@ -2,7 +2,7 @@ r"""Move the DDPM state space from pixels into a frozen KL-AE latent grid.
 
 Latent Diffusion is a two-stage model, not a new reverse equation:
 
-1. train and validate ``4.2_kl_autoencoder.py``;
+1. train and validate ``8.0_kl_autoencoder.py``;
 2. freeze its encoder and decoder;
 3. encode ``z_0 = latent_scale * E(x)`` and train the same VP denoising loss;
 4. sample ``z_0`` with DDPM or DDIM, undo the scale, and decode once.
@@ -33,6 +33,7 @@ from tqdm import tqdm
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.diffusion.diffusion_ddpm import GaussianDiffusion
 from dl_utils.diffusion.diffusion_unet import DiffusionUNet
+from dl_utils.training.checkpoints import model_state_fingerprint
 from dl_utils.vae.perceptual_autoencoder import KLPerceptualAutoencoder32
 
 
@@ -123,18 +124,29 @@ def make_loader(
 def load_autoencoder(
     checkpoint_path: Path,
     device: torch.device,
-) -> tuple[KLPerceptualAutoencoder32, float, dict[str, int]]:
+) -> tuple[KLPerceptualAutoencoder32, float, dict[str, int], str]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if checkpoint.get("model_name") != "kl_perceptual_autoencoder":
         raise ValueError("first-stage checkpoint is not a KL perceptual autoencoder")
     config = checkpoint["model_config"]
-    latent_scale = float(checkpoint["latent_scale"])
+    latent_interface = checkpoint.get("latent_interface")
+    if not isinstance(latent_interface, dict):
+        raise ValueError(
+            "first-stage checkpoint predates the frozen latent interface; "
+            "retrain 8.0_kl_autoencoder.py"
+        )
+    latent_scale = float(latent_interface["latent_scale"])
     if not math.isfinite(latent_scale) or latent_scale <= 0.0:
         raise ValueError("first-stage latent_scale must be finite and positive")
+    interface_id = checkpoint.get("interface_id")
+    if not isinstance(interface_id, str) or not interface_id:
+        raise ValueError("first-stage checkpoint has no interface identity")
     model = KLPerceptualAutoencoder32(**config).to(device)
     model.load_state_dict(checkpoint["state_dict"])
+    if interface_id != model_state_fingerprint(model):
+        raise ValueError("first-stage checkpoint interface identity is invalid")
     model.eval().requires_grad_(False)
-    return model, latent_scale, config
+    return model, latent_scale, config, interface_id
 
 
 def latent_diffusion_batch(
@@ -168,6 +180,7 @@ def checkpoint_payload(
     epoch: int,
     autoencoder_config: dict[str, int],
     latent_scale: float,
+    autoencoder_interface_id: str,
 ) -> dict[str, object]:
     return {
         "format_version": 1,
@@ -181,6 +194,7 @@ def checkpoint_payload(
         ],
         "latent_scale": latent_scale,
         "autoencoder_model_name": "kl_perceptual_autoencoder",
+        "autoencoder_interface_id": autoencoder_interface_id,
         "autoencoder_config": autoencoder_config,
         "model_config": denoiser.config(),
         "diffusion_config": diffusion.config(),
@@ -194,12 +208,15 @@ def validate_first_stage(
     checkpoint: dict[str, object],
     autoencoder_config: dict[str, int],
     latent_scale: float,
+    autoencoder_interface_id: str,
 ) -> None:
     if checkpoint.get("autoencoder_config") != autoencoder_config:
         raise ValueError("latent checkpoint expects a different autoencoder shape")
     stored_scale = float(checkpoint["latent_scale"])
     if not math.isclose(stored_scale, latent_scale, rel_tol=0.0, abs_tol=1e-12):
         raise ValueError("latent checkpoint expects a different latent_scale")
+    if checkpoint.get("autoencoder_interface_id") != autoencoder_interface_id:
+        raise ValueError("latent checkpoint expects a different autoencoder identity")
 
 
 def train_model(
@@ -207,6 +224,7 @@ def train_model(
     autoencoder: KLPerceptualAutoencoder32,
     latent_scale: float,
     autoencoder_config: dict[str, int],
+    autoencoder_interface_id: str,
     device: torch.device,
 ) -> tuple[DiffusionUNet, GaussianDiffusion]:
     loader = make_loader(
@@ -231,7 +249,12 @@ def train_model(
         )
         if checkpoint.get("algorithm") != "latent_vp_ddpm":
             raise ValueError("resume checkpoint is not latent VP diffusion")
-        validate_first_stage(checkpoint, autoencoder_config, latent_scale)
+        validate_first_stage(
+            checkpoint,
+            autoencoder_config,
+            latent_scale,
+            autoencoder_interface_id,
+        )
         if checkpoint.get("model_config") != denoiser.config():
             raise ValueError("resume checkpoint has a different denoiser config")
         if checkpoint.get("diffusion_config") != diffusion.config():
@@ -278,6 +301,7 @@ def train_model(
                 epoch,
                 autoencoder_config,
                 latent_scale,
+                autoencoder_interface_id,
             ),
             args.output_dir / "latest.pth",
         )
@@ -288,12 +312,18 @@ def load_denoiser(
     checkpoint_path: Path,
     autoencoder_config: dict[str, int],
     latent_scale: float,
+    autoencoder_interface_id: str,
     device: torch.device,
 ) -> tuple[DiffusionUNet, GaussianDiffusion]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if checkpoint.get("algorithm") != "latent_vp_ddpm":
         raise ValueError("checkpoint is not a latent VP diffusion checkpoint")
-    validate_first_stage(checkpoint, autoencoder_config, latent_scale)
+    validate_first_stage(
+        checkpoint,
+        autoencoder_config,
+        latent_scale,
+        autoencoder_interface_id,
+    )
     denoiser = DiffusionUNet(**checkpoint["model_config"]).to(device)
     denoiser.load_state_dict(checkpoint["model_state"])
     diffusion = GaussianDiffusion(**checkpoint["diffusion_config"]).to(device)
@@ -388,6 +418,22 @@ def smoke_test() -> None:
     loss.backward()
     optimizer.step()
     assert all(parameter.grad is None for parameter in autoencoder.parameters())
+    first_stage_config = {"latent_channels": 4, "hidden_channels": 32}
+    payload = checkpoint_payload(
+        denoiser,
+        diffusion,
+        optimizer,
+        epoch=1,
+        autoencoder_config=first_stage_config,
+        latent_scale=0.5,
+        autoencoder_interface_id="smoke-kl-ae",
+    )
+    validate_first_stage(
+        payload,
+        first_stage_config,
+        latent_scale=0.5,
+        autoencoder_interface_id="smoke-kl-ae",
+    )
 
     latents, _ = diffusion.sample(
         denoiser,
@@ -425,20 +471,28 @@ def main() -> None:
     validate_args(args)
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    autoencoder, latent_scale, autoencoder_config = load_autoencoder(
-        args.autoencoder_checkpoint, device
-    )
+    (
+        autoencoder,
+        latent_scale,
+        autoencoder_config,
+        autoencoder_interface_id,
+    ) = load_autoencoder(args.autoencoder_checkpoint, device)
     if args.mode in ("train", "both"):
         denoiser, diffusion = train_model(
             args,
             autoencoder,
             latent_scale,
             autoencoder_config,
+            autoencoder_interface_id,
             device,
         )
     else:
         denoiser, diffusion = load_denoiser(
-            args.checkpoint, autoencoder_config, latent_scale, device
+            args.checkpoint,
+            autoencoder_config,
+            latent_scale,
+            autoencoder_interface_id,
+            device,
         )
     if args.mode in ("sample", "both"):
         generate(

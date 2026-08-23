@@ -7,11 +7,11 @@ original conceptual objective concrete:
 2. decoder: feature reconstruction + make reconstructions/prior samples real;
 3. discriminator: classify real images against both detached fake sources.
 
-This compact CIFAR-10 version uses a spatial Gaussian latent so the same
-encoder/decoder blocks can be reused in the later KL-AE lesson.  It preserves
-VAE-GAN's learned-similarity mechanism, but is not a benchmark reproduction of
-the paper's face model.  Adversarial sharpness can invent plausible details;
-always compare it with paired pixel distortion.
+This is a short mechanism experiment, not a VAE-GAN reproduction project.
+It uses a spatial Gaussian latent so the same encoder/decoder blocks can be
+reused in the later KL-AE lesson, saves only final weights, and evaluates
+paired fidelity separately from prior samples.  Adversarial sharpness can
+invent plausible details.
 """
 
 from __future__ import annotations
@@ -22,10 +22,14 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+from dl_utils.data.cifar10 import (
+    make_cifar10_loader,
+    normalized_cifar10_transform,
+)
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.runtime.randomness import set_seed
 from dl_utils.vae.perceptual_autoencoder import (
     KLPerceptualAutoencoder32,
     PatchDiscriminator32,
@@ -208,33 +212,88 @@ def smoke_test() -> None:
     )
 
 
-def make_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
-    dataset = datasets.CIFAR10(
-        PROJECT_ROOT / "data" / "cifar10",
-        train=True,
-        download=True,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,) * 3, (0.5,) * 3),
-            ]
+def make_loaders(
+    args: argparse.Namespace, device: torch.device
+) -> tuple[DataLoader, DataLoader]:
+    transform = normalized_cifar10_transform(horizontal_flip=False)
+    root = PROJECT_ROOT / "data" / "cifar10"
+    return (
+        make_cifar10_loader(
+            root,
+            args.batch_size,
+            device,
+            train=True,
+            transform=transform,
+            num_workers=args.workers,
+        ),
+        make_cifar10_loader(
+            root,
+            args.batch_size,
+            device,
+            train=False,
+            transform=transform,
+            num_workers=args.workers,
         ),
     )
-    return DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=device.type == "cuda",
-        drop_last=True,
-    )
+
+
+@torch.inference_mode()
+def evaluate(
+    model: KLPerceptualAutoencoder32,
+    discriminator: PatchDiscriminator32,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+) -> tuple[dict[str, float], Tensor]:
+    model.eval()
+    discriminator.eval()
+    totals = torch.zeros(6, device=device)
+    examples = 0
+    comparison = None
+    for x, _ in loader:
+        x = x.to(device, non_blocking=True)
+        mu, logvar = model.encode(x)
+        reconstruction = model.decoder(mu)
+        prior = model.decoder(torch.randn_like(mu))
+        real_features = discriminator.extract_features(x)
+        reconstruction_features = discriminator.extract_features(
+            reconstruction
+        )
+        values = torch.stack(
+            [
+                F.l1_loss(reconstruction, x),
+                F.mse_loss(reconstruction_features, real_features),
+                diagonal_gaussian_kl_from_logvar(
+                    mu, logvar
+                ).flatten(1).sum(dim=1).mean(),
+                discriminator(x).mean(),
+                discriminator(reconstruction).mean(),
+                discriminator(prior).mean(),
+            ]
+        )
+        totals += values * x.shape[0]
+        examples += x.shape[0]
+        if comparison is None:
+            comparison = torch.cat(
+                (x[:8], reconstruction[:8], prior[:8])
+            ).cpu()
+    values = (totals / examples).tolist()
+    assert comparison is not None
+    return {
+        "pixel_l1": values[0],
+        "learned_feature_mse": values[1],
+        "kl": values[2],
+        "real_logit": values[3],
+        "reconstruction_logit": values[4],
+        "prior_logit": values[5],
+    }, comparison
 
 
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vae_gan"
     out_dir.mkdir(parents=True, exist_ok=True)
-    loader = make_loader(args, device)
+    train_loader, validation_loader = make_loaders(args, device)
     model = KLPerceptualAutoencoder32(
         latent_channels=args.latent_channels, hidden_channels=args.hidden_channels
     ).to(device)
@@ -254,7 +313,7 @@ def train(args: argparse.Namespace) -> None:
         examples = 0
         model.train()
         discriminator.train()
-        for x, _ in loader:
+        for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             reconstruction, prior, metrics = vae_gan_iteration(
                 model,
@@ -274,15 +333,18 @@ def train(args: argparse.Namespace) -> None:
             f"KL={means[2]:.3f}, G={means[3]:.4f}, G_adv={means[4]:.4f}, "
             f"D={means[5]:.4f}, pixel_L1={means[6]:.4f}"
         )
-        save_image(
-            torch.cat((x[:8], reconstruction[:8], prior[:8])).mul(0.5).add(0.5),
-            out_dir / f"epoch_{epoch:03d}.png",
-            nrow=8,
-        )
+    validation, comparison = evaluate(
+        model, discriminator, validation_loader, device=device
+    )
+    save_image(
+        comparison.mul(0.5).add(0.5),
+        out_dir / "real_reconstruction_prior.png",
+        nrow=8,
+    )
 
     torch.save(
         {
-            "format_version": 1,
+            "format_version": 2,
             "model_name": "vae_gan",
             "state_dict": model.state_dict(),
             "discriminator_state_dict": discriminator.state_dict(),
@@ -292,20 +354,27 @@ def train(args: argparse.Namespace) -> None:
             },
             "kl_weight": args.kl_weight,
             "adversarial_weight": args.adversarial_weight,
-            "optimizer_states": {
-                "encoder": encoder_optimizer.state_dict(),
-                "decoder": decoder_optimizer.state_dict(),
-                "discriminator": discriminator_optimizer.state_dict(),
-            },
+            "dataset": "CIFAR-10",
+            "image_size": 32,
+            "value_range": [-1.0, 1.0],
+            "validation_metrics": validation,
         },
         out_dir / "vae_gan.pth",
+    )
+    print(
+        f"validation: L1={validation['pixel_l1']:.4f}, "
+        f"feature={validation['learned_feature_mse']:.4f}, "
+        f"logits(real,reconstruction,prior)="
+        f"({validation['real_logit']:.3f},"
+        f"{validation['reconstruction_logit']:.3f},"
+        f"{validation['prior_logit']:.3f})"
     )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-test", action="store_true")
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--latent-channels", type=int, default=4)
     parser.add_argument("--hidden-channels", type=int, default=128)
@@ -321,7 +390,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    torch.manual_seed(args.seed)
+    set_seed(args.seed)
     if args.smoke_test:
         smoke_test()
     else:
