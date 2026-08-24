@@ -46,13 +46,6 @@ class ModulatedConv2d(nn.Module):
         self.out_channels = int(out_channels)
         self.kernel_size = int(kernel_size)
         self.style_dim = int(style_dim)
-        if min(
-            self.in_channels,
-            self.out_channels,
-            self.kernel_size,
-            self.style_dim,
-        ) <= 0:
-            raise ValueError("convolution dimensions must be positive.")
         if self.kernel_size % 2 == 0:
             raise ValueError("kernel_size must be odd.")
         self.demodulate = bool(demodulate)
@@ -66,15 +59,15 @@ class ModulatedConv2d(nn.Module):
                 self.kernel_size,
                 self.kernel_size,
             )
-        )
+        )  # (1, Cout, Cin, K, K)
         self.weight_scale = 1 / math.sqrt(
             self.in_channels * self.kernel_size * self.kernel_size
-        )
+        )  # ()
         self.modulation = EqualizedLinear(
             style_dim,
             self.in_channels,
             bias_init=1.0,
-        )
+        )  # (B, style_dim) → (B, Cin)
 
     def forward(self, inputs, style):
         batch, channels, height, width = inputs.shape
@@ -82,34 +75,23 @@ class ModulatedConv2d(nn.Module):
             raise ValueError(
                 f"expected {self.in_channels} input channels, got {channels}"
             )
-        if style.ndim != 2 or style.shape != (batch, self.style_dim):
-            raise ValueError("style must be a [B, style_dim] tensor.")
-
         style_scale = self.modulation(style).view(
-            batch,
-            1,
-            self.in_channels,
-            1,
-            1,
-        )
-        weight = self.weight * self.weight_scale * style_scale
+            batch, 1, self.in_channels, 1, 1,
+        )  # (B, Cin) -> (B, 1, Cin, 1, 1)
+        weight = self.weight * self.weight_scale * style_scale  # (B, Cout, Cin, K, K)
         if self.demodulate:
             demodulation = torch.rsqrt(
                 weight.square().sum(dim=(2, 3, 4)) + 1e-8
-            )
+            )  # (B, Cout)
             weight = weight * demodulation.view(
-                batch,
-                self.out_channels,
-                1,
-                1,
-                1,
-            )
+                batch, self.out_channels, 1, 1, 1,
+            )  # (B, Cout, Cin, K, K)
         weight = weight.view(
             batch * self.out_channels,
             self.in_channels,
             self.kernel_size,
             self.kernel_size,
-        )
+        )  # (B × Cout, Cin, K, K)
 
         if self.upsample:
             inputs = filtered_upsample2d(inputs)
@@ -119,19 +101,19 @@ class ModulatedConv2d(nn.Module):
             batch * self.in_channels,
             height,
             width,
-        )
+        )  # (B, Cin, H', W') -> (1, B × Cin, H', W')
         outputs = F.conv2d(
             grouped_inputs,
             weight,
             padding=self.padding,
             groups=batch,
-        )
+        )  # (1, B × Cout, H', W')
         return outputs.view(
             batch,
             self.out_channels,
             outputs.shape[-2],
             outputs.shape[-1],
-        )
+        )  # (B, Cout, H', W')
 
 
 class StyledConv(nn.Module):
@@ -165,8 +147,10 @@ class StyledConv(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
 
     def forward(self, inputs, style, noise_mode="random"):
-        hidden = self.convolution(inputs, style)
-        hidden = self.noise(hidden, noise_mode)
+        # inputs: (B, Cin, H, W), style: (B, style_dim)
+        hidden = self.convolution(inputs, style)  # (B, Cout, H', W')
+        hidden = self.noise(hidden, noise_mode)   # (B, Cout, H', W')
+        # (B, Cout, H', W')
         return F.leaky_relu(hidden + self.bias, 0.2) * math.sqrt(2)
 
 
@@ -185,7 +169,8 @@ class ToRGB(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1, 3, 1, 1))
 
     def forward(self, inputs, style):
-        return self.convolution(inputs, style) + self.bias
+        # inputs: (B, Cin, H, W), style: (B, style_dim)
+        return self.convolution(inputs, style) + self.bias  # (B, 3, H, W)
 
 
 class SynthesisBlock(nn.Module):
@@ -211,7 +196,8 @@ class SynthesisBlock(nn.Module):
             resolution,
             fixed_noise_seed,
             upsample=not self.first,
-        )
+        )  # (B, Cin, 4, 4) → (B, Cout, 4, 4) if self.first
+           # else (B, Cin, R/2, R/2) → (B, Cout, R, R)
         self.conv2 = (
             None
             if self.first
@@ -222,24 +208,29 @@ class SynthesisBlock(nn.Module):
                 resolution,
                 fixed_noise_seed + 1,
             )
-        )
+        )  # (B, Cout, R, R) → (B, Cout, R, R)
+        # (B, Cout, R, R) → (B, 3, R, R)
         self.to_rgb = ToRGB(out_channels, style_dim)
 
     def forward(self, inputs, styles, rgb, noise_mode="random"):
+        # inputs: (B, Cin, H, W), styles: (B, num_ws, style_dim)
         if styles.ndim != 3 or styles.shape[1] != self.num_ws:
             raise ValueError(
                 f"expected {self.num_ws} W inputs for this synthesis block."
             )
+        # (B, Cin, 4, 4) -> (B, Cout, 4, 4) if self.first
+        # else (B, Cin, R/2, R/2) -> (B, Cout, R, R)
         hidden = self.conv1(inputs, styles[:, 0], noise_mode)
         if self.first:
             rgb_style = styles[:, 1]
         else:
-            assert self.conv2 is not None
+            # (B, Cout, H, W) if self.first else (B, Cout, R, R)
             hidden = self.conv2(hidden, styles[:, 1], noise_mode)
             rgb_style = styles[:, 2]
-        new_rgb = self.to_rgb(hidden, rgb_style)
+        new_rgb = self.to_rgb(hidden, rgb_style)  # (B, 3, R, R)
         if rgb is not None:
             new_rgb = new_rgb + filtered_upsample2d(rgb)
+        # hidden: (B, Cout, R, R), new_rgb: (B, 3, R, R)
         return hidden, new_rgb
 
 
@@ -260,10 +251,6 @@ class StyleGenerator(nn.Module):
         self.z_dim = int(z_dim)
         self.style_dim = int(style_dim)
         self.base_channels = int(base_channels)
-        if min(self.z_dim, self.style_dim, self.base_channels) <= 0:
-            raise ValueError(
-                "z_dim, style_dim, and base_channels must be positive."
-            )
         self.w_avg_beta = float(w_avg_beta)
         self.mapping = MappingNetwork(
             self.z_dim,
@@ -311,54 +298,41 @@ class StyleGenerator(nn.Module):
         truncation_psi=1.0,
         truncation_cutoff=None,
     ):
-        if z.ndim != 2 or z.shape[1] != self.z_dim:
-            raise ValueError(
-                f"expected z shape [B, {self.z_dim}], got {tuple(z.shape)}"
-            )
-        first_w = self.mapping(z)
+        first_w = self.mapping(z)  # (B, style_dim)
         if update_w_avg:
             with torch.no_grad():
-                batch_average = first_w.detach().mean(dim=0)
+                batch_average = first_w.detach().mean(dim=0)  # (style_dim,)
+                # w_avg <- w_avg + (1 - w_avg_beta) * (batch_average - w_avg)
                 self.w_avg.lerp_(batch_average, 1.0 - self.w_avg_beta)
-        ws = first_w[:, None, :].repeat(1, self.num_ws, 1)
+        ws = first_w[:, None, :].repeat(1, self.num_ws, 1)  # (B, num_ws, style_dim)
 
         if mixing_z is not None:
-            if mixing_z.shape != z.shape:
-                raise ValueError("mixing_z must have the same shape as z.")
-            second_w = self.mapping(mixing_z)
+            mixing_w = self.mapping(mixing_z)  # (B, style_dim)
             if mixing_cutoff is None:
-                mixing_cutoff = random.randint(1, self.num_ws - 1)
+                mixing_cutoff = random.randint(1, self.num_ws - 1)  # [1, num_ws)
             if not 0 < mixing_cutoff < self.num_ws:
                 raise ValueError(
                     "mixing_cutoff must be inside the style stack"
                 )
-            ws = torch.cat(
-                [
-                    ws[:, :mixing_cutoff],
-                    second_w[:, None, :].repeat(
-                        1,
-                        self.num_ws - mixing_cutoff,
-                        1,
-                    ),
-                ],
-                dim=1,
-            )
+            mixing_ws = mixing_w[:, None, :].repeat(
+                1, self.num_ws - mixing_cutoff, 1)
+            ws = torch.cat([ws[:, :mixing_cutoff], mixing_ws], dim=1)
 
         truncation_psi = float(truncation_psi)
-        if truncation_psi < 0:
-            raise ValueError("truncation_psi must be non-negative.")
-        if truncation_cutoff is None:
-            truncation_cutoff = self.num_ws
-        if not 0 <= truncation_cutoff <= self.num_ws:
-            raise ValueError("truncation_cutoff is outside the style stack.")
-        if truncation_psi != 1.0 and truncation_cutoff > 0:
-            truncated = torch.lerp(
-                self.w_avg.view(1, 1, -1),
-                ws[:, :truncation_cutoff],
-                truncation_psi,
-            )
-            ws = torch.cat([truncated, ws[:, truncation_cutoff:]], dim=1)
-        return ws
+        if truncation_psi != 1.0:
+            if truncation_cutoff is None:
+                truncation_cutoff = self.num_ws
+            if not 0 <= truncation_cutoff <= self.num_ws:
+                raise ValueError("truncation_cutoff is outside the style stack.")
+            if truncation_cutoff > 0:
+                # w_avg + truncation_psi * (ws - w_avg)
+                truncated = torch.lerp(
+                    self.w_avg.view(1, 1, -1),  # (1, 1, style_dim)
+                    ws[:, :truncation_cutoff],  # (B, truncation_cutoff, style_dim)
+                    truncation_psi,
+                )
+                ws = torch.cat([truncated, ws[:, truncation_cutoff:]], dim=1)
+        return ws  # (B, num_ws, style_dim)
 
     def synthesize(self, ws, noise_mode="random"):
         if ws.ndim != 3 or ws.shape[1:] != (

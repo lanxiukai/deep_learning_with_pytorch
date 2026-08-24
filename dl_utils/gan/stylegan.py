@@ -218,7 +218,8 @@ class StyleGANGenerator(nn.Module):
                 raise ValueError(
                     "mixing_cutoff must be inside the active style stack"
                 )
-            mixing_ws = mixing_w[:, None, :].repeat(1, self.num_ws - mixing_cutoff, 1)
+            mixing_ws = mixing_w[:, None, :].repeat(
+                1, self.num_ws - mixing_cutoff, 1)
             ws = torch.cat([ws[:, :mixing_cutoff], mixing_ws], dim=1)
 
         truncation_psi = float(truncation_psi)
