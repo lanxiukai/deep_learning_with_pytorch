@@ -145,6 +145,8 @@ def train_epoch(
         raise ValueError("num_batches exceeds one data epoch.")
     metrics = MetricAccumulator(METRIC_NAMES, device=device)
 
+    # Lazily yield only the first num_batches batches without buffering loader.
+    # This supports an exact training budget in a possibly partial final epoch.
     batches = islice(loader, num_batches)
     for real, _ in tqdm(
         batches,

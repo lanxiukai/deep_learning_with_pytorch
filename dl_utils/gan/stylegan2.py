@@ -64,7 +64,7 @@ class ModulatedConv2d(nn.Module):
             self.in_channels * self.kernel_size * self.kernel_size
         )  # ()
         self.modulation = EqualizedLinear(
-            style_dim,
+            self.style_dim,
             self.in_channels,
             bias_init=1.0,
         )  # (B, style_dim) → (B, Cin)
@@ -212,7 +212,7 @@ class SynthesisBlock(nn.Module):
         # (B, Cout, R, R) → (B, 3, R, R)
         self.to_rgb = ToRGB(out_channels, style_dim)
 
-    def forward(self, inputs, styles, rgb, noise_mode="random"):
+    def forward(self, inputs, styles, old_rgb, noise_mode="random"):
         # inputs: (B, Cin, H, W), styles: (B, num_ws, style_dim)
         if styles.ndim != 3 or styles.shape[1] != self.num_ws:
             raise ValueError(
@@ -228,8 +228,8 @@ class SynthesisBlock(nn.Module):
             hidden = self.conv2(hidden, styles[:, 1], noise_mode)
             rgb_style = styles[:, 2]
         new_rgb = self.to_rgb(hidden, rgb_style)  # (B, 3, R, R)
-        if rgb is not None:
-            new_rgb = new_rgb + filtered_upsample2d(rgb)
+        if old_rgb is not None:
+            new_rgb = new_rgb + filtered_upsample2d(old_rgb)
         # hidden: (B, Cout, R, R), new_rgb: (B, 3, R, R)
         return hidden, new_rgb
 
@@ -261,8 +261,8 @@ class StyleGenerator(nn.Module):
         self.resolutions = RESOLUTIONS
         # Every new resolution contributes two W slots. ToRGB consumes the
         # next slot, which is also reused by the following block's first conv.
-        self.styles_per_block = 2
-        self.num_ws = len(self.resolutions) * self.styles_per_block
+        self.ws_increment_per_block = 2
+        self.num_ws = len(self.resolutions) * self.ws_increment_per_block
         channels = make_channel_map(self.base_channels, self.resolutions)
         self.constant = nn.Parameter(torch.randn(1, channels[4], 4, 4))
         self.blocks = nn.ModuleList(
@@ -286,7 +286,7 @@ class StyleGenerator(nn.Module):
         resolution = validate_resolution(resolution, self.resolutions)
         return (
             self.resolutions.index(resolution) + 1
-        ) * self.styles_per_block
+        ) * self.ws_increment_per_block
 
     def make_ws(
         self,
@@ -335,26 +335,13 @@ class StyleGenerator(nn.Module):
         return ws  # (B, num_ws, style_dim)
 
     def synthesize(self, ws, noise_mode="random"):
-        if ws.ndim != 3 or ws.shape[1:] != (
-            self.num_ws,
-            self.style_dim,
-        ):
-            raise ValueError(
-                f"expected ws shape [B, {self.num_ws}, {self.style_dim}]"
-            )
-        hidden = self.constant.expand(ws.shape[0], -1, -1, -1)
+        hidden = self.constant.expand(ws.shape[0], -1, -1, -1)  # (B, C[4], 4, 4)
         rgb = None
         for index, block in enumerate(self.blocks):
-            start = 0 if index == 0 else 2 * index - 1
+            start = 0 if index == 0 else 2 * index - 1  # overlapped W slot
             block_styles = ws[:, start : start + block.num_ws]
-            hidden, rgb = block(
-                hidden,
-                block_styles,
-                rgb,
-                noise_mode,
-            )
-        assert rgb is not None
-        return rgb
+            hidden, rgb = block(hidden, block_styles, rgb, noise_mode)
+        return rgb  # (B, 3, R, R)
 
     def forward(
         self,
@@ -407,11 +394,12 @@ class DiscriminatorResidualBlock(nn.Module):
         self.scale = 1 / math.sqrt(2)
 
     def forward(self, inputs):
-        residual = filtered_downsample2d(self.skip(inputs))
-        hidden = F.leaky_relu(self.conv1(inputs), 0.2)
-        hidden = F.leaky_relu(self.conv2(hidden), 0.2)
-        hidden = filtered_downsample2d(hidden)
-        return (hidden + residual) * self.scale
+        # inputs: (B, Cin, H, W)
+        residual = filtered_downsample2d(self.skip(inputs))  # (B, Cout, H/2, W/2)
+        hidden = F.leaky_relu(self.conv1(inputs), 0.2)       # (B, Cin, H, W)
+        hidden = F.leaky_relu(self.conv2(hidden), 0.2)       # (B, Cout, H, W)
+        hidden = filtered_downsample2d(hidden)               # (B, Cout, H/2, W/2)
+        return (hidden + residual) * self.scale  # (B, Cout, H/2, W/2)
 
 
 class StyleDiscriminator(nn.Module):
@@ -420,19 +408,10 @@ class StyleDiscriminator(nn.Module):
     def __init__(self, base_channels=32):
         super().__init__()
         self.base_channels = int(base_channels)
-        if self.base_channels <= 0:
-            raise ValueError("base_channels must be positive.")
         self.resolutions = RESOLUTIONS
-        self.channels = make_channel_map(
-            self.base_channels,
-            self.resolutions,
-        )
+        self.channels = make_channel_map(self.base_channels, self.resolutions)
         final_resolution = self.resolutions[-1]
-        self.from_rgb = EqualizedConv2d(
-            3,
-            self.channels[final_resolution],
-            1,
-        )
+        self.from_rgb = EqualizedConv2d(3, self.channels[final_resolution], 1)
         self.blocks = nn.Sequential(
             *[
                 DiscriminatorResidualBlock(
@@ -441,14 +420,14 @@ class StyleDiscriminator(nn.Module):
                 )
                 for resolution in reversed(self.resolutions[1:])
             ]
-        )
+        )  # (B, C[128], 128, 128) -> (B, C[4], 4, 4)
         self.minibatch_std = MinibatchStandardDeviation()
         self.final_conv = EqualizedConv2d(
             self.channels[4] + 1,
             self.channels[4],
             3,
             padding=1,
-        )
+        )  # (B, C[4], 4, 4)
         self.final = nn.Sequential(
             nn.Flatten(),
             EqualizedLinear(
@@ -458,21 +437,15 @@ class StyleDiscriminator(nn.Module):
             ),
             nn.LeakyReLU(0.2, inplace=True),
             EqualizedLinear(self.channels[4], 1),
-        )
+        )  # (B, C[4] × 4 × 4) -> (B, C[4]) -> (B, 1)
 
     def forward(self, images):
-        final_resolution = self.resolutions[-1]
-        expected = (3, final_resolution, final_resolution)
-        if images.ndim != 4 or images.shape[1:] != expected:
-            raise ValueError(
-                "StyleDiscriminator expects "
-                f"[B, 3, {final_resolution}, {final_resolution}]."
-            )
-        hidden = F.leaky_relu(self.from_rgb(images), 0.2)
-        hidden = self.blocks(hidden)
+        # images: (B, 3, 128, 128)
+        hidden = F.leaky_relu(self.from_rgb(images), 0.2)  # (B, C[128], 128, 128)
+        hidden = self.blocks(hidden)                       # (B, C[4], 4, 4)
         hidden = self.minibatch_std(hidden)
-        hidden = F.leaky_relu(self.final_conv(hidden), 0.2)
-        return self.final(hidden).squeeze(1)
+        hidden = F.leaky_relu(self.final_conv(hidden), 0.2)  # (B, C[4], 4, 4)
+        return self.final(hidden).squeeze(1)  # (B,)
 
 
 __all__ = [
