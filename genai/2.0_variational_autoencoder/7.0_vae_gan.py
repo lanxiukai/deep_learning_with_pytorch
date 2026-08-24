@@ -7,19 +7,18 @@ original conceptual objective concrete:
 2. decoder: feature reconstruction + make reconstructions/prior samples real;
 3. discriminator: classify real images against both detached fake sources.
 
-The ``scaffold`` stage first freezes an independent feature network and checks
-that feature reconstruction reaches the encoder/decoder.  The ``learned``
-stage then replaces that fixed metric with the moving discriminator features
-and executes the three optimizer boundaries above.  The scaffold is not a new
-model.  This remains a compact mechanism experiment rather than a paper-scale
-reproduction; paired fidelity and prior generation stay separate because
-adversarial sharpness can invent plausible details.
+Training first freezes an independent feature network and checks that feature
+reconstruction reaches the encoder/decoder.  It then replaces that fixed
+metric with the moving discriminator features and executes the three optimizer
+boundaries above.  The scaffold is not a separate model or checkpoint.  This
+remains a compact mechanism experiment rather than a paper-scale reproduction;
+paired fidelity and prior generation stay separate because adversarial
+sharpness can invent plausible details.
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -47,9 +46,6 @@ from dl_utils.vae.vae_common import (
 
 
 PROJECT_ROOT = infer_project_root()
-DEFAULT_SCAFFOLD = (
-    PROJECT_ROOT / "output" / "vae_gan" / "fixed_feature_scaffold.pth"
-)
 
 
 def set_trainable(module: torch.nn.Module, value: bool) -> None:
@@ -433,77 +429,8 @@ def evaluate_fixed_features(
     }
 
 
-def save_scaffold(
-    model: KLPerceptualAutoencoder32,
-    args: argparse.Namespace,
-    validation: dict[str, float],
-    path: Path,
-) -> None:
-    torch.save(
-        {
-            "format_version": 1,
-            "model_name": "vae_fixed_feature_scaffold",
-            "roadmap_role": "internal_scaffold",
-            "direct_baseline": "standard VAE",
-            "visible_increment": "frozen feature reconstruction",
-            "state_dict": model.state_dict(),
-            "model_config": {
-                "latent_channels": args.latent_channels,
-                "hidden_channels": args.hidden_channels,
-            },
-            "feature_network": args.fixed_feature_network,
-            "feature_metric_name": (
-                "frozen torchvision VGG16 feature L1"
-                if args.fixed_feature_network == "vgg"
-                else "random frozen feature debug distance"
-            ),
-            "dataset": "CIFAR-10",
-            "image_size": 32,
-            "value_range": [-1.0, 1.0],
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={"vae_fixed_feature_scaffold": model},
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.scaffold_epochs,
-                    "batch_size": args.batch_size,
-                },
-                data_preprocessing={
-                    "spatial": "native 32x32",
-                    "value_range": [-1.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
-        },
-        path,
-    )
-
-
-def load_scaffold(
-    model: KLPerceptualAutoencoder32,
-    path: Path,
-    *,
-    device: torch.device,
-) -> dict[str, object]:
-    if not path.is_file():
-        raise FileNotFoundError(
-            "run --stage scaffold before --stage learned, or use --stage all"
-        )
-    checkpoint = torch.load(path, map_location=device, weights_only=True)
-    if checkpoint.get("model_name") != "vae_fixed_feature_scaffold":
-        raise ValueError("scaffold checkpoint has the wrong model type")
-    expected_config = {
-        "latent_channels": model.latent_channels,
-        "hidden_channels": model.decoder.net[0].out_channels,
-    }
-    if checkpoint.get("model_config") != expected_config:
-        raise ValueError("scaffold and requested VAE-GAN configurations differ")
-    model.load_state_dict(checkpoint["state_dict"], strict=True)
-    return checkpoint
-
-
 def train(args: argparse.Namespace) -> None:
-    if args.stage in {"scaffold", "all"} and args.scaffold_epochs < 1:
+    if args.scaffold_epochs < 1:
         raise ValueError("scaffold_epochs must be positive")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vae_gan"
@@ -512,58 +439,38 @@ def train(args: argparse.Namespace) -> None:
     model = KLPerceptualAutoencoder32(
         latent_channels=args.latent_channels, hidden_channels=args.hidden_channels
     ).to(device)
-    scaffold_feature = args.fixed_feature_network
-    if args.stage in {"scaffold", "all"}:
-        feature_network = build_perceptual_loss(
-            args.fixed_feature_network, device
-        )
-        scaffold_optimizer = torch.optim.Adam(
-            model.parameters(), lr=args.lr, betas=(0.5, 0.9)
-        )
-        for epoch in range(1, args.scaffold_epochs + 1):
-            model.train()
-            sums = torch.zeros(4, device=device)
-            examples = 0
-            for x, _ in train_loader:
-                x = x.to(device, non_blocking=True)
-                _, metrics = fixed_feature_step(
-                    model,
-                    feature_network,
-                    x,
-                    scaffold_optimizer,
-                    kl_weight=args.kl_weight,
-                )
-                sums += torch.stack(tuple(metrics.values())) * x.shape[0]
-                examples += x.shape[0]
-            values = (sums / examples).tolist()
-            print(
-                f"scaffold {epoch:03d}: loss={values[0]:.4f}, "
-                f"feature={values[1]:.4f}, KL={values[2]:.3f}, "
-                f"pixel_L1={values[3]:.4f}"
+    feature_network = build_perceptual_loss(
+        args.fixed_feature_network, device
+    )
+    scaffold_optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.lr, betas=(0.5, 0.9)
+    )
+    for epoch in range(1, args.scaffold_epochs + 1):
+        model.train()
+        sums = torch.zeros(4, device=device)
+        examples = 0
+        for x, _ in train_loader:
+            x = x.to(device, non_blocking=True)
+            _, metrics = fixed_feature_step(
+                model,
+                feature_network,
+                x,
+                scaffold_optimizer,
+                kl_weight=args.kl_weight,
             )
-        scaffold_validation = evaluate_fixed_features(
-            model, feature_network, validation_loader, device=device
-        )
-        args.scaffold_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        save_scaffold(
-            model,
-            args,
-            scaffold_validation,
-            args.scaffold_checkpoint,
-        )
+            sums += torch.stack(tuple(metrics.values())) * x.shape[0]
+            examples += x.shape[0]
+        values = (sums / examples).tolist()
         print(
-            "fixed-feature scaffold saved; this artifact is not yet VAE-GAN"
+            f"scaffold {epoch:03d}: loss={values[0]:.4f}, "
+            f"feature={values[1]:.4f}, KL={values[2]:.3f}, "
+            f"pixel_L1={values[3]:.4f}"
         )
-        if args.stage == "scaffold":
-            return
-    else:
-        scaffold_checkpoint = load_scaffold(
-            model, args.scaffold_checkpoint, device=device
-        )
-        scaffold_feature = str(scaffold_checkpoint["feature_network"])
-        scaffold_validation = dict(
-            scaffold_checkpoint["validation_metrics"]
-        )
+    scaffold_validation = evaluate_fixed_features(
+        model, feature_network, validation_loader, device=device
+    )
+    print("fixed-feature scaffold complete; switching to learned features")
+    del feature_network, scaffold_optimizer
 
     discriminator = PatchDiscriminator32(args.discriminator_channels).to(device)
     encoder_optimizer = torch.optim.Adam(
@@ -629,8 +536,7 @@ def train(args: argparse.Namespace) -> None:
             "internal_stages": [
                 {
                     "name": "fixed_feature_scaffold",
-                    "feature_network": scaffold_feature,
-                    "checkpoint": args.scaffold_checkpoint.name,
+                    "feature_network": args.fixed_feature_network,
                 },
                 {"name": "dynamic_discriminator_feature"},
             ],
@@ -676,13 +582,7 @@ def train(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-test", action="store_true")
-    parser.add_argument(
-        "--stage", choices=("scaffold", "learned", "all"), default="all"
-    )
     parser.add_argument("--scaffold-epochs", type=int, default=2)
-    parser.add_argument(
-        "--scaffold-checkpoint", type=Path, default=DEFAULT_SCAFFOLD
-    )
     parser.add_argument(
         "--fixed-feature-network",
         choices=("vgg", "random"),

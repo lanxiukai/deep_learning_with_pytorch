@@ -490,11 +490,6 @@ Public entries (__all__): LOG_2PI, split_gaussian_parameters,
 reparameterize_logvar, diagonal_gaussian_kl_from_logvar,
 diagonal_gaussian_log_density, fuse_diagonal_gaussians, ConvGaussianVAE28.
 
-### dl_utils/vae/aggregate_matching.py
-
-Dependencies: collections.abc (Sequence), torch.
-Public entries (__all__): imq_mmd2, latent_moment_diagnostics.
-
 ### dl_utils/vae/conditional.py
 
 Dependencies: torch, torch.nn, dl_utils.vae.vae_common.
