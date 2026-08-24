@@ -29,7 +29,10 @@ from dl_utils.data.cifar10 import (
 )
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import model_state_fingerprint
+from dl_utils.training.checkpoints import (
+    model_state_fingerprint,
+    reproducibility_metadata,
+)
 from dl_utils.vae.quantization import FSQAutoencoder32, TokenUsageAccumulator
 from dl_utils.vae.token_prior import PixelCNNPrior
 
@@ -221,6 +224,10 @@ def train_tokenizer(
         {
             "format_version": 2,
             "model_name": "fsq_tokenizer",
+            "roadmap_role": "focused_branch",
+            "roadmap_step": "7X",
+            "direct_baseline": "VQ-VAE tokenizer interface",
+            "visible_increment": "fixed scalar levels without a codebook loss",
             "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "model_config": config,
@@ -231,6 +238,21 @@ def train_tokenizer(
             "image_size": 32,
             "value_range": [-1.0, 1.0],
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"fsq_tokenizer": model},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.tokenizer_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.tokenizer_epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "spatial": "native 32x32",
+                    "value_range": [-1.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "tokenizer.pth",
     )
@@ -314,6 +336,10 @@ def train_prior(
         {
             "format_version": 2,
             "model_name": "fsq_pixelcnn_prior",
+            "roadmap_role": "focused_branch_stage_two",
+            "roadmap_step": "7X",
+            "direct_baseline": "frozen FSQ tokenizer",
+            "visible_increment": "autoregressive prior over frozen FSQ tokens",
             "state_dict": prior.state_dict(),
             "model_config": {
                 "vocabulary_size": vocabulary_size,
@@ -324,6 +350,22 @@ def train_prior(
             "tokenizer_interface_id": tokenizer_interface_id,
             "dataset": "CIFAR-10",
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"fsq_pixelcnn_prior": prior},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.prior_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.prior_epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "tokenizer": "frozen FSQ",
+                    "token_grid": [8, 8],
+                    "index_order": "row-major",
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "pixelcnn_prior.pth",
     )

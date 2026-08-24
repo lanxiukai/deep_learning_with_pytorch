@@ -34,7 +34,10 @@ from dl_utils.data.cifar10 import (
 )
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import model_state_fingerprint
+from dl_utils.training.checkpoints import (
+    model_state_fingerprint,
+    reproducibility_metadata,
+)
 from dl_utils.vae.quantization import TokenUsageAccumulator, VQVAE32
 from dl_utils.vae.token_prior import PixelCNNPrior
 
@@ -229,6 +232,10 @@ def train_tokenizer(
         {
             "format_version": 2,
             "model_name": "vq_vae_tokenizer",
+            "roadmap_role": "historical_anchor",
+            "roadmap_step": 6,
+            "direct_baseline": "deterministic autoencoder/VAE components",
+            "visible_increment": "VQ, STE, and codebook state",
             "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "model_config": config,
@@ -241,6 +248,21 @@ def train_tokenizer(
                 64 * math.log(args.codebook_size)
             ),
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"vq_vae_tokenizer": model},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.tokenizer_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.tokenizer_epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "spatial": "native 32x32",
+                    "value_range": [-1.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "tokenizer.pth",
     )
@@ -324,6 +346,10 @@ def train_prior(
         {
             "format_version": 2,
             "model_name": "vq_vae_pixelcnn_prior",
+            "roadmap_role": "historical_anchor_stage_two",
+            "roadmap_step": 6,
+            "direct_baseline": "frozen VQ-VAE tokenizer",
+            "visible_increment": "autoregressive prior over frozen tokens",
             "state_dict": prior.state_dict(),
             "model_config": {
                 "vocabulary_size": vocabulary_size,
@@ -335,6 +361,22 @@ def train_prior(
             "token_grid": (8, 8),
             "dataset": "CIFAR-10",
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"vq_vae_pixelcnn_prior": prior},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.prior_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.prior_epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "tokenizer": "frozen VQ-VAE",
+                    "token_grid": [8, 8],
+                    "index_order": "row-major",
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "pixelcnn_prior.pth",
     )

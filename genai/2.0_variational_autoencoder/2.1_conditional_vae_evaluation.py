@@ -6,8 +6,8 @@ then measures:
 * class compliance of samples drawn from p(z | c);
 * within-class feature diversity relative to real test images;
 * posterior-mean reconstruction and a decoder condition-shuffle intervention;
-* learned-prior, fixed-prior, and deterministic conditional baselines when
-  their final artifacts are available.
+* the standard-prior main model, plus learned-prior and deterministic
+  controls when their final artifacts are available.
 
 The classifier is not part of the cVAE checkpoint or generation path.
 """
@@ -283,8 +283,8 @@ def posterior_and_shuffle_metrics(
 
 def _checkpoint_paths(args: argparse.Namespace) -> dict[str, Path]:
     return {
-        "learned-prior": args.learned_prior_checkpoint,
         "standard-prior": args.standard_prior_checkpoint,
+        "learned-prior": args.learned_prior_checkpoint,
         "deterministic": args.deterministic_checkpoint,
     }
 
@@ -308,19 +308,19 @@ def evaluate(args: argparse.Namespace) -> None:
         )
 
     paths = _checkpoint_paths(args)
-    if not paths["learned-prior"].exists():
+    if not paths["standard-prior"].exists():
         raise FileNotFoundError(
-            f"missing {paths['learned-prior']}; run 2.0_conditional_vae.py"
+            f"missing {paths['standard-prior']}; run 2.0_conditional_vae.py"
         )
-    missing_baselines = [
+    missing_controls = [
         name
-        for name in ("standard-prior", "deterministic")
+        for name in ("learned-prior", "deterministic")
         if not paths[name].exists()
     ]
-    if missing_baselines and args.require_baselines:
+    if missing_controls and args.require_controls:
         raise FileNotFoundError(
-            "missing required baseline checkpoints: "
-            + ", ".join(missing_baselines)
+            "missing required control checkpoints: "
+            + ", ".join(missing_controls)
         )
 
     out_dir = DEFAULT_ROOT / "evaluation"
@@ -334,7 +334,7 @@ def evaluate(args: argparse.Namespace) -> None:
             device=device,
         ),
         "models": {},
-        "missing_optional_baselines": missing_baselines,
+        "missing_optional_controls": missing_controls,
     }
     for name, path in paths.items():
         if not path.exists():
@@ -442,7 +442,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_ROOT / "deterministic" / "model.pth",
     )
-    parser.add_argument("--require-baselines", action="store_true")
+    parser.add_argument("--require-controls", action="store_true")
     return parser.parse_args()
 
 

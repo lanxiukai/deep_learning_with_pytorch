@@ -279,11 +279,17 @@ class VGGPerceptualLoss(nn.Module):
         raise ValueError("reduction must be 'none' or 'mean'")
 
 
-def discriminator_hinge_loss(real_logits: Tensor, fake_logits: Tensor) -> Tensor:
-    return 0.5 * (
-        F.relu(1.0 - real_logits).mean()
-        + F.relu(1.0 + fake_logits).mean()
-    )
+def build_perceptual_loss(name: str, device: torch.device) -> nn.Module:
+    """Build a truthfully named frozen feature distance."""
+    if name == "vgg":
+        return VGGPerceptualLoss().to(device)
+    if name == "random":
+        print(
+            "warning: random features are a gradient-path debug mode, "
+            "not a perceptual metric"
+        )
+        return RandomFeaturePerceptualLoss().to(device)
+    raise ValueError(f"unknown perceptual network: {name}")
 
 
 def adaptive_adversarial_weight(
@@ -315,5 +321,5 @@ __all__ = [
     "VGGPerceptualLoss",
     "VQPerceptualAutoencoder32",
     "adaptive_adversarial_weight",
-    "discriminator_hinge_loss",
+    "build_perceptual_loss",
 ]

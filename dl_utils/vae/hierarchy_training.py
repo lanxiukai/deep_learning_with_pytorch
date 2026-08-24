@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
 from dl_utils.data.factor_shapes import FactorShapes32
+from dl_utils.training.checkpoints import reproducibility_metadata
 from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
 from dl_utils.vae.vae_hierarchy import (
     ActiveUnitAccumulator,
@@ -108,6 +109,7 @@ def train_hierarchy(
     warmup_epochs: float,
     free_bits: float,
     active_variance_threshold: float,
+    seed: int,
     out_dir: Path,
     checkpoint_metadata: dict[str, object],
 ) -> None:
@@ -177,6 +179,20 @@ def train_hierarchy(
             "active_variance_threshold": active_variance_threshold,
             "validation_metrics": validation,
             **checkpoint_metadata,
+            **reproducibility_metadata(
+                models={str(checkpoint_metadata["model_name"]): model},
+                seed=seed,
+                training_budget={
+                    "epochs": epochs,
+                    "batch_size": train_loader.batch_size,
+                    "optimizer_updates": epochs * len(train_loader),
+                },
+                data_preprocessing={
+                    "renderer": "FactorShapes32 deterministic renderer",
+                    "value_range": [0.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "model.pth",
     )

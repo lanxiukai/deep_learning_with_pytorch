@@ -32,7 +32,10 @@ from dl_utils.data.cifar10 import (
 )
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import model_state_fingerprint
+from dl_utils.training.checkpoints import (
+    model_state_fingerprint,
+    reproducibility_metadata,
+)
 from dl_utils.vae.quantization import TokenUsageAccumulator, VQVAE2
 from dl_utils.vae.token_prior import PixelCNNPrior
 
@@ -268,6 +271,10 @@ def train_tokenizer(
         {
             "format_version": 2,
             "model_name": "vq_vae_2_tokenizer",
+            "roadmap_role": "historical_anchor",
+            "roadmap_step": 7,
+            "direct_baseline": "single-level VQ-VAE",
+            "visible_increment": "top and bottom discrete latent hierarchy",
             "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "model_config": config,
@@ -282,6 +289,21 @@ def train_tokenizer(
                 + 64 * math.log(args.bottom_codebook_size)
             ),
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"vq_vae_2_tokenizer": model},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.tokenizer_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.tokenizer_epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "spatial": "native 32x32",
+                    "value_range": [-1.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "tokenizer.pth",
     )
@@ -395,6 +417,9 @@ def train_priors(
     tokenizer_interface_id = model_state_fingerprint(tokenizer)
     common = {
         "format_version": 2,
+        "roadmap_role": "historical_anchor_stage_two",
+        "roadmap_step": 7,
+        "direct_baseline": "frozen hierarchical VQ-VAE-2 tokenizer",
         "tokenizer_checkpoint": "tokenizer.pth",
         "tokenizer_interface_id": tokenizer_interface_id,
         "dataset": "CIFAR-10",
@@ -410,6 +435,23 @@ def train_priors(
                 "hidden_channels": args.prior_hidden_channels,
                 "layers": args.prior_layers,
             },
+            "visible_increment": "autoregressive top-token prior",
+            **reproducibility_metadata(
+                models={"vq_vae_2_top_prior": top_prior},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.prior_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.prior_epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "tokenizer": "frozen VQ-VAE-2",
+                    "token_grid": [4, 4],
+                    "index_order": "row-major",
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "top_prior.pth",
     )
@@ -424,6 +466,26 @@ def train_priors(
                 "layers": args.prior_layers,
                 "condition_channels": tokenizer.hidden_channels,
             },
+            "visible_increment": "bottom-token prior conditioned on top tokens",
+            **reproducibility_metadata(
+                models={
+                    "vq_vae_2_bottom_conditional_prior": bottom_prior
+                },
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.prior_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.prior_epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "tokenizer": "frozen VQ-VAE-2",
+                    "token_grid": [8, 8],
+                    "top_condition_grid": [4, 4],
+                    "index_order": "row-major",
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "bottom_prior.pth",
     )

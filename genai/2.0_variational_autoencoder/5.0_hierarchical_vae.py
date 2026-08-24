@@ -131,6 +131,7 @@ def main() -> None:
         warmup_epochs=args.warmup_epochs,
         free_bits=args.free_bits,
         active_variance_threshold=args.active_variance_threshold,
+        seed=args.seed,
         out_dir=(
             PROJECT_ROOT
             / "output"
@@ -139,6 +140,10 @@ def main() -> None:
         ),
         checkpoint_metadata={
             "model_name": "hierarchical_vae",
+            "roadmap_role": "teaching_transition",
+            "roadmap_step": 4,
+            "direct_baseline": "standard VAE",
+            "visible_increment": "second latent and conditional prior",
             "seed": args.seed,
             "dataset": "FactorShapes32",
             "factor_names": FACTOR_NAMES,

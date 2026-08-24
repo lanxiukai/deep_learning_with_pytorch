@@ -1,6 +1,7 @@
-"""Compare VQGAN and KL-AE compression on held-out CIFAR-10.
+"""Validate the KL-AE first stage before latent diffusion.
 
-Both models use the same paired pixel, local SSIM, frozen VGG-feature, and
+An optional VQGAN checkpoint provides a discrete-tokenizer coordinate. Both
+models use the same paired pixel, local SSIM, frozen VGG-feature, and
 projected Inception reconstruction-distribution protocol. Model-specific
 evidence stays separate: VQGAN reports token usage and optional Transformer
 prior cross-entropy, while KL-AE reports posterior moments, KL, sample/mean
@@ -499,9 +500,10 @@ def evaluate(args: argparse.Namespace) -> None:
         args.vqgan_tokenizer, args.vqgan_prior, device
     )
     kl_autoencoder = load_kl_autoencoder(args.kl_autoencoder, device)
-    if vqgan is None and kl_autoencoder is None:
+    if kl_autoencoder is None:
         raise FileNotFoundError(
-            "no perceptual autoencoder checkpoint exists; run 7.1 or 8.0 first"
+            "no KL first-stage checkpoint exists; run "
+            "3.0_kl_autoencoder.py first"
         )
     if args.perceptual == "vgg":
         perceptual: nn.Module = VGGPerceptualLoss().to(device)
@@ -525,7 +527,7 @@ def evaluate(args: argparse.Namespace) -> None:
         max_examples=args.max_examples,
         device=device,
     )
-    out_dir = OUTPUT_ROOT / "perceptual_autoencoder_evaluation"
+    out_dir = OUTPUT_ROOT / "diffusion" / "first_stage_evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, object] = {
         "protocol": {

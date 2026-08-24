@@ -4,7 +4,8 @@ The first stage adds three ideas to ``6.0_vq_vae.py``:
 
 * frozen pretrained VGG features as a compact perceptual-loss proxy;
 * a PatchGAN discriminator with hinge loss and delayed activation;
-* a stopped gradient-norm ratio on the decoder's last layer to scale G loss.
+* a fixed adversarial-weight baseline, then an opt-in stopped gradient-norm
+  ratio on the decoder's last layer.
 
 The published VQGAN uses LPIPS; VGG features keep this repository dependency-
 light while preserving the perceptual-gradient path.  Do not label the logged
@@ -30,15 +31,21 @@ from dl_utils.data.cifar10 import (
     normalized_cifar10_transform,
 )
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.gan.sn_gan import (
+    discriminator_hinge_loss,
+    generator_hinge_loss,
+)
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import model_state_fingerprint
+from dl_utils.training.checkpoints import (
+    model_state_fingerprint,
+    reproducibility_metadata,
+)
 from dl_utils.vae.perceptual_autoencoder import (
     PatchDiscriminator32,
     RandomFeaturePerceptualLoss,
-    VGGPerceptualLoss,
     VQPerceptualAutoencoder32,
     adaptive_adversarial_weight,
-    discriminator_hinge_loss,
+    build_perceptual_loss,
 )
 from dl_utils.vae.quantization import TokenUsageAccumulator
 from dl_utils.vae.token_prior import CausalTransformerPrior
@@ -59,6 +66,7 @@ def vqgan_autoencoder_step(
     perceptual_weight: float,
     vq_weight: float,
     discriminator_weight: float,
+    adversarial_weighting: str,
 ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
     reconstruction, indices, vq_loss, diagnostics = model(x)
     pixel_l1 = F.l1_loss(reconstruction, x)
@@ -68,20 +76,26 @@ def vqgan_autoencoder_step(
 
     discriminator.requires_grad_(False)
     try:
-        adversarial = -discriminator(reconstruction).mean()
-        if step >= discriminator_start:
-            adaptive = adaptive_adversarial_weight(
+        adversarial = generator_hinge_loss(discriminator(reconstruction))
+        if step >= discriminator_start and adversarial_weighting == "adaptive":
+            adversarial_scale = adaptive_adversarial_weight(
                 reconstruction_objective,
                 adversarial,
                 model.decoder.last_layer,
                 scale=discriminator_weight,
             )
+        elif step >= discriminator_start and adversarial_weighting == "fixed":
+            adversarial_scale = x.new_tensor(float(discriminator_weight))
+        elif step >= discriminator_start:
+            raise ValueError(
+                "adversarial_weighting must be 'fixed' or 'adaptive'"
+            )
         else:
-            adaptive = x.new_zeros(())
+            adversarial_scale = x.new_zeros(())
         loss = (
             reconstruction_objective
             + float(vq_weight) * vq_loss
-            + adaptive * adversarial
+            + adversarial_scale * adversarial
         )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -94,7 +108,7 @@ def vqgan_autoencoder_step(
         "frozen_feature": feature_loss.detach(),
         "vq": vq_loss.detach(),
         "generator_adversarial": adversarial.detach(),
-        "adaptive_weight": adaptive.detach(),
+        "adversarial_scale": adversarial_scale.detach(),
         "perplexity": diagnostics["perplexity"],
         "active_codes": diagnostics["active_codes"].float(),
     }
@@ -114,7 +128,7 @@ def vqgan_discriminator_step(
         return {"discriminator": zero, "real_logit": zero, "fake_logit": zero}
     real_logits = discriminator(x)
     fake_logits = discriminator(reconstruction.detach())
-    loss = discriminator_hinge_loss(real_logits, fake_logits)
+    loss = 0.5 * discriminator_hinge_loss(real_logits, fake_logits)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
@@ -135,6 +149,12 @@ def smoke_test() -> None:
     ae_optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
     x = torch.randn(2, 3, 32, 32).clamp(-1, 1)
+    discriminator_before = [
+        parameter.detach().clone() for parameter in discriminator.parameters()
+    ]
+    perceptual_before = [
+        parameter.detach().clone() for parameter in perceptual.parameters()
+    ]
     reconstruction, indices, metrics = vqgan_autoencoder_step(
         model,
         discriminator,
@@ -146,7 +166,23 @@ def smoke_test() -> None:
         perceptual_weight=0.1,
         vq_weight=1.0,
         discriminator_weight=1.0,
+        adversarial_weighting="adaptive",
     )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(
+            discriminator_before, discriminator.parameters()
+        )
+    )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(
+            perceptual_before, perceptual.parameters()
+        )
+    )
+    model_before_discriminator = [
+        parameter.detach().clone() for parameter in model.parameters()
+    ]
     d_metrics = vqgan_discriminator_step(
         discriminator,
         x,
@@ -154,6 +190,33 @@ def smoke_test() -> None:
         d_optimizer,
         step=1,
         discriminator_start=0,
+    )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(
+            model_before_discriminator, model.parameters()
+        )
+    )
+    fixed_model = VQPerceptualAutoencoder32(
+        latent_channels=8, codebook_size=32, hidden_channels=32
+    )
+    fixed_discriminator = PatchDiscriminator32(base_channels=16)
+    fixed_optimizer = torch.optim.Adam(fixed_model.parameters(), lr=1e-4)
+    _, _, fixed_metrics = vqgan_autoencoder_step(
+        fixed_model,
+        fixed_discriminator,
+        perceptual,
+        x,
+        fixed_optimizer,
+        step=1,
+        discriminator_start=0,
+        perceptual_weight=0.1,
+        vq_weight=1.0,
+        discriminator_weight=0.25,
+        adversarial_weighting="fixed",
+    )
+    assert torch.allclose(
+        fixed_metrics["adversarial_scale"], x.new_tensor(0.25)
     )
     prior = CausalTransformerPrior(
         32, 64, model_dim=32, heads=4, layers=2
@@ -169,7 +232,7 @@ def smoke_test() -> None:
         f"smoke test passed: AE={metrics['autoencoder'].item():.3f}, "
         f"D={d_metrics['discriminator'].item():.3f}, "
         f"prior={prior_loss.item():.3f}, "
-        f"adaptive={metrics['adaptive_weight'].item():.3f}"
+        f"adversarial scale={metrics['adversarial_scale'].item():.3f}"
     )
 
 
@@ -279,15 +342,6 @@ def evaluate_prior(
     }
 
 
-def build_perceptual(name: str, device: torch.device) -> nn.Module:
-    if name == "vgg":
-        return VGGPerceptualLoss().to(device)
-    if name == "random":
-        print("warning: random features are a gradient-path debug mode, not a perceptual metric")
-        return RandomFeaturePerceptualLoss().to(device)
-    raise ValueError(f"unknown perceptual network: {name}")
-
-
 def train_tokenizer(
     args: argparse.Namespace,
     train_loader: DataLoader,
@@ -303,7 +357,7 @@ def train_tokenizer(
     }
     model = VQPerceptualAutoencoder32(**config).to(device)
     discriminator = PatchDiscriminator32(args.discriminator_channels).to(device)
-    perceptual = build_perceptual(args.perceptual, device)
+    perceptual = build_perceptual_loss(args.perceptual, device)
     ae_optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, betas=(0.5, 0.9)
     )
@@ -332,6 +386,7 @@ def train_tokenizer(
                 perceptual_weight=args.perceptual_weight,
                 vq_weight=args.vq_weight,
                 discriminator_weight=args.discriminator_weight,
+                adversarial_weighting=args.adversarial_weighting,
             )
             d_metrics = vqgan_discriminator_step(
                 discriminator,
@@ -347,7 +402,7 @@ def train_tokenizer(
                 metrics["frozen_feature"],
                 metrics["vq"],
                 metrics["generator_adversarial"],
-                metrics["adaptive_weight"],
+                metrics["adversarial_scale"],
                 d_metrics["discriminator"],
                 d_metrics["real_logit"],
                 d_metrics["fake_logit"],
@@ -384,6 +439,12 @@ def train_tokenizer(
         {
             "format_version": 2,
             "model_name": "vqgan_tokenizer",
+            "roadmap_role": "historical_anchor",
+            "roadmap_step": 9,
+            "direct_baselines": ["VQ-VAE", "VAE-GAN", "hinge GAN"],
+            "visible_increment": (
+                "perceptual and patch-adversarial VQ tokenizer"
+            ),
             "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "discriminator_state_dict": discriminator.state_dict(),
@@ -400,6 +461,7 @@ def train_tokenizer(
                 else "random frozen feature debug distance"
             ),
             "discriminator_start": args.discriminator_start,
+            "adversarial_weighting": args.adversarial_weighting,
             "global_step": global_step,
             "loss_weights": {
                 "perceptual": args.perceptual_weight,
@@ -410,6 +472,23 @@ def train_tokenizer(
             "image_size": 32,
             "value_range": [-1.0, 1.0],
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={
+                    "tokenizer": model,
+                    "discriminator": discriminator,
+                },
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.tokenizer_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates_per_network": global_step,
+                },
+                data_preprocessing={
+                    "spatial": "native 32x32",
+                    "value_range": [-1.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "tokenizer.pth",
     )
@@ -494,6 +573,10 @@ def train_prior(
         {
             "format_version": 2,
             "model_name": "vqgan_transformer_prior",
+            "roadmap_role": "historical_anchor_stage_two",
+            "roadmap_step": 9,
+            "direct_baseline": "frozen VQGAN tokenizer",
+            "visible_increment": "causal Transformer prior over frozen tokens",
             "state_dict": prior.state_dict(),
             "model_config": {
                 "vocabulary_size": vocabulary_size,
@@ -507,6 +590,22 @@ def train_prior(
             "tokenizer_interface_id": tokenizer_interface_id,
             "dataset": "CIFAR-10",
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"vqgan_transformer_prior": prior},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.prior_epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.prior_epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "tokenizer": "frozen VQGAN",
+                    "token_grid": [8, 8],
+                    "index_order": "row-major",
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "transformer_prior.pth",
     )
@@ -561,6 +660,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--perceptual-weight", type=float, default=1.0)
     parser.add_argument("--vq-weight", type=float, default=1.0)
     parser.add_argument("--discriminator-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--adversarial-weighting",
+        choices=("fixed", "adaptive"),
+        default="fixed",
+        help=(
+            "establish a fixed-weight baseline before enabling the "
+            "decoder-gradient-ratio strategy"
+        ),
+    )
     parser.add_argument("--discriminator-start", type=int, default=1000)
     parser.add_argument("--prior-dim", type=int, default=256)
     parser.add_argument("--prior-heads", type=int, default=8)

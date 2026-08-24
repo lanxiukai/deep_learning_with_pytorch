@@ -137,11 +137,16 @@ def main() -> None:
         warmup_epochs=args.warmup_epochs,
         free_bits=args.free_bits,
         active_variance_threshold=args.active_variance_threshold,
+        seed=args.seed,
         out_dir=(
             PROJECT_ROOT / "output" / "ladder_vae" / args.run_name
         ),
         checkpoint_metadata={
             "model_name": "ladder_vae",
+            "roadmap_role": "historical_anchor",
+            "roadmap_step": 5,
+            "direct_baseline": "two-level hierarchical VAE",
+            "visible_increment": "prior-evidence Gaussian precision fusion",
             "seed": args.seed,
             "dataset": "FactorShapes32",
             "factor_names": FACTOR_NAMES,

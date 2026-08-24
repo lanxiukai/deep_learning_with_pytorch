@@ -22,6 +22,7 @@ from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import reproducibility_metadata
 from dl_utils.vae.inference import (
     AffineIAFLayer,
     FlowGaussianVAE32,
@@ -144,6 +145,10 @@ def train(args: argparse.Namespace) -> None:
         {
             "format_version": 1,
             "model_name": "iaf_vae",
+            "roadmap_role": "focused_branch",
+            "roadmap_step": "2X",
+            "direct_baseline": "diagonal-posterior standard VAE",
+            "visible_increment": "short inverse autoregressive flow posterior",
             "posterior_family": model.posterior_family,
             "state_dict": model.state_dict(),
             "model_config": model_config(model),
@@ -152,6 +157,21 @@ def train(args: argparse.Namespace) -> None:
             "observation": "independent Bernoulli mean",
             "image_size": 32,
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"iaf_vae": model},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.epochs * len(train_loader),
+                    "particles_per_example": 1,
+                },
+                data_preprocessing={
+                    "resize": [32, 32],
+                    "value_range": [0.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "model.pth",
     )

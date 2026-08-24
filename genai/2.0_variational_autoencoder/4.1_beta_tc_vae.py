@@ -30,6 +30,7 @@ from dl_utils.data.factor_shapes import (
 )
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import reproducibility_metadata
 from dl_utils.vae.inference import GaussianVAE32, model_config
 from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
@@ -320,6 +321,10 @@ def train_one(
         {
             "format_version": 2,
             "model_name": "beta_tc_vae",
+            "roadmap_role": "focused_branch",
+            "roadmap_step": "3X",
+            "direct_baseline": "beta-VAE at matched per-sample KL rate",
+            "visible_increment": "explicit aggregate-posterior TC weighting",
             "state_dict": model.state_dict(),
             "model_config": model_config(model),
             "beta": beta,
@@ -333,6 +338,20 @@ def train_one(
             "loss_reduction": "sum pixels per sample, then mean batch",
             "tc_estimator": "minibatch-weighted sampling, centered for logging",
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"beta_tc_vae": model},
+                seed=seed,
+                training_budget={
+                    "epochs": args.epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.epochs * len(train_loader),
+                },
+                data_preprocessing={
+                    "renderer": "FactorShapes32 deterministic renderer",
+                    "value_range": [0.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "model.pth",
     )

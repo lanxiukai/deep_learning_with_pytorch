@@ -26,6 +26,7 @@ from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import reproducibility_metadata
 from dl_utils.vae.inference import (
     GaussianVAE32,
     importance_diagnostics,
@@ -254,6 +255,10 @@ def train_one(
     checkpoint = {
         "format_version": 1,
         "model_name": "iwae",
+        "roadmap_role": "historical_anchor",
+        "roadmap_step": 2,
+        "direct_baseline": "standard VAE with the same network",
+        "visible_increment": "K-sample importance-weighted bound",
         "posterior_family": model.posterior_family,
         "state_dict": model.state_dict(),
         "model_config": model_config(model),
@@ -269,6 +274,24 @@ def train_one(
             "inference": inference_gradients.summary(),
             "generative": generative_gradients.summary(),
         },
+        **reproducibility_metadata(
+            models={"iwae": model},
+            seed=args.seed,
+            training_budget={
+                "optimizer_updates": updates,
+                "batch_size": args.batch_size,
+                "particles_per_example": particles,
+                "particle_evaluations": updates
+                * particles
+                * args.batch_size,
+                "protocol": budget_name,
+            },
+            data_preprocessing={
+                "resize": [32, 32],
+                "value_range": [0.0, 1.0],
+                "augmentation": "none",
+            },
+        ),
     }
     torch.save(checkpoint, out_dir / "model.pth")
     model.eval()

@@ -490,12 +490,50 @@ Public entries (__all__): LOG_2PI, split_gaussian_parameters,
 reparameterize_logvar, diagonal_gaussian_kl_from_logvar,
 diagonal_gaussian_log_density, fuse_diagonal_gaussians, ConvGaussianVAE28.
 
+### dl_utils/vae/aggregate_matching.py
+
+Dependencies: collections.abc (Sequence), torch.
+Public entries (__all__): imq_mmd2, latent_moment_diagnostics.
+
+### dl_utils/vae/conditional.py
+
+Dependencies: torch, torch.nn, dl_utils.vae.vae_common.
+Public entries (__all__): ConditionalMeanDecoder32, ConditionalVAE32.
+
+### dl_utils/vae/disentanglement.py
+
+Dependencies: torch, torch.nn.functional, torch.nn.
+Public entries (__all__): FactorProbe, discrete_mutual_information,
+discretize_codes, factor_entropy, mig_and_modularity,
+mutual_information_matrix, quantile_bin_edges, train_factor_probe.
+
+### dl_utils/vae/inference.py
+
+Dependencies: math, torch, torch.nn.functional, torch.nn,
+dl_utils.vae.vae_common.
+Public entries (__all__): AffineIAFLayer, FlowGaussianVAE32, GaussianVAE32,
+bernoulli_log_density, importance_diagnostics, importance_log_weights,
+log_mean_exp, model_config, standard_normal_log_density.
+
 ### dl_utils/vae/vae_hierarchy.py
 
 Dependencies: torch, torch.nn.functional, torch.nn,
 dl_utils.vae.vae_common.
-Public entries (__all__): CompactHierarchicalVAE, ActiveUnitAccumulator,
-hierarchical_vae_loss, active_units.
+Public entries (__all__): ActiveUnitAccumulator, HierarchicalVAE32,
+LadderVAE32, hierarchical_vae_loss, model_config.
+
+### dl_utils/vae/hierarchy_training.py
+
+Dependencies: pathlib, torch, torch.utils.data, torchvision.utils,
+dl_utils.data.factor_shapes, dl_utils.vae.vae_hierarchy.
+Public entries (__all__): evaluate_hierarchy, make_factor_shape_loaders,
+train_hierarchy, warmup_weight.
+
+### dl_utils/vae/image_quality.py
+
+Dependencies: torch, torch.nn.functional, torch.nn.
+Public entries (__all__): FeatureMoments, TorchvisionInceptionFeatures,
+frechet_distance, structural_similarity_index.
 
 ### dl_utils/vae/quantization.py
 
@@ -520,7 +558,7 @@ Public entries (__all__): ResidualBlock, PerceptualEncoder32,
 PerceptualDecoder32, VQPerceptualAutoencoder32,
 KLPerceptualAutoencoder32, PatchDiscriminator32,
 RandomFeaturePerceptualLoss, VGGPerceptualLoss,
-discriminator_hinge_loss, adaptive_adversarial_weight.
+adaptive_adversarial_weight, build_perceptual_loss.
 
 ### dl_utils/plot/__init__.py
 
@@ -563,17 +601,19 @@ Public entries: none (docstring-only package marker).
 
 ### dl_utils/training/checkpoints.py
 
-Dependencies: random, tempfile, collections.abc (Mapping), os (PathLike),
-pathlib (Path), typing (Any), numpy, torch, torch (nn), torch.optim
-(Optimizer).
+Dependencies: hashlib, platform, random, tempfile, collections.abc (Mapping),
+importlib.metadata, os (PathLike), pathlib (Path), typing (Any), numpy, torch,
+torch (nn), torch.optim (Optimizer).
 Public entries (__all__): CHECKPOINT_FORMAT_VERSION, TrainingCheckpoint,
 atomic_torch_save, capture_rng_state, load_training_checkpoint,
-make_training_checkpoint, restore_rng_state, save_model_weights,
-save_periodic_checkpoint.
+make_training_checkpoint, model_state_fingerprint, reproducibility_metadata,
+restore_rng_state, save_model_weights, save_periodic_checkpoint.
 The helpers atomically save latest/archive checkpoints, restore named models,
 optimizers and RNG streams, and save metadata-rich final model weights.
 `TrainingCheckpoint` exposes only `resume` and `save` for lessons that need one
 latest full-state checkpoint without a separate scheduling abstraction.
+`reproducibility_metadata` records preprocessing, budget, software versions,
+seed, and SHA-256 model-state identities without hiding algorithm code.
 
 ### dl_utils/training/session.py
 

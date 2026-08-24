@@ -7,16 +7,19 @@ original conceptual objective concrete:
 2. decoder: feature reconstruction + make reconstructions/prior samples real;
 3. discriminator: classify real images against both detached fake sources.
 
-This is a short mechanism experiment, not a VAE-GAN reproduction project.
-It uses a spatial Gaussian latent so the same encoder/decoder blocks can be
-reused in the later KL-AE lesson, saves only final weights, and evaluates
-paired fidelity separately from prior samples.  Adversarial sharpness can
-invent plausible details.
+The ``scaffold`` stage first freezes an independent feature network and checks
+that feature reconstruction reaches the encoder/decoder.  The ``learned``
+stage then replaces that fixed metric with the moving discriminator features
+and executes the three optimizer boundaries above.  The scaffold is not a new
+model.  This remains a compact mechanism experiment rather than a paper-scale
+reproduction; paired fidelity and prior generation stay separate because
+adversarial sharpness can invent plausible details.
 """
 
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -30,9 +33,12 @@ from dl_utils.data.cifar10 import (
 )
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import reproducibility_metadata
 from dl_utils.vae.perceptual_autoencoder import (
     KLPerceptualAutoencoder32,
     PatchDiscriminator32,
+    RandomFeaturePerceptualLoss,
+    build_perceptual_loss,
 )
 from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
@@ -41,10 +47,41 @@ from dl_utils.vae.vae_common import (
 
 
 PROJECT_ROOT = infer_project_root()
+DEFAULT_SCAFFOLD = (
+    PROJECT_ROOT / "output" / "vae_gan" / "fixed_feature_scaffold.pth"
+)
 
 
 def set_trainable(module: torch.nn.Module, value: bool) -> None:
     module.requires_grad_(value)
+
+
+def fixed_feature_step(
+    model: KLPerceptualAutoencoder32,
+    feature_network: torch.nn.Module,
+    x: Tensor,
+    optimizer: torch.optim.Optimizer,
+    *,
+    kl_weight: float,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    """Validate the feature-reconstruction path before learning the metric."""
+    set_trainable(model, True)
+    set_trainable(feature_network, False)
+    reconstruction, mu, logvar, _ = model(x)
+    feature_loss = feature_network(reconstruction, x)
+    kl = diagonal_gaussian_kl_from_logvar(
+        mu, logvar
+    ).flatten(1).sum(dim=1).mean()
+    loss = feature_loss + float(kl_weight) * kl
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+    return reconstruction.detach(), {
+        "loss": loss.detach(),
+        "feature": feature_loss.detach(),
+        "kl": kl.detach(),
+        "pixel_l1": F.l1_loss(reconstruction, x).detach(),
+    }
 
 
 def encoder_step(
@@ -105,7 +142,9 @@ def decoder_step(
         F.binary_cross_entropy_with_logits(
             reconstruction_logits, torch.ones_like(reconstruction_logits)
         )
-        + F.binary_cross_entropy_with_logits(prior_logits, torch.ones_like(prior_logits))
+        + F.binary_cross_entropy_with_logits(
+            prior_logits, torch.ones_like(prior_logits)
+        )
     )
     loss = feature_loss + float(adversarial_weight) * adversarial
     optimizer.zero_grad(set_to_none=True)
@@ -188,24 +227,95 @@ def smoke_test() -> None:
     torch.manual_seed(7)
     model = KLPerceptualAutoencoder32(latent_channels=4, hidden_channels=32)
     discriminator = PatchDiscriminator32(base_channels=16)
+    fixed_features = RandomFeaturePerceptualLoss(channels=8)
+    x = torch.randn(2, 3, 32, 32).clamp(-1, 1)
+    fixed_before = [
+        parameter.detach().clone() for parameter in fixed_features.parameters()
+    ]
+    scaffold_optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    _, scaffold_metrics = fixed_feature_step(
+        model, fixed_features, x, scaffold_optimizer, kl_weight=1e-4
+    )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(
+            fixed_before, fixed_features.parameters()
+        )
+    )
+
     encoder_optimizer = torch.optim.Adam(model.encoder.parameters(), lr=1e-4)
     decoder_optimizer = torch.optim.Adam(model.decoder.parameters(), lr=1e-4)
-    discriminator_optimizer = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
-    x = torch.randn(2, 3, 32, 32).clamp(-1, 1)
-    reconstruction, prior, metrics = vae_gan_iteration(
+    discriminator_optimizer = torch.optim.Adam(
+        discriminator.parameters(), lr=1e-4
+    )
+    decoder_before = [
+        parameter.detach().clone() for parameter in model.decoder.parameters()
+    ]
+    discriminator_before = [
+        parameter.detach().clone() for parameter in discriminator.parameters()
+    ]
+    encoder_metrics = encoder_step(
+        model, discriminator, x, encoder_optimizer, kl_weight=1e-4
+    )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(decoder_before, model.decoder.parameters())
+    )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(
+            discriminator_before, discriminator.parameters()
+        )
+    )
+
+    encoder_before = [
+        parameter.detach().clone() for parameter in model.encoder.parameters()
+    ]
+    discriminator_before = [
+        parameter.detach().clone() for parameter in discriminator.parameters()
+    ]
+    reconstruction, prior, decoder_metrics = decoder_step(
         model,
         discriminator,
         x,
-        encoder_optimizer,
         decoder_optimizer,
-        discriminator_optimizer,
-        kl_weight=1e-4,
         adversarial_weight=1.0,
+    )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(encoder_before, model.encoder.parameters())
+    )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(
+            discriminator_before, discriminator.parameters()
+        )
+    )
+
+    model_before = [
+        parameter.detach().clone() for parameter in model.parameters()
+    ]
+    d_loss = discriminator_step(
+        discriminator,
+        x,
+        reconstruction,
+        prior,
+        discriminator_optimizer,
+    )
+    assert all(
+        torch.equal(before, parameter)
+        for before, parameter in zip(model_before, model.parameters())
     )
     assert reconstruction.shape == prior.shape == x.shape
     assert model.encoder.net[0].weight.grad is not None
     assert model.decoder.last_layer.grad is not None
     assert discriminator.head[-1].weight.grad is not None
+    metrics = {
+        "scaffold": scaffold_metrics["loss"],
+        "encoder": encoder_metrics["encoder"],
+        "decoder": decoder_metrics["decoder"],
+        "discriminator": d_loss,
+    }
     print(
         "smoke test passed: "
         + ", ".join(f"{name}={value.item():.3f}" for name, value in metrics.items())
@@ -289,7 +399,112 @@ def evaluate(
     }, comparison
 
 
+@torch.inference_mode()
+def evaluate_fixed_features(
+    model: KLPerceptualAutoencoder32,
+    feature_network: torch.nn.Module,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+) -> dict[str, float]:
+    model.eval()
+    feature_network.eval()
+    totals = torch.zeros(3, device=device)
+    examples = 0
+    for x, _ in loader:
+        x = x.to(device, non_blocking=True)
+        mu, logvar = model.encode(x)
+        reconstruction = model.decoder(mu)
+        totals += torch.stack(
+            (
+                F.l1_loss(reconstruction, x),
+                feature_network(reconstruction, x),
+                diagonal_gaussian_kl_from_logvar(
+                    mu, logvar
+                ).flatten(1).sum(dim=1).mean(),
+            )
+        ) * x.shape[0]
+        examples += x.shape[0]
+    values = (totals / examples).tolist()
+    return {
+        "pixel_l1": values[0],
+        "fixed_feature_distance": values[1],
+        "kl": values[2],
+    }
+
+
+def save_scaffold(
+    model: KLPerceptualAutoencoder32,
+    args: argparse.Namespace,
+    validation: dict[str, float],
+    path: Path,
+) -> None:
+    torch.save(
+        {
+            "format_version": 1,
+            "model_name": "vae_fixed_feature_scaffold",
+            "roadmap_role": "internal_scaffold",
+            "direct_baseline": "standard VAE",
+            "visible_increment": "frozen feature reconstruction",
+            "state_dict": model.state_dict(),
+            "model_config": {
+                "latent_channels": args.latent_channels,
+                "hidden_channels": args.hidden_channels,
+            },
+            "feature_network": args.fixed_feature_network,
+            "feature_metric_name": (
+                "frozen torchvision VGG16 feature L1"
+                if args.fixed_feature_network == "vgg"
+                else "random frozen feature debug distance"
+            ),
+            "dataset": "CIFAR-10",
+            "image_size": 32,
+            "value_range": [-1.0, 1.0],
+            "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"vae_fixed_feature_scaffold": model},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.scaffold_epochs,
+                    "batch_size": args.batch_size,
+                },
+                data_preprocessing={
+                    "spatial": "native 32x32",
+                    "value_range": [-1.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
+        },
+        path,
+    )
+
+
+def load_scaffold(
+    model: KLPerceptualAutoencoder32,
+    path: Path,
+    *,
+    device: torch.device,
+) -> dict[str, object]:
+    if not path.is_file():
+        raise FileNotFoundError(
+            "run --stage scaffold before --stage learned, or use --stage all"
+        )
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if checkpoint.get("model_name") != "vae_fixed_feature_scaffold":
+        raise ValueError("scaffold checkpoint has the wrong model type")
+    expected_config = {
+        "latent_channels": model.latent_channels,
+        "hidden_channels": model.decoder.net[0].out_channels,
+    }
+    if checkpoint.get("model_config") != expected_config:
+        raise ValueError("scaffold and requested VAE-GAN configurations differ")
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
+    return checkpoint
+
+
 def train(args: argparse.Namespace) -> None:
+    if args.stage in {"scaffold", "all"} and args.scaffold_epochs < 1:
+        raise ValueError("scaffold_epochs must be positive")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vae_gan"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -297,6 +512,59 @@ def train(args: argparse.Namespace) -> None:
     model = KLPerceptualAutoencoder32(
         latent_channels=args.latent_channels, hidden_channels=args.hidden_channels
     ).to(device)
+    scaffold_feature = args.fixed_feature_network
+    if args.stage in {"scaffold", "all"}:
+        feature_network = build_perceptual_loss(
+            args.fixed_feature_network, device
+        )
+        scaffold_optimizer = torch.optim.Adam(
+            model.parameters(), lr=args.lr, betas=(0.5, 0.9)
+        )
+        for epoch in range(1, args.scaffold_epochs + 1):
+            model.train()
+            sums = torch.zeros(4, device=device)
+            examples = 0
+            for x, _ in train_loader:
+                x = x.to(device, non_blocking=True)
+                _, metrics = fixed_feature_step(
+                    model,
+                    feature_network,
+                    x,
+                    scaffold_optimizer,
+                    kl_weight=args.kl_weight,
+                )
+                sums += torch.stack(tuple(metrics.values())) * x.shape[0]
+                examples += x.shape[0]
+            values = (sums / examples).tolist()
+            print(
+                f"scaffold {epoch:03d}: loss={values[0]:.4f}, "
+                f"feature={values[1]:.4f}, KL={values[2]:.3f}, "
+                f"pixel_L1={values[3]:.4f}"
+            )
+        scaffold_validation = evaluate_fixed_features(
+            model, feature_network, validation_loader, device=device
+        )
+        args.scaffold_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        save_scaffold(
+            model,
+            args,
+            scaffold_validation,
+            args.scaffold_checkpoint,
+        )
+        print(
+            "fixed-feature scaffold saved; this artifact is not yet VAE-GAN"
+        )
+        if args.stage == "scaffold":
+            return
+    else:
+        scaffold_checkpoint = load_scaffold(
+            model, args.scaffold_checkpoint, device=device
+        )
+        scaffold_feature = str(scaffold_checkpoint["feature_network"])
+        scaffold_validation = dict(
+            scaffold_checkpoint["validation_metrics"]
+        )
+
     discriminator = PatchDiscriminator32(args.discriminator_channels).to(device)
     encoder_optimizer = torch.optim.Adam(
         model.encoder.parameters(), lr=args.lr, betas=(0.5, 0.9)
@@ -346,6 +614,10 @@ def train(args: argparse.Namespace) -> None:
         {
             "format_version": 2,
             "model_name": "vae_gan",
+            "roadmap_role": "historical_anchor",
+            "roadmap_step": 8,
+            "direct_baselines": ["standard VAE", "non-saturating GAN"],
+            "visible_increment": "learned discriminator-feature similarity",
             "state_dict": model.state_dict(),
             "discriminator_state_dict": discriminator.state_dict(),
             "model_config": {
@@ -354,10 +626,40 @@ def train(args: argparse.Namespace) -> None:
             },
             "kl_weight": args.kl_weight,
             "adversarial_weight": args.adversarial_weight,
+            "internal_stages": [
+                {
+                    "name": "fixed_feature_scaffold",
+                    "feature_network": scaffold_feature,
+                    "checkpoint": args.scaffold_checkpoint.name,
+                },
+                {"name": "dynamic_discriminator_feature"},
+            ],
             "dataset": "CIFAR-10",
             "image_size": 32,
             "value_range": [-1.0, 1.0],
             "validation_metrics": validation,
+            "controlled_baseline_metrics": {
+                "fixed_feature_scaffold": scaffold_validation,
+            },
+            **reproducibility_metadata(
+                models={
+                    "autoencoder": model,
+                    "discriminator": discriminator,
+                },
+                seed=args.seed,
+                training_budget={
+                    "scaffold_epochs": args.scaffold_epochs,
+                    "learned_feature_epochs": args.epochs,
+                    "batch_size": args.batch_size,
+                    "learned_feature_updates": args.epochs
+                    * len(train_loader),
+                },
+                data_preprocessing={
+                    "spatial": "native 32x32",
+                    "value_range": [-1.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "vae_gan.pth",
     )
@@ -374,6 +676,18 @@ def train(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument(
+        "--stage", choices=("scaffold", "learned", "all"), default="all"
+    )
+    parser.add_argument("--scaffold-epochs", type=int, default=2)
+    parser.add_argument(
+        "--scaffold-checkpoint", type=Path, default=DEFAULT_SCAFFOLD
+    )
+    parser.add_argument(
+        "--fixed-feature-network",
+        choices=("vgg", "random"),
+        default="vgg",
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--latent-channels", type=int, default=4)

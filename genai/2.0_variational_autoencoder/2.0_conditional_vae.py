@@ -1,18 +1,18 @@
 """Conditional VAE: make the training and generation information paths explicit.
 
-The learned-prior model factorizes
+The main standard-prior model factorizes
 
-    p(x, z | c) = p(z | c) p(x | z, c)
+    p(x, z | c) = p(z) p(x | z, c)
 
 and trains the recognition posterior q(z | x, c) with
 
-    distortion + KL[q(z | x, c) || p(z | c)].
+    distortion + KL[q(z | x, c) || p(z)].
 
 The target image enters q during training, but generation calls only
-`model.generate(labels)`, which samples from p(z | c).  The same compact
-32x32 architecture can instead use a fixed N(0, I) prior.  A deterministic
-condition-to-image baseline is available as a separate model, not as a
-mislabelled zero-KL VAE.
+`model.generate(labels)`, which cannot observe the target image.  A learned
+conditional prior p(z | c) is a separate ablation after the posterior and
+decoder condition interfaces work.  A deterministic condition-to-image
+baseline is also separate, not a mislabelled zero-KL VAE.
 
 Examples:
     python genai/2.0_variational_autoencoder/2.0_conditional_vae.py
@@ -37,6 +37,7 @@ from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import reproducibility_metadata
 from dl_utils.vae.conditional import (
     ConditionalMeanDecoder32,
     ConditionalVAE32,
@@ -45,7 +46,7 @@ from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
 
 
 PROJECT_ROOT = infer_project_root()
-VARIANTS = ("learned-prior", "standard-prior", "deterministic")
+VARIANTS = ("standard-prior", "learned-prior", "deterministic")
 
 
 def conditional_vae_loss(
@@ -226,8 +227,18 @@ def train_cvae(
         )
 
     checkpoint = {
-        "format_version": 1,
+        "format_version": 2,
         "model_name": "conditional_vae",
+        "roadmap_role": "historical_anchor",
+        "roadmap_step": 1,
+        "direct_baseline": "standard VAE",
+        "visible_increment": (
+            "conditional-prior ablation after conditioning the posterior "
+            "and decoder"
+            if learned_prior
+            else "condition the posterior and decoder"
+        ),
+        "conditional_prior_ablation": learned_prior,
         "variant": variant,
         "state_dict": model.state_dict(),
         "model_config": {
@@ -242,6 +253,20 @@ def train_cvae(
         "observation": "independent Bernoulli mean",
         "loss_reduction": "sum pixels per sample, then mean batch",
         "validation_metrics": validation_metrics,
+        **reproducibility_metadata(
+            models={"conditional_vae": model},
+            seed=args.seed,
+            training_budget={
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "optimizer_updates": args.epochs * len(train_loader),
+            },
+            data_preprocessing={
+                "resize": [32, 32],
+                "value_range": [0.0, 1.0],
+                "augmentation": "none",
+            },
+        ),
     }
     torch.save(checkpoint, out_dir / "model.pth")
     _save_conditional_samples(
@@ -291,8 +316,10 @@ def train_deterministic(
 
     torch.save(
         {
-            "format_version": 1,
+            "format_version": 2,
             "model_name": "conditional_mean_decoder",
+            "roadmap_role": "controlled_baseline",
+            "direct_baseline": "deterministic conditional decoder",
             "variant": "deterministic",
             "state_dict": model.state_dict(),
             "model_config": {
@@ -304,6 +331,20 @@ def train_deterministic(
             "image_size": 32,
             "observation": "independent Bernoulli mean",
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={"conditional_mean_decoder": model},
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates": args.epochs * len(train_loader),
+                },
+                data_preprocessing={
+                    "resize": [32, 32],
+                    "value_range": [0.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
         },
         out_dir / "model.pth",
     )
@@ -366,7 +407,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--variant",
         choices=(*VARIANTS, "all"),
-        default="learned-prior",
+        default="standard-prior",
     )
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--epochs", type=int, default=15)
@@ -385,10 +426,11 @@ def main() -> None:
     if args.smoke_test:
         smoke_test()
         return
-    set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, validation_loader = make_loaders(args, device)
     for variant in selected_variants(args.variant):
+        # Keep common initializations independent of loop order.
+        set_seed(args.seed)
         if variant == "deterministic":
             train_deterministic(
                 args,

@@ -1,8 +1,9 @@
-"""Train a KL-regularized perceptual autoencoder for continuous latents.
+"""Train Latent Diffusion's KL-regularized continuous first stage.
 
-This is the continuous sibling of ``7.1_vqgan.py``. It keeps the paired
-pixel, frozen-feature, and delayed PatchGAN reconstruction path, but replaces
-the codebook with a spatial diagonal Gaussian posterior and a weak KL cost.
+After pixel-space DDPM, this lesson revisits the continuous sibling of the
+VQGAN tokenizer. It keeps the paired pixel, frozen-feature, and delayed
+PatchGAN reconstruction path, but replaces the codebook with a spatial
+diagonal Gaussian posterior and a weak KL cost.
 
 The final artifact exposes four distinct operations: posterior parameters,
 scaled posterior-mean encoding, scaled posterior-sample encoding, and inverse-
@@ -27,16 +28,22 @@ from dl_utils.data.cifar10 import (
     normalized_cifar10_transform,
 )
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.gan.sn_gan import (
+    discriminator_hinge_loss,
+    generator_hinge_loss,
+)
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import model_state_fingerprint
+from dl_utils.training.checkpoints import (
+    model_state_fingerprint,
+    reproducibility_metadata,
+)
 from dl_utils.vae.image_quality import structural_similarity_index
 from dl_utils.vae.perceptual_autoencoder import (
     KLPerceptualAutoencoder32,
     PatchDiscriminator32,
     RandomFeaturePerceptualLoss,
-    VGGPerceptualLoss,
     adaptive_adversarial_weight,
-    discriminator_hinge_loss,
+    build_perceptual_loss,
 )
 from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
@@ -77,7 +84,7 @@ def kl_autoencoder_step(
 
     discriminator.requires_grad_(False)
     try:
-        adversarial = -discriminator(reconstruction).mean()
+        adversarial = generator_hinge_loss(discriminator(reconstruction))
         if step >= discriminator_start:
             adaptive = adaptive_adversarial_weight(
                 nll,
@@ -119,7 +126,7 @@ def discriminator_step(
         return {"discriminator": zero, "real_logit": zero, "fake_logit": zero}
     real_logits = discriminator(x)
     fake_logits = discriminator(reconstruction.detach())
-    loss = discriminator_hinge_loss(real_logits, fake_logits)
+    loss = 0.5 * discriminator_hinge_loss(real_logits, fake_logits)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
@@ -371,18 +378,6 @@ def make_loaders(
     return train_loader, statistics_loader, validation_loader
 
 
-def build_perceptual(name: str, device: torch.device) -> nn.Module:
-    if name == "vgg":
-        return VGGPerceptualLoss().to(device)
-    if name == "random":
-        print(
-            "warning: random features are a gradient-path debug mode, "
-            "not a perceptual metric"
-        )
-        return RandomFeaturePerceptualLoss().to(device)
-    raise ValueError(f"unknown perceptual network: {name}")
-
-
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "kl_autoencoder"
@@ -394,7 +389,7 @@ def train(args: argparse.Namespace) -> None:
     }
     model = KLPerceptualAutoencoder32(**config).to(device)
     discriminator = PatchDiscriminator32(args.discriminator_channels).to(device)
-    perceptual = build_perceptual(args.perceptual, device)
+    perceptual = build_perceptual_loss(args.perceptual, device)
     reconstruction_logvar = nn.Parameter(
         torch.tensor(float(args.reconstruction_logvar), device=device),
         requires_grad=not args.fixed_reconstruction_logvar,
@@ -485,6 +480,11 @@ def train(args: argparse.Namespace) -> None:
         {
             "format_version": 2,
             "model_name": "kl_perceptual_autoencoder",
+            "roadmap_role": "latent_diffusion_first_stage",
+            "direct_baseline": "perceptual autoencoder with Gaussian latent",
+            "visible_increment": (
+                "frozen scaled continuous-latent interface for LDM"
+            ),
             "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "discriminator_state_dict": discriminator.state_dict(),
@@ -519,6 +519,24 @@ def train(args: argparse.Namespace) -> None:
             "image_size": 32,
             "value_range": [-1.0, 1.0],
             "validation_metrics": validation,
+            **reproducibility_metadata(
+                models={
+                    "autoencoder": model,
+                    "discriminator": discriminator,
+                },
+                seed=args.seed,
+                training_budget={
+                    "epochs": args.epochs,
+                    "batch_size": args.batch_size,
+                    "optimizer_updates_per_network": global_step,
+                    "latent_scale_batches": args.scale_batches,
+                },
+                data_preprocessing={
+                    "spatial": "native 32x32",
+                    "value_range": [-1.0, 1.0],
+                    "augmentation": "none",
+                },
+            ),
             "generation_model": None,
         },
         out_dir / "kl_autoencoder.pth",

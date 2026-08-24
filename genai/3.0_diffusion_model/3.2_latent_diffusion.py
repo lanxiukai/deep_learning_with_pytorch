@@ -1,8 +1,8 @@
-r"""Move the DDPM state space from pixels into a frozen KL-AE latent grid.
+r"""Move the DDPM state space into the frozen 3.0 KL-AE latent grid.
 
 Latent Diffusion is a two-stage model, not a new reverse equation:
 
-1. train and validate ``8.0_kl_autoencoder.py``;
+1. train and validate ``3.0_kl_autoencoder.py``;
 2. freeze its encoder and decoder;
 3. encode ``z_0 = latent_scale * E(x)`` and train the same VP denoising loss;
 4. sample ``z_0`` with DDPM or DDIM, undo the scale, and decode once.
@@ -133,7 +133,7 @@ def load_autoencoder(
     if not isinstance(latent_interface, dict):
         raise ValueError(
             "first-stage checkpoint predates the frozen latent interface; "
-            "retrain 8.0_kl_autoencoder.py"
+            "retrain 3.0_kl_autoencoder.py"
         )
     latent_scale = float(latent_interface["latent_scale"])
     if not math.isfinite(latent_scale) or latent_scale <= 0.0:
