@@ -93,6 +93,15 @@ Python, `pyproject.toml` declares the direct dependencies and the explicit
 PyTorch cu130 index, and `uv.lock` records the exact resolution. uv installs
 this repository's `dl-utils` package in editable mode.
 
+Ruff and Pyright are installed through the default development dependency
+group. Run them from the locked project environment:
+
+```bash
+uv run --locked --no-sync ruff check .
+uv run --locked --no-sync ruff format --check .
+uv run --locked --no-sync pyright
+```
+
 The previous `d2l` Conda environment, declaration, and exact runtime snapshot
 were retired on 2026-08-15. `.python-version`, `pyproject.toml`, and `uv.lock`
 are now the sole environment recovery sources. `pyproject.toml` also defines

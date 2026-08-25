@@ -53,3 +53,9 @@ include = ["dl_utils*"]
 
 [tool.setuptools.package-data]
 "dl_utils.data" = ["*.json"]
+
+[dependency-groups]
+dev = [
+    "pyright==1.1.411",
+    "ruff==0.16.4",
+]
