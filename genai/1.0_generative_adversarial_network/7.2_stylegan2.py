@@ -170,8 +170,8 @@ def train_epoch(
             fake = generator(z, mixing_z=mixing_z)
         real_scores = discriminator(real)
         fake_scores = discriminator(fake)
-        loss_d_main = F.softplus(-real_scores).mean()
-        loss_d_main = loss_d_main + F.softplus(fake_scores).mean()
+        loss_d_main = (F.softplus(-real_scores).mean()
+                       + F.softplus(fake_scores).mean())
         optimizer_d.zero_grad(set_to_none=True)
         loss_d_main.backward()
         optimizer_d.step()
@@ -218,6 +218,8 @@ def train_epoch(
                     generator.z_dim,
                     device=device,
                 )
+                # path_images: (Bpath, 3, 128, 128)
+                # path_ws:     (Bpath, 12, style_dim)
                 path_images, path_ws = generator(path_z, return_ws=True)
                 penalty_path, path_mean = path_length_penalty(
                     path_images,
