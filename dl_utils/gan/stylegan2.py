@@ -76,7 +76,11 @@ class ModulatedConv2d(nn.Module):
                 f"expected {self.in_channels} input channels, got {channels}"
             )
         style_scale = self.modulation(style).view(
-            batch, 1, self.in_channels, 1, 1,
+            batch,
+            1,
+            self.in_channels,
+            1,
+            1,
         )  # (B, Cin) -> (B, 1, Cin, 1, 1)
         weight = self.weight * self.weight_scale * style_scale  # (B, Cout, Cin, K, K)
         if self.demodulate:
@@ -84,7 +88,11 @@ class ModulatedConv2d(nn.Module):
                 weight.square().sum(dim=(2, 3, 4)) + 1e-8
             )  # (B, Cout)
             weight = weight * demodulation.view(
-                batch, self.out_channels, 1, 1, 1,
+                batch,
+                self.out_channels,
+                1,
+                1,
+                1,
             )  # (B, Cout, Cin, K, K)
         weight = weight.view(
             batch * self.out_channels,
@@ -149,9 +157,10 @@ class StyledConv(nn.Module):
     def forward(self, inputs, style, noise_mode="random"):
         # inputs: (B, Cin, H, W), style: (B, style_dim)
         hidden = self.convolution(inputs, style)  # (B, Cout, H', W')
-        hidden = self.noise(hidden, noise_mode)   # (B, Cout, H', W')
+        hidden = self.noise(hidden, noise_mode)  # (B, Cout, H', W')
         # (B, Cout, H', W')
-        return F.leaky_relu(hidden + self.bias, 0.2) * math.sqrt(2)
+        bias = self.bias.to(dtype=hidden.dtype)
+        return F.leaky_relu(hidden + bias, 0.2) * math.sqrt(2)
 
 
 class ToRGB(nn.Module):
@@ -170,7 +179,8 @@ class ToRGB(nn.Module):
 
     def forward(self, inputs, style):
         # inputs: (B, Cin, H, W), style: (B, style_dim)
-        return self.convolution(inputs, style) + self.bias  # (B, 3, H, W)
+        outputs = self.convolution(inputs, style)
+        return outputs + self.bias.to(dtype=outputs.dtype)  # (B, 3, H, W)
 
 
 class SynthesisBlock(nn.Module):
@@ -197,7 +207,7 @@ class SynthesisBlock(nn.Module):
             fixed_noise_seed,
             upsample=not self.first,
         )  # (B, Cin, 4, 4) → (B, Cout, 4, 4) if self.first
-           # else (B, Cin, R/2, R/2) → (B, Cout, R, R)
+        # else (B, Cin, R/2, R/2) → (B, Cout, R, R)
         self.conv2 = (
             None
             if self.first
@@ -268,9 +278,7 @@ class StyleGenerator(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 SynthesisBlock(
-                    channels[resolution // 2]
-                    if resolution > 4
-                    else channels[4],
+                    channels[resolution // 2] if resolution > 4 else channels[4],
                     channels[resolution],
                     self.style_dim,
                     resolution,
@@ -284,9 +292,7 @@ class StyleGenerator(nn.Module):
     def num_ws_for_resolution(self, resolution):
         """Return the cumulative W slots through one synthesis resolution."""
         resolution = validate_resolution(resolution, self.resolutions)
-        return (
-            self.resolutions.index(resolution) + 1
-        ) * self.ws_increment_per_block
+        return (self.resolutions.index(resolution) + 1) * self.ws_increment_per_block
 
     def make_ws(
         self,
@@ -301,9 +307,12 @@ class StyleGenerator(nn.Module):
         first_w = self.mapping(z)  # (B, style_dim)
         if update_w_avg:
             with torch.no_grad():
-                batch_average = first_w.detach().mean(dim=0)  # (style_dim,)
+                batch_average = first_w.detach().float().mean(dim=0)
                 # w_avg <- w_avg + (1 - w_avg_beta) * (batch_average - w_avg)
-                self.w_avg.lerp_(batch_average, 1.0 - self.w_avg_beta)
+                self.w_avg.lerp_(
+                    batch_average.to(self.w_avg),
+                    1.0 - self.w_avg_beta,
+                )
         ws = first_w[:, None, :].repeat(1, self.num_ws, 1)  # (B, num_ws, style_dim)
 
         if mixing_z is not None:
@@ -311,11 +320,8 @@ class StyleGenerator(nn.Module):
             if mixing_cutoff is None:
                 mixing_cutoff = random.randint(1, self.num_ws - 1)  # [1, num_ws)
             if not 0 < mixing_cutoff < self.num_ws:
-                raise ValueError(
-                    "mixing_cutoff must be inside the style stack"
-                )
-            mixing_ws = mixing_w[:, None, :].repeat(
-                1, self.num_ws - mixing_cutoff, 1)
+                raise ValueError("mixing_cutoff must be inside the style stack")
+            mixing_ws = mixing_w[:, None, :].repeat(1, self.num_ws - mixing_cutoff, 1)
             ws = torch.cat([ws[:, :mixing_cutoff], mixing_ws], dim=1)
 
         truncation_psi = float(truncation_psi)
@@ -396,9 +402,9 @@ class DiscriminatorResidualBlock(nn.Module):
     def forward(self, inputs):
         # inputs: (B, Cin, H, W)
         residual = filtered_downsample2d(self.skip(inputs))  # (B, Cout, H/2, W/2)
-        hidden = F.leaky_relu(self.conv1(inputs), 0.2)       # (B, Cin, H, W)
-        hidden = F.leaky_relu(self.conv2(hidden), 0.2)       # (B, Cout, H, W)
-        hidden = filtered_downsample2d(hidden)               # (B, Cout, H/2, W/2)
+        hidden = F.leaky_relu(self.conv1(inputs), 0.2)  # (B, Cin, H, W)
+        hidden = F.leaky_relu(self.conv2(hidden), 0.2)  # (B, Cout, H, W)
+        hidden = filtered_downsample2d(hidden)  # (B, Cout, H/2, W/2)
         return (hidden + residual) * self.scale  # (B, Cout, H/2, W/2)
 
 
@@ -442,7 +448,7 @@ class StyleDiscriminator(nn.Module):
     def forward(self, images):
         # images: (B, 3, 128, 128)
         hidden = F.leaky_relu(self.from_rgb(images), 0.2)  # (B, C[128], 128, 128)
-        hidden = self.blocks(hidden)                       # (B, C[4], 4, 4)
+        hidden = self.blocks(hidden)  # (B, C[4], 4, 4)
         hidden = self.minibatch_std(hidden)
         hidden = F.leaky_relu(self.final_conv(hidden), 0.2)  # (B, C[4], 4, 4)
         return self.final(hidden).squeeze(1)  # (B,)

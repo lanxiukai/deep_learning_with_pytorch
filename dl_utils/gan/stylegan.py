@@ -35,9 +35,15 @@ class AdaptiveInstanceNorm(nn.Module):
 
     def forward(self, inputs, style):
         # inputs: (B, C, H, W), style: (B, style_dim)
-        mean = inputs.mean(dim=(2, 3), keepdim=True)  # (B, C, 1, 1)
-        variance = inputs.var(dim=(2, 3), unbiased=False, keepdim=True)  # (B, C, 1, 1)
-        normalized = (inputs - mean) * torch.rsqrt(variance + 1e-8)  # (B, C, H, W)
+        statistics = inputs.float()
+        mean = statistics.mean(dim=(2, 3), keepdim=True)
+        variance = statistics.var(
+            dim=(2, 3),
+            unbiased=False,
+            keepdim=True,
+        )
+        normalized = (statistics - mean) * torch.rsqrt(variance + 1e-8)
+        normalized = normalized.to(dtype=inputs.dtype)
         scale, bias = self.affine(style).chunk(2, dim=1)  # scale: (B, C), bias: (B, C)
         scale = scale.view(-1, self.channels, 1, 1) + 1.0  # (B, C, 1, 1)
         bias = bias.view(-1, self.channels, 1, 1)  # (B, C, 1, 1)
@@ -115,9 +121,9 @@ class SynthesisBlock(nn.Module):
             hidden = inputs  # (B, C_out, 4, 4)
         else:
             hidden = filtered_upsample2d(inputs)  # (B, C_in, R, R)
-            hidden = self.conv1(hidden)           # (B, C_out, R, R)
+            hidden = self.conv1(hidden)  # (B, C_out, R, R)
         hidden = self.activation1(hidden, styles[:, 0], noise_mode)
-        hidden = self.conv2(hidden)               # (B, C_out, R, R)
+        hidden = self.conv2(hidden)  # (B, C_out, R, R)
         return self.activation2(hidden, styles[:, 1], noise_mode)
 
 
@@ -183,9 +189,7 @@ class StyleGANGenerator(nn.Module):
 
     def num_ws_for_resolution(self, resolution):
         resolution = validate_resolution(resolution, self.resolutions)
-        return (
-            self.resolutions.index(resolution) + 1
-        ) * self.styles_per_block
+        return (self.resolutions.index(resolution) + 1) * self.styles_per_block
 
     # z (B, z_dim) -> style tensor (B, num_ws, style_dim)
     def make_ws(
@@ -203,9 +207,12 @@ class StyleGANGenerator(nn.Module):
         first_w = self.mapping(z)  # (B, style_dim)
         if update_w_avg:
             with torch.no_grad():
-                batch_average = first_w.detach().mean(dim=0)  # (style_dim,)
+                batch_average = first_w.detach().float().mean(dim=0)
                 # w_avg <- w_avg + (1 - w_avg_beta) * (batch_average - w_avg)
-                self.w_avg.lerp_(batch_average, 1.0 - self.w_avg_beta)
+                self.w_avg.lerp_(
+                    batch_average.to(self.w_avg),
+                    1.0 - self.w_avg_beta,
+                )
         ws = first_w[:, None, :].repeat(1, self.num_ws, 1)  # (B, num_ws, style_dim)
         active_ws = self.num_ws_for_resolution(resolution)
 
@@ -215,11 +222,8 @@ class StyleGANGenerator(nn.Module):
             if mixing_cutoff is None:
                 mixing_cutoff = random.randint(1, active_ws - 1)  # [1, active_ws)
             if not 0 < mixing_cutoff < active_ws:
-                raise ValueError(
-                    "mixing_cutoff must be inside the active style stack"
-                )
-            mixing_ws = mixing_w[:, None, :].repeat(
-                1, self.num_ws - mixing_cutoff, 1)
+                raise ValueError("mixing_cutoff must be inside the active style stack")
+            mixing_ws = mixing_w[:, None, :].repeat(1, self.num_ws - mixing_cutoff, 1)
             ws = torch.cat([ws[:, :mixing_cutoff], mixing_ws], dim=1)
 
         truncation_psi = float(truncation_psi)
@@ -227,9 +231,7 @@ class StyleGANGenerator(nn.Module):
             if truncation_cutoff is None:
                 truncation_cutoff = active_ws
             if not 0 <= truncation_cutoff <= active_ws:
-                raise ValueError(
-                    "truncation_cutoff is outside the active style stack."
-                )
+                raise ValueError("truncation_cutoff is outside the active style stack.")
             if truncation_cutoff > 0:
                 # w_avg + truncation_psi * (ws - w_avg)
                 truncated = torch.lerp(
@@ -254,7 +256,7 @@ class StyleGANGenerator(nn.Module):
         hidden = self.constant.expand(ws.shape[0], -1, -1, -1)  # (B, C[4], 4, 4)
         hidden = self.blocks[0](
             hidden,
-            ws[:, :self.styles_per_block],
+            ws[:, : self.styles_per_block],
             noise_mode,
         )  # (B, C[4], 4, 4)
         if resolution == 4:
@@ -395,7 +397,9 @@ class StyleGANDiscriminator(nn.Module):
                 self.from_rgbs[str(resolution)](images),
                 0.2,
             )  # (B, C[R], R, R)
-            new_hidden = self.blocks[str(resolution)](new_hidden)  # (B, C[R/2], R/2, R/2)
+            new_hidden = self.blocks[str(resolution)](
+                new_hidden
+            )  # (B, C[R/2], R/2, R/2)
             old_images = filtered_downsample2d(images)  # (B, 3, R/2, R/2)
             old_hidden = F.leaky_relu(
                 self.from_rgbs[str(resolution // 2)](old_images),

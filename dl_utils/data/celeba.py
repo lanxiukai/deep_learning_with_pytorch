@@ -3,18 +3,70 @@
 from __future__ import annotations
 
 import csv
+from functools import lru_cache
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from torchvision.io import ImageReadMode, decode_jpeg, read_file
 
 from dl_utils.data.images import load_rgb_image
 from dl_utils.data.loading import make_device_aware_loader
 
-
 CELEBA_PARTITIONS = {"train": 0, "validation": 1, "test": 2}
 CELEBA_ALIGNED_CROP_SIZE = 178
+CELEBA_PIPELINES = frozenset({"auto", "cpu", "cuda"})
+
+
+@lru_cache(maxsize=16)
+def _aligned_image_paths(root: Path, split: str) -> tuple[Path, ...]:
+    """Resolve and validate one split once per process."""
+    root = Path(root)
+    if split not in CELEBA_PARTITIONS:
+        choices = ", ".join(sorted(CELEBA_PARTITIONS))
+        raise ValueError(f"split must be one of {{{choices}}}.")
+
+    partition_path = root / "list_eval_partition.csv"
+    image_candidates = (
+        root / "img_align_celeba" / "img_align_celeba",
+        root / "img_align_celeba",
+    )
+    image_dir = next(
+        (candidate for candidate in image_candidates if candidate.is_dir()),
+        None,
+    )
+    missing = [
+        path
+        for path in (partition_path, image_dir)
+        if path is None or not path.exists()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"aligned CelebA files are incomplete under {root}: {missing}"
+        )
+    assert image_dir is not None
+
+    partition = CELEBA_PARTITIONS[split]
+    with partition_path.open(newline="", encoding="utf-8") as stream:
+        rows = csv.DictReader(stream)
+        image_paths = tuple(
+            image_dir / row["image_id"]
+            for row in rows
+            if int(row["partition"]) == partition
+        )
+    if not image_paths:
+        raise ValueError(f"CelebA split {split!r} contains no images.")
+
+    missing_images = [path for path in image_paths if not path.is_file()]
+    if missing_images:
+        preview = ", ".join(str(path) for path in missing_images[:3])
+        raise FileNotFoundError(
+            f"CelebA split {split!r} is missing {len(missing_images)} "
+            f"images; first missing paths: {preview}"
+        )
+    return image_paths
 
 
 class CelebAAlignedDataset(Dataset):
@@ -22,50 +74,7 @@ class CelebAAlignedDataset(Dataset):
 
     def __init__(self, root, split="train", transform=None):
         super().__init__()
-        root = Path(root)
-        if split not in CELEBA_PARTITIONS:
-            choices = ", ".join(sorted(CELEBA_PARTITIONS))
-            raise ValueError(f"split must be one of {{{choices}}}.")
-
-        partition_path = root / "list_eval_partition.csv"
-        image_candidates = (
-            root / "img_align_celeba" / "img_align_celeba",
-            root / "img_align_celeba",
-        )
-        image_dir = next(
-            (candidate for candidate in image_candidates if candidate.is_dir()),
-            None,
-        )
-        missing = [
-            path
-            for path in (partition_path, image_dir)
-            if path is None or not path.exists()
-        ]
-        if missing:
-            raise FileNotFoundError(
-                f"aligned CelebA files are incomplete under {root}: {missing}"
-            )
-
-        partition = CELEBA_PARTITIONS[split]
-        with partition_path.open(newline="", encoding="utf-8") as stream:
-            rows = csv.DictReader(stream)
-            self.image_paths = [
-                image_dir / row["image_id"]
-                for row in rows
-                if int(row["partition"]) == partition
-            ]
-        if not self.image_paths:
-            raise ValueError(f"CelebA split {split!r} contains no images.")
-
-        missing_images = [
-            path for path in self.image_paths if not path.is_file()
-        ]
-        if missing_images:
-            preview = ", ".join(str(path) for path in missing_images[:3])
-            raise FileNotFoundError(
-                f"CelebA split {split!r} is missing {len(missing_images)} "
-                f"images; first missing paths: {preview}"
-            )
+        self.image_paths = _aligned_image_paths(Path(root), split)
         self.transform = transform
 
     def __len__(self):
@@ -78,6 +87,131 @@ class CelebAAlignedDataset(Dataset):
         return image, 0
 
 
+class CelebAEncodedDataset(Dataset):
+    """Read encoded aligned JPEG bytes for batched CUDA decoding."""
+
+    def __init__(self, root, split="train"):
+        super().__init__()
+        self.image_paths = _aligned_image_paths(Path(root), split)
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, index):
+        return read_file(str(self.image_paths[index]))
+
+
+def _collate_encoded(batch):
+    return list(batch), None
+
+
+def make_encoded_celeba_loader(
+    root,
+    batch_size: int,
+    device: torch.device,
+    *,
+    split: str = "train",
+    shuffle: bool = True,
+    num_workers: int = 4,
+    drop_last: bool = True,
+    prefetch_factor: int = 2,
+) -> DataLoader:
+    """Load encoded JPEG batches for a CUDA nvJPEG preprocessing path."""
+    if device.type != "cuda":
+        raise ValueError("encoded CelebA loading requires a CUDA device.")
+    dataset = CelebAEncodedDataset(root, split=split)
+    return make_device_aware_loader(
+        dataset,
+        batch_size,
+        device,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        drop_last=drop_last,
+        prefetch_factor=prefetch_factor,
+        collate_fn=_collate_encoded,
+    )
+
+
+@torch.no_grad()
+def prepare_encoded_celeba_batch(
+    encoded_images: list[torch.Tensor],
+    resolution: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Decode and transform one encoded JPEG batch entirely on CUDA."""
+    decoded = decode_jpeg(
+        encoded_images,
+        mode=ImageReadMode.RGB,
+        device=device,
+    )
+    if not isinstance(decoded, list) or not decoded:
+        raise RuntimeError("CUDA JPEG decoding returned an invalid batch.")
+    images = torch.stack(decoded)
+    height, width = images.shape[-2:]
+    if height < CELEBA_ALIGNED_CROP_SIZE or width < CELEBA_ALIGNED_CROP_SIZE:
+        raise ValueError(
+            f"CelebA image is smaller than the aligned center crop: {height}x{width}"
+        )
+    top = (height - CELEBA_ALIGNED_CROP_SIZE) // 2
+    left = (width - CELEBA_ALIGNED_CROP_SIZE) // 2
+    images = images[
+        :,
+        :,
+        top : top + CELEBA_ALIGNED_CROP_SIZE,
+        left : left + CELEBA_ALIGNED_CROP_SIZE,
+    ].float()
+    images = F.interpolate(
+        images,
+        size=(resolution, resolution),
+        mode="bilinear",
+        align_corners=False,
+        antialias=True,
+    )
+    images.clamp_(0.0, 255.0).mul_(2.0 / 255.0).sub_(1.0)
+    flip_mask = torch.rand(len(images), device=device) < 0.5
+    images = torch.where(
+        flip_mask.view(-1, 1, 1, 1),
+        images.flip(-1),
+        images,
+    )
+    return images.contiguous(memory_format=torch.channels_last)
+
+
+def cuda_jpeg_works(root, device: torch.device) -> tuple[bool, str | None]:
+    """Probe nvJPEG with one dataset image and return a fallback reason."""
+    if device.type != "cuda":
+        return False, "CUDA is unavailable"
+    dataset = CelebAEncodedDataset(root)
+    try:
+        encoded = dataset[0]
+        decoded = decode_jpeg(
+            [encoded],
+            mode=ImageReadMode.RGB,
+            device=device,
+        )
+        if not isinstance(decoded, list) or len(decoded) != 1:
+            return False, "nvJPEG returned an invalid probe result"
+    except (RuntimeError, ValueError) as error:
+        return False, str(error).splitlines()[0]
+    return True, None
+
+
+def resolve_celeba_pipeline(root, device: torch.device, requested="auto") -> str:
+    """Resolve CUDA JPEG decoding with an explicit CPU fallback policy."""
+    if requested not in CELEBA_PIPELINES:
+        choices = ", ".join(sorted(CELEBA_PIPELINES))
+        raise ValueError(f"CelebA pipeline must be one of: {choices}.")
+    if requested == "cpu":
+        return "cpu"
+    works, reason = cuda_jpeg_works(root, device)
+    if works:
+        return "cuda"
+    if requested == "cuda":
+        raise RuntimeError(f"CUDA JPEG pipeline is unavailable: {reason}")
+    print(f"CUDA JPEG pipeline unavailable ({reason}); using CPU/PIL.")
+    return "cpu"
+
+
 def make_aligned_celeba_loader(
     root,
     resolution: int,
@@ -88,6 +222,7 @@ def make_aligned_celeba_loader(
     shuffle: bool = True,
     num_workers: int = 4,
     drop_last: bool = True,
+    prefetch_factor: int = 2,
 ) -> DataLoader:
     """Create a normalized, resolution-specific aligned CelebA loader."""
     if resolution < 1 or batch_size < 1:
@@ -118,12 +253,51 @@ def make_aligned_celeba_loader(
         shuffle=shuffle,
         num_workers=num_workers,
         drop_last=drop_last,
+        prefetch_factor=prefetch_factor,
     )
+
+
+def make_celeba_training_loader(
+    root,
+    resolution: int,
+    batch_size: int,
+    device: torch.device,
+    *,
+    pipeline: str,
+    num_workers: int = 4,
+    prefetch_factor: int = 2,
+) -> DataLoader:
+    """Create one CPU/PIL or CUDA/nvJPEG CelebA training loader."""
+    if pipeline == "cuda":
+        return make_encoded_celeba_loader(
+            root,
+            batch_size,
+            device,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+        )
+    if pipeline == "cpu":
+        return make_aligned_celeba_loader(
+            root,
+            resolution,
+            batch_size,
+            device,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+        )
+    raise ValueError("pipeline must already be resolved to 'cpu' or 'cuda'.")
 
 
 __all__ = [
     "CELEBA_ALIGNED_CROP_SIZE",
     "CELEBA_PARTITIONS",
+    "CELEBA_PIPELINES",
     "CelebAAlignedDataset",
+    "CelebAEncodedDataset",
+    "cuda_jpeg_works",
     "make_aligned_celeba_loader",
+    "make_celeba_training_loader",
+    "make_encoded_celeba_loader",
+    "prepare_encoded_celeba_batch",
+    "resolve_celeba_pipeline",
 ]

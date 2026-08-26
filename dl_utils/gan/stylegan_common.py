@@ -9,11 +9,11 @@ import math
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-
 
 RESOLUTIONS = (4, 8, 16, 32, 64, 128)
 CHANNEL_MULTIPLIERS = {
@@ -49,14 +49,15 @@ def build_progressive_schedule(
 ) -> tuple[ProgressivePhase, ...]:
     """Build the fade-in and stabilization phases used by ProGAN."""
     resolutions = tuple(int(value) for value in resolutions)
+    phase_kimg = int(phase_kimg)
+    if phase_kimg < 1:
+        raise ValueError("phase_kimg must be positive.")
     phases = []
     for resolution in resolutions:
         batch_size = int(batch_sizes[resolution])
         target_images = phase_kimg * 1_000
-        if batch_size < 1 or target_images % batch_size:
-            raise ValueError(
-                "phase image budget must be divisible by positive batch sizes"
-            )
+        if batch_size < 1:
+            raise ValueError("progressive batch sizes must be positive.")
         names = (
             ("stabilization",)
             if resolution == resolutions[0]
@@ -67,7 +68,7 @@ def build_progressive_schedule(
                 resolution=resolution,
                 name=name,
                 batch_size=batch_size,
-                num_batches=target_images // batch_size,
+                num_batches=math.ceil(target_images / batch_size),
             )
             for name in names
         )
@@ -91,11 +92,7 @@ def sample_mixing_latents(
     if not 0.0 <= mixing_probability <= 1.0:
         raise ValueError("mixing_probability must be within [0, 1].")
     z = torch.randn(batch_size, z_dim, device=device)
-    mixing_z = (
-        torch.randn_like(z)
-        if random.random() < mixing_probability
-        else None
-    )
+    mixing_z = torch.randn_like(z) if random.random() < mixing_probability else None
     # z: (B, z_dim), mixing_z: (B, z_dim) or None
     return z, mixing_z
 
@@ -109,7 +106,7 @@ def r1_penalty(
     # R1 = Eₓ[ ||∇ₓ D(x)||² ]
     gradients = torch.autograd.grad(  # ∂output / ∂input
         real_scores.sum(),  # outputs
-        real_images,        # inputs
+        real_images,  # inputs
         create_graph=True,
     )[0]  # (B, 3, H, W)
     return gradients.square().flatten(1).sum(dim=1).mean()
@@ -128,17 +125,13 @@ def path_length_penalty(
     if not 0.0 <= decay <= 1.0:
         raise ValueError("decay must be within [0, 1].")
 
-    noise = torch.randn_like(images) / math.sqrt(
-        images.shape[2] * images.shape[3]
-    )
+    noise = torch.randn_like(images) / math.sqrt(images.shape[2] * images.shape[3])
     gradients = torch.autograd.grad(  # ∂output / ∂input
         (images * noise).sum(),  # output
-        ws,                      # input
+        ws,  # input
         create_graph=True,
     )[0]  # (Bpath, num_ws, style_dim)
-    lengths = torch.sqrt(
-        gradients.square().sum(dim=2).mean(dim=1) + 1e-8
-    )  # (B,)
+    lengths = torch.sqrt(gradients.square().sum(dim=2).mean(dim=1) + 1e-8)  # (B,)
     # running_mean + decay * (lengths.mean() - running_mean)
     updated_mean = running_mean.lerp(lengths.mean().detach(), decay)
     return (lengths - updated_mean).square().mean(), updated_mean
@@ -162,9 +155,7 @@ def validate_resolution(resolution, resolutions=RESOLUTIONS):
     resolution = int(resolution)
     supported = tuple(int(value) for value in resolutions)
     if resolution not in supported:
-        raise ValueError(
-            f"resolution must be one of {supported}, got {resolution}"
-        )
+        raise ValueError(f"resolution must be one of {supported}, got {resolution}")
     return resolution
 
 
@@ -180,9 +171,9 @@ class PixelNorm(nn.Module):
     """Normalize every sample independently across its feature channels."""
 
     def forward(self, inputs):
-        return inputs * torch.rsqrt(
-            inputs.square().mean(dim=1, keepdim=True) + 1e-8
-        )
+        statistics = inputs.float()
+        scale = torch.rsqrt(statistics.square().mean(dim=1, keepdim=True) + 1e-8)
+        return inputs * scale.to(dtype=inputs.dtype)
 
 
 class EqualizedLinear(nn.Module):
@@ -201,26 +192,19 @@ class EqualizedLinear(nn.Module):
         if learning_rate_multiplier <= 0:
             raise ValueError("learning_rate_multiplier must be positive.")
         self.weight = nn.Parameter(
-            torch.randn(out_features, in_features)
-            / learning_rate_multiplier
+            torch.randn(out_features, in_features) / learning_rate_multiplier
         )
         self.bias = (
             nn.Parameter(torch.full((out_features,), float(bias_init)))
             if bias
             else None
         )
-        self.scale = (
-            float(gain)
-            * learning_rate_multiplier
-            / math.sqrt(in_features)
-        )
+        self.scale = float(gain) * learning_rate_multiplier / math.sqrt(in_features)
         self.learning_rate_multiplier = learning_rate_multiplier
 
     def forward(self, inputs):
         bias = (
-            self.bias * self.learning_rate_multiplier
-            if self.bias is not None
-            else None
+            self.bias * self.learning_rate_multiplier if self.bias is not None else None
         )
         # Store unscaled parameters self.weight and derive the effective weights
         # self.weight * self.scale at each forward pass.
@@ -266,7 +250,7 @@ class EqualizedConv2d(nn.Module):
         *,
         padding=0,
         bias=True,
-        gain=math.sqrt(2),
+        gain=2**0.5,
     ):
         super().__init__()
         self.padding = int(padding)
@@ -278,9 +262,7 @@ class EqualizedConv2d(nn.Module):
                 kernel_size,
             )
         )
-        self.bias = (
-            nn.Parameter(torch.zeros(out_channels)) if bias else None
-        )
+        self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
         fan_in = in_channels * kernel_size * kernel_size
         self.scale = float(gain) / math.sqrt(fan_in)
 
@@ -306,16 +288,20 @@ class MinibatchStandardDeviation(nn.Module):
         group = min(batch_size, self.maximum_group)
         while batch_size % group:
             group -= 1
-        grouped = inputs.float().view(
+        grouped = inputs.float().reshape(
             group,
             -1,
             channels,
             height,
             width,
         )  # (G, B // G, C, H, W)
-        deviation = torch.sqrt(grouped.var(dim=0, unbiased=False) + 1e-8)  # (B // G, C, H, W)
+        deviation = torch.sqrt(
+            grouped.var(dim=0, unbiased=False) + 1e-8
+        )  # (B // G, C, H, W)
         feature = deviation.mean(dim=(1, 2, 3), keepdim=True)  # (B // G, 1, 1, 1)
-        feature = feature.repeat(group, 1, height, width).to(inputs.dtype)  # (B, 1, H, W)
+        feature = feature.repeat(group, 1, height, width).to(
+            inputs.dtype
+        )  # (B, 1, H, W)
         return torch.cat([inputs, feature], dim=1)  # (B, C + 1, H, W)
 
 
@@ -337,7 +323,11 @@ class NoiseInjection(nn.Module):
         self.weight = nn.Parameter(torch.zeros(weight_shape))
         random_generator = torch.Generator().manual_seed(int(fixed_noise_seed))
         fixed_noise = torch.randn(
-            1, 1, self.resolution, self.resolution, generator=random_generator,
+            1,
+            1,
+            self.resolution,
+            self.resolution,
+            generator=random_generator,
         )
         # Fixed noise is reproducible from the model configuration and should
         # not make otherwise compatible checkpoints fail to load.
@@ -350,8 +340,7 @@ class NoiseInjection(nn.Module):
         if noise_mode not in NOISE_MODES:
             modes = ", ".join(sorted(NOISE_MODES))
             raise ValueError(
-                f"noise_mode must be one of {{{modes}}}, "
-                f"got {noise_mode!r}"
+                f"noise_mode must be one of {{{modes}}}, got {noise_mode!r}"
             )
         if noise_mode == "none":
             return inputs
@@ -363,41 +352,50 @@ class NoiseInjection(nn.Module):
             )
         if noise_mode == "random":
             noise = torch.randn(
-                inputs.shape[0], 1, self.resolution, self.resolution,
-                device=inputs.device, dtype=inputs.dtype,
+                inputs.shape[0],
+                1,
+                self.resolution,
+                self.resolution,
+                device=inputs.device,
+                dtype=inputs.dtype,
             )
         else:
             noise = self.fixed_noise.to(
                 device=inputs.device,
                 dtype=inputs.dtype,
             )
-        return inputs + self.weight * noise  # (B, C, R, R)
+        noise_weight = self.weight.to(dtype=inputs.dtype)
+        return inputs + noise_weight * noise  # (B, C, R, R)
 
 
-def _resample_kernel(
-    values: Sequence[float],  # both list and tuple
-    *,
-    device,
-    dtype,
-):
-    kernel = torch.as_tensor(values, device=device, dtype=dtype)
-    if kernel.ndim != 1 or kernel.numel() < 1:
+@lru_cache(maxsize=256)
+def _resample_weights(values, device_name, dtype, channels):
+    """Cache constant depthwise filter weights without a CUDA sync."""
+    if not values:
         raise ValueError("resample kernel must be a non-empty 1D sequence.")
-    if kernel.sum().abs().item() == 0:
+    kernel_sum = sum(values)
+    if kernel_sum == 0:
         raise ValueError("resample kernel must have a non-zero sum.")
+    kernel = torch.tensor(
+        values,
+        device=torch.device(device_name),
+        dtype=dtype,
+    )
     kernel = kernel[:, None] * kernel[None, :]
-    return kernel / kernel.sum()
+    kernel = kernel / kernel_sum**2
+    return kernel.view(1, 1, len(values), len(values)).repeat(
+        channels,
+        1,
+        1,
+        1,
+    )
 
 
 def filter2d(inputs, kernel=(1, 3, 3, 1)):
     """Apply a channel-wise FIR low-pass filter without custom kernels."""
     # inputs shape: (B, C, H, W)
-    filter_kernel = _resample_kernel(
-        kernel,
-        device=inputs.device,
-        dtype=inputs.dtype,
-    )
-    size = filter_kernel.shape[0]
+    kernel = tuple(float(value) for value in kernel)
+    size = len(kernel)
     pad_before = (size - 1) // 2
     pad_after = size // 2
     padded = F.pad(
@@ -406,9 +404,12 @@ def filter2d(inputs, kernel=(1, 3, 3, 1)):
         mode="replicate",
     )  # padded shape: (B, C, H + size - 1, W + size - 1)
     channels = inputs.shape[1]
-    weights = filter_kernel.view(1, 1, size, size).repeat(
-        channels, 1, 1, 1
-    )  # (1, 1, 4, 4) -> (C, 1, 4, 4)
+    weights = _resample_weights(
+        kernel,
+        str(inputs.device),
+        inputs.dtype,
+        channels,
+    )
     # grouped convolution
     return F.conv2d(padded, weights, groups=channels)  # (B, C, H, W)
 
@@ -433,15 +434,15 @@ def denormalize(images):
 
 __all__ = [
     "CHANNEL_MULTIPLIERS",
+    "NOISE_MODES",
+    "RESOLUTIONS",
     "EqualizedConv2d",
     "EqualizedLinear",
     "MappingNetwork",
     "MinibatchStandardDeviation",
-    "NOISE_MODES",
     "NoiseInjection",
     "PixelNorm",
     "ProgressivePhase",
-    "RESOLUTIONS",
     "build_progressive_schedule",
     "denormalize",
     "filter2d",
