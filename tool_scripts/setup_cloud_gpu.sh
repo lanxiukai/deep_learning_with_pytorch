@@ -193,4 +193,4 @@ if [[ "$skip_gpu_check" == false ]]; then
 fi
 
 log "setup completed"
-log "next: upload data/celeba, then run a GAN script or the concurrency benchmark"
+log "next: upload data/celeba, then run 'bash tool_scripts/cloud_gan.sh smoke'"
