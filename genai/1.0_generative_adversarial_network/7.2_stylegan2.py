@@ -30,8 +30,6 @@ Model size:
 
 import argparse
 import math
-import os
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,41 +37,25 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from dl_utils.data.celeba import (
-    CelebAAlignedDataset,
-    make_celeba_training_loader,
-    prepare_encoded_celeba_batch,
-    resolve_celeba_pipeline,
-)
-from dl_utils.filesystem.directories import reset_dir
-from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.gan.inference import generate_in_batches
 from dl_utils.gan.stylegan2 import StyleDiscriminator, StyleGenerator
 from dl_utils.gan.stylegan_common import (
-    denormalize,
     path_length_penalty,
     r1_penalty,
     sample_mixing_latents,
 )
-from dl_utils.plot.figures import save_loss_panels
-from dl_utils.plot.images import save_grid
-from dl_utils.runtime.devices import try_gpu
-from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.accelerator import (
-    configure_device,
-    make_fused_adam,
-    resolve_bf16_precision,
+from dl_utils.gan.training import (
+    append_gan_metrics,
+    initialize_gan_models,
+    prepare_gan_run,
+    resolve_fixed_resolution_gan_options,
+    save_gan_samples,
+    start_gan_checkpoint,
 )
-from dl_utils.training.checkpoints import TrainingCheckpoint, save_model_weights
+from dl_utils.plot.figures import save_loss_panels
+from dl_utils.training.accelerator import make_fused_adam
+from dl_utils.training.checkpoints import save_model_weights
 from dl_utils.training.metrics import MetricAccumulator
 from dl_utils.training.optimization import update_ema_by_images
-
-PROJECT_ROOT = infer_project_root()
-DATA_DIR = PROJECT_ROOT / "data" / "celeba"
-OUTPUT_ROOT = Path(os.environ.get("DL_OUTPUT_ROOT", str(PROJECT_ROOT / "output")))
-OUT_DIR = OUTPUT_ROOT / "stylegan2"
-TRAINING_DIR = OUT_DIR / "training"
-CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
 BATCH_SIZE = 64
 TOTAL_KIMG = 2_500
@@ -157,35 +139,10 @@ def build_training_schedule(total_kimg, batch_size, dataset_size):
     return tuple(schedule)
 
 
-def _next_real_batch(
-    batches,
-    loader,
-    epoch,
-    batch_index,
-    batch_size,
-    device,
-    pipeline,
-):
-    try:
-        raw_images, _ = next(batches)
-    except StopIteration:
-        batches = iter(loader)
-        raw_images, _ = next(batches)
-    if pipeline == "cuda":
-        real_images = prepare_encoded_celeba_batch(raw_images, 128, device)
-    else:
-        real_images = raw_images.to(device, non_blocking=True).contiguous(
-            memory_format=torch.channels_last
-        )
-    real_images = real_images[: epoch.batch_size_at(batch_index, batch_size)]
-    return real_images, batches
-
-
 def train_epoch(
     generator,
     discriminator,
-    loader,
-    batches,
+    data,
     optimizer_g,
     optimizer_d,
     averaged_generator,
@@ -193,14 +150,12 @@ def train_epoch(
     global_step,
     epoch,
     batch_size,
-    device,
-    pipeline,
     precision,
     r1_batch_shrink,
     path_batch_shrink,
 ):
     """Train one data epoch with separate lazy penalties."""
-    metrics = MetricAccumulator(METRIC_NAMES, device=device)
+    metrics = MetricAccumulator(METRIC_NAMES, device=data.device)
     progress = tqdm(
         range(epoch.num_batches),
         desc="StyleGAN2 128x",
@@ -209,14 +164,10 @@ def train_epoch(
         mininterval=1.0,
     )
     for batch_index in progress:
-        real, batches = _next_real_batch(
-            batches,
-            loader,
-            epoch,
-            batch_index,
+        real = data.next_batch(
+            128,
             batch_size,
-            device,
-            pipeline,
+            limit=epoch.batch_size_at(batch_index, batch_size),
         )
         current_batch = len(real)
 
@@ -224,7 +175,7 @@ def train_epoch(
         z, mixing_z = sample_mixing_latents(
             current_batch,
             generator.z_dim,
-            device,
+            data.device,
             STYLE_MIXING_PROBABILITY,
         )
         with torch.no_grad(), precision.autocast():
@@ -255,7 +206,7 @@ def train_epoch(
             z, mixing_z = sample_mixing_latents(
                 current_batch,
                 generator.z_dim,
-                device,
+                data.device,
                 STYLE_MIXING_PROBABILITY,
             )
             with precision.autocast():
@@ -274,7 +225,7 @@ def train_epoch(
                 path_z = torch.randn(
                     path_batch,
                     generator.z_dim,
-                    device=device,
+                    device=data.device,
                 )
                 path_images, path_ws = generator(path_z, return_ws=True)
                 penalty_path, path_mean = path_length_penalty(
@@ -299,143 +250,67 @@ def train_epoch(
         )
         global_step += 1
 
-    return metrics.compute(), path_mean, global_step, batches
-
-
-def save_training_samples(
-    generator,
-    fixed_z,
-    output_path,
-    seen_kimg,
-    precision,
-):
-    """Save fixed-latent and fixed-noise EMA samples."""
-
-    def generate(z_batch):
-        with precision.autocast():
-            return generator(z_batch, noise_mode="fixed").float()
-
-    samples = generate_in_batches(
-        fixed_z,
-        SAMPLE_BATCH_SIZE,
-        generate,
-        module=generator,
-    )
-    save_grid(
-        denormalize(samples),
-        output_path,
-        nrow=SAMPLE_GRID_COLUMNS,
-        title=f"StyleGAN2 EMA fixed samples - {seen_kimg:.0f} kimg",
-    )
-
-
-def _resolved_run_options(args):
-    total_kimg = args.total_kimg if args.total_kimg is not None else TOTAL_KIMG
-    batch_scale = args.batch_scale if args.batch_scale is not None else 1
-    r1_batch_shrink = (
-        args.r1_batch_shrink if args.r1_batch_shrink is not None else R1_BATCH_SHRINK
-    )
-    path_batch_shrink = (
-        args.path_batch_shrink
-        if args.path_batch_shrink is not None
-        else PATH_BATCH_SHRINK
-    )
-    default_workers = min(8, os.cpu_count() or NUM_WORKERS)
-    num_workers = default_workers if args.num_workers is None else args.num_workers
-    if (
-        min(
-            total_kimg,
-            batch_scale,
-            r1_batch_shrink,
-            path_batch_shrink,
-            args.prefetch_factor,
-        )
-        < 1
-    ):
-        raise ValueError("training counts and scales must be positive.")
-    if num_workers < 0:
-        raise ValueError("num_workers must be non-negative.")
-    return {
-        "total_kimg": total_kimg,
-        "batch_size": BATCH_SIZE * batch_scale,
-        "r1_batch_shrink": r1_batch_shrink,
-        "path_batch_shrink": path_batch_shrink,
-        "num_workers": num_workers,
-        "prefetch_factor": args.prefetch_factor,
-    }
+    return metrics.compute(), path_mean, global_step
 
 
 def main(args):
-    if not (DATA_DIR / "list_eval_partition.csv").is_file():
-        raise FileNotFoundError(
-            f"CelebA data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset.py first."
-        )
-
-    options = _resolved_run_options(args)
-    set_seed(SEED)
-    device = try_gpu()
-    configure_device(device)
-    precision = resolve_bf16_precision(device)
-    pipeline = resolve_celeba_pipeline(
-        DATA_DIR,
-        device,
-        requested=args.data_pipeline,
+    options = resolve_fixed_resolution_gan_options(
+        total_kimg=args.total_kimg,
+        batch_scale=args.batch_scale,
+        r1_batch_shrink=args.r1_batch_shrink,
+        path_batch_shrink=args.path_batch_shrink,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        base_batch_size=BATCH_SIZE,
+        default_total_kimg=TOTAL_KIMG,
+        default_r1_batch_shrink=R1_BATCH_SHRINK,
+        default_path_batch_shrink=PATH_BATCH_SHRINK,
+        default_num_workers=NUM_WORKERS,
     )
-    dataset_size = len(CelebAAlignedDataset(DATA_DIR, split="train"))
-    if dataset_size < options["batch_size"]:
+    run = prepare_gan_run(
+        "stylegan2",
+        seed=SEED,
+        data_pipeline=args.data_pipeline,
+        num_workers=options.num_workers,
+        prefetch_factor=options.prefetch_factor,
+    )
+    if run.dataset_size < options.batch_size:
         raise ValueError("CelebA train split is smaller than a training batch.")
     training_schedule = build_training_schedule(
-        options["total_kimg"],
-        options["batch_size"],
-        dataset_size,
+        options.total_kimg,
+        options.batch_size,
+        run.dataset_size,
     )
     total_epochs = len(training_schedule)
     total_batches = sum(epoch.num_batches for epoch in training_schedule)
     total_images = sum(epoch.num_images for epoch in training_schedule)
+    run.prepare_output(args.resume_from)
 
-    if args.resume_from is None:
-        reset_dir(str(TRAINING_DIR))
-        reset_dir(str(CHECKPOINT_DIR))
-
-    loader = make_celeba_training_loader(
-        DATA_DIR,
-        128,
-        options["batch_size"],
-        device,
-        pipeline=pipeline,
-        num_workers=options["num_workers"],
-        prefetch_factor=options["prefetch_factor"],
+    generator, discriminator, averaged_generator = initialize_gan_models(
+        StyleGenerator(**MODEL_CONFIG),
+        StyleDiscriminator(**DISCRIMINATOR_CONFIG),
+        run.device,
     )
-    generator = StyleGenerator(**MODEL_CONFIG).to(
-        device,
-        memory_format=torch.channels_last,
-    )
-    discriminator = StyleDiscriminator(**DISCRIMINATOR_CONFIG).to(
-        device,
-        memory_format=torch.channels_last,
-    )
-    averaged_generator = deepcopy(generator).eval().requires_grad_(False)
 
     g_ratio = G_REG_EVERY / (G_REG_EVERY + 1)
     d_ratio = D_REG_EVERY / (D_REG_EVERY + 1)
     optimizer_g = make_fused_adam(
         generator.parameters(),
-        device=device,
+        device=run.device,
         lr=LEARNING_RATE * g_ratio,
         betas=(0.0, 0.99**g_ratio),
     )
     optimizer_d = make_fused_adam(
         discriminator.parameters(),
-        device=device,
+        device=run.device,
         lr=LEARNING_RATE * d_ratio,
         betas=(0.0, 0.99**d_ratio),
     )
     print(
-        f"precision={precision.name} pipeline={pipeline} "
-        f"workers={options['num_workers']} "
-        f"total_kimg={options['total_kimg']} "
-        f"batch={options['batch_size']}"
+        f"precision={run.precision.name} pipeline={run.pipeline} "
+        f"workers={options.num_workers} "
+        f"total_kimg={options.total_kimg} "
+        f"batch={options.batch_size}"
     )
 
     models = {
@@ -444,50 +319,38 @@ def main(args):
         "discriminator": discriminator,
     }
     optimizers = {"generator": optimizer_g, "discriminator": optimizer_d}
-    checkpoint = TrainingCheckpoint(
-        CHECKPOINT_DIR / "latest.pth",
+    run_config = {
+        "precision": run.precision.name,
+        "data_pipeline": run.pipeline,
+        "dataset_size": run.dataset_size,
+        "total_kimg": options.total_kimg,
+        "batch_size": options.batch_size,
+        "r1_batch_shrink": options.r1_batch_shrink,
+        "path_batch_shrink": options.path_batch_shrink,
+    }
+    checkpoint, completed_epochs, state = start_gan_checkpoint(
+        run.checkpoint_dir / "latest.pth",
+        resume_from=args.resume_from,
         unit="fixed-resolution-epoch-main-metrics-v2",
         models=models,
         optimizers=optimizers,
-    )
-    run_config = {
-        "precision": precision.name,
-        "data_pipeline": pipeline,
-        "dataset_size": dataset_size,
-        "total_kimg": options["total_kimg"],
-        "batch_size": options["batch_size"],
-        "r1_batch_shrink": options["r1_batch_shrink"],
-        "path_batch_shrink": options["path_batch_shrink"],
-    }
-    fixed_z = torch.randn(SAMPLES_TO_DISPLAY, Z_DIM, device=device)
-    completed_epochs, state = checkpoint.resume(
-        args.resume_from,
-        initial_state={
-            "loss_history": {
-                "kimg": [],
-                **{name: [] for name in METRIC_NAMES},
-            },
-            "fixed_z": fixed_z.cpu(),
+        metric_names=METRIC_NAMES,
+        fixed_z=torch.randn(SAMPLES_TO_DISPLAY, Z_DIM, device=run.device),
+        run_config=run_config,
+        extra_state={
             "path_mean": torch.zeros(()),
             "global_step": 0,
             "seen_images": 0,
-            "run_config": run_config,
         },
     )
     if completed_epochs > total_epochs:
         raise ValueError("Checkpoint epoch exceeds the training schedule.")
-    if state.get("run_config") != run_config:
-        raise ValueError(
-            "Checkpoint runtime options differ from this run; reuse the "
-            "original batch, budget, regularization, and data-pipeline "
-            "options."
-        )
     if args.resume_from is not None:
         print(f"Resumed after epoch {completed_epochs}: {args.resume_from}")
 
     loss_history = state["loss_history"]
-    fixed_z = state["fixed_z"].to(device)
-    path_mean = state["path_mean"].to(device)
+    fixed_z = state["fixed_z"].to(run.device)
+    path_mean = state["path_mean"].to(run.device)
     global_step = int(state["global_step"])
     seen_images = int(state["seen_images"])
     completed_schedule = training_schedule[:completed_epochs]
@@ -496,53 +359,50 @@ def main(args):
     if seen_images != sum(epoch.num_images for epoch in completed_schedule):
         raise ValueError("Checkpoint image count does not match its epoch.")
 
-    batches = iter(loader)
     for epoch_index, epoch in enumerate(
         training_schedule[completed_epochs:],
         start=completed_epochs + 1,
     ):
         print(f"Epoch {epoch_index}/{total_epochs}")
-        metrics, path_mean, global_step, batches = train_epoch(
+        metrics, path_mean, global_step = train_epoch(
             generator,
             discriminator,
-            loader,
-            batches,
+            run.data,
             optimizer_g,
             optimizer_d,
             averaged_generator,
             path_mean,
             global_step,
             epoch,
-            options["batch_size"],
-            device,
-            pipeline,
-            precision,
-            options["r1_batch_shrink"],
-            options["path_batch_shrink"],
+            options.batch_size,
+            run.precision,
+            options.r1_batch_shrink,
+            options.path_batch_shrink,
         )
         seen_images += epoch.num_images
         seen_kimg = seen_images / 1_000
-        loss_history["kimg"].append(seen_kimg)
-        for name, value in metrics.items():
-            loss_history[name].append(value)
+        append_gan_metrics(loss_history, seen_kimg, metrics)
 
         state["path_mean"] = path_mean.detach().cpu()
         state["global_step"] = global_step
         state["seen_images"] = seen_images
         checkpoint.save(epoch_index, state)
-        save_training_samples(
+        save_gan_samples(
             averaged_generator,
             fixed_z,
-            TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
-            seen_kimg,
-            precision,
+            run.training_dir / f"kimg_{round(seen_kimg):05d}.png",
+            precision=run.precision,
+            generate=lambda z: averaged_generator(z, noise_mode="fixed"),
+            batch_size=SAMPLE_BATCH_SIZE,
+            nrow=SAMPLE_GRID_COLUMNS,
+            title=f"StyleGAN2 EMA fixed samples - {seen_kimg:.0f} kimg",
         )
 
     if global_step != total_batches or seen_images != total_images:
         raise RuntimeError("Training ended with an unexpected image budget.")
     save_model_weights(
         averaged_generator,
-        OUT_DIR / "stylegan2_generator.pth",
+        run.output_dir / "stylegan2_generator.pth",
         metadata={"model_name": "stylegan2", "model_config": MODEL_CONFIG},
     )
     save_loss_panels(
@@ -561,7 +421,7 @@ def main(args):
                 "Expected weighted contribution": loss_history["path_penalty"],
             },
         },
-        OUT_DIR / "loss_curves.png",
+        run.output_dir / "loss_curves.png",
         xlabel="thousands of real images shown to the discriminator (kimg)",
     )
 

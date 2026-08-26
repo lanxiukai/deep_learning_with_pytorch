@@ -30,51 +30,34 @@ Model size:
 """
 
 import argparse
-import os
-from copy import deepcopy
+from functools import partial
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from dl_utils.data.celeba import (
-    CelebAAlignedDataset,
-    make_celeba_training_loader,
-    prepare_encoded_celeba_batch,
-    resolve_celeba_pipeline,
-)
-from dl_utils.filesystem.directories import reset_dir
-from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.gan.inference import generate_in_batches
 from dl_utils.gan.stylegan import StyleGANDiscriminator, StyleGANGenerator
 from dl_utils.gan.stylegan_common import (
     RESOLUTIONS,
     build_progressive_schedule,
-    denormalize,
     phase_alpha,
     r1_penalty,
     sample_mixing_latents,
 )
-from dl_utils.plot.figures import save_loss_panels
-from dl_utils.plot.images import save_grid
-from dl_utils.runtime.devices import try_gpu
-from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.accelerator import (
-    configure_device,
-    make_fused_adam,
-    resolve_bf16_precision,
+from dl_utils.gan.training import (
+    append_gan_metrics,
+    initialize_gan_models,
+    prepare_gan_run,
+    resolve_progressive_gan_options,
+    save_gan_samples,
+    start_gan_checkpoint,
 )
-from dl_utils.training.checkpoints import TrainingCheckpoint, save_model_weights
+from dl_utils.plot.figures import save_loss_panels
+from dl_utils.training.accelerator import make_fused_adam
+from dl_utils.training.checkpoints import save_model_weights
 from dl_utils.training.metrics import MetricAccumulator
 from dl_utils.training.optimization import update_ema_by_images
-
-PROJECT_ROOT = infer_project_root()
-DATA_DIR = PROJECT_ROOT / "data" / "celeba"
-OUTPUT_ROOT = Path(os.environ.get("DL_OUTPUT_ROOT", str(PROJECT_ROOT / "output")))
-OUT_DIR = OUTPUT_ROOT / "stylegan"
-TRAINING_DIR = OUT_DIR / "training"
-CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 
 BATCH_SIZES = {4: 256, 8: 256, 16: 128, 32: 64, 64: 64, 128: 64}
 PHASE_KIMG = 200
@@ -123,44 +106,21 @@ def build_training_schedule(
     )
 
 
-def _next_real_batch(batches, loader, phase, device, pipeline):
-    try:
-        raw_images, _ = next(batches)
-    except StopIteration:
-        batches = iter(loader)
-        raw_images, _ = next(batches)
-
-    if pipeline == "cuda":
-        real_images = prepare_encoded_celeba_batch(
-            raw_images,
-            phase.resolution,
-            device,
-        )
-    else:
-        real_images = raw_images.to(device, non_blocking=True).contiguous(
-            memory_format=torch.channels_last
-        )
-    return real_images, batches
-
-
 def train_phase(
     generator,
     discriminator,
-    loader,
-    batches,
+    data,
     optimizer_g,
     optimizer_d,
     averaged_generator,
     phase,
-    device,
-    pipeline,
     precision,
     global_step,
     d_reg_every,
     reg_batch_shrink,
 ):
     """Train one progressive phase with BF16 main passes and FP32 R1."""
-    metrics = MetricAccumulator(METRIC_NAMES, device=device)
+    metrics = MetricAccumulator(METRIC_NAMES, device=data.device)
     progress = tqdm(
         range(phase.num_batches),
         desc=f"StyleGAN {phase.resolution}x {phase.name}",
@@ -169,12 +129,9 @@ def train_phase(
         mininterval=1.0,
     )
     for batch_index in progress:
-        real_images, batches = _next_real_batch(
-            batches,
-            loader,
-            phase,
-            device,
-            pipeline,
+        real_images = data.next_batch(
+            phase.resolution,
+            phase.batch_size,
         )
         alpha = phase_alpha(phase, batch_index)
         batch_size = len(real_images)
@@ -183,7 +140,7 @@ def train_phase(
         z, mixing_z = sample_mixing_latents(
             batch_size,
             generator.z_dim,
-            device,
+            data.device,
             STYLE_MIXING_PROBABILITY,
         )
         with torch.no_grad(), precision.autocast():
@@ -231,7 +188,7 @@ def train_phase(
             z, mixing_z = sample_mixing_latents(
                 batch_size,
                 generator.z_dim,
-                device,
+                data.device,
                 STYLE_MIXING_PROBABILITY,
             )
             with precision.autocast():
@@ -265,136 +222,60 @@ def train_phase(
         )
         global_step += 1
 
-    return metrics.compute(), global_step, batches
-
-
-def save_training_samples(
-    generator,
-    fixed_z,
-    output_path,
-    phase,
-    seen_kimg,
-    precision,
-):
-    """Save fixed-latent and fixed-noise EMA samples."""
-
-    def generate(z_batch):
-        with precision.autocast():
-            return generator(
-                z_batch,
-                resolution=phase.resolution,
-                alpha=phase_alpha(phase, phase.num_batches - 1),
-                noise_mode="fixed",
-            ).float()
-
-    samples = generate_in_batches(
-        fixed_z,
-        SAMPLE_BATCH_SIZE,
-        generate,
-        module=generator,
-    )
-    save_grid(
-        denormalize(samples),
-        output_path,
-        nrow=SAMPLE_GRID_COLUMNS,
-        title=(
-            f"StyleGAN EMA fixed samples - {phase.resolution}x"
-            f"{phase.resolution} {phase.name} - {seen_kimg:.0f} kimg"
-        ),
-    )
-
-
-def _resolved_run_options(args):
-    phase_kimg = args.phase_kimg if args.phase_kimg is not None else PHASE_KIMG
-    batch_scale = args.batch_scale if args.batch_scale is not None else 1
-    d_reg_every = args.d_reg_every if args.d_reg_every is not None else D_REG_EVERY
-    reg_batch_shrink = (
-        args.reg_batch_shrink if args.reg_batch_shrink is not None else REG_BATCH_SHRINK
-    )
-    default_workers = min(8, os.cpu_count() or NUM_WORKERS)
-    num_workers = default_workers if args.num_workers is None else args.num_workers
-    if (
-        min(
-            phase_kimg,
-            batch_scale,
-            d_reg_every,
-            reg_batch_shrink,
-            args.prefetch_factor,
-        )
-        < 1
-    ):
-        raise ValueError("training counts and scales must be positive.")
-    if num_workers < 0:
-        raise ValueError("num_workers must be non-negative.")
-    batch_sizes = {
-        resolution: batch_size * batch_scale
-        for resolution, batch_size in BATCH_SIZES.items()
-    }
-    return {
-        "phase_kimg": phase_kimg,
-        "batch_sizes": batch_sizes,
-        "d_reg_every": d_reg_every,
-        "reg_batch_shrink": reg_batch_shrink,
-        "num_workers": num_workers,
-        "prefetch_factor": args.prefetch_factor,
-    }
+    return metrics.compute(), global_step
 
 
 def main(args):
-    if not (DATA_DIR / "list_eval_partition.csv").is_file():
-        raise FileNotFoundError(
-            f"CelebA data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset.py first."
-        )
-
-    options = _resolved_run_options(args)
-    set_seed(SEED)
-    device = try_gpu()
-    configure_device(device)
-    precision = resolve_bf16_precision(device)
-    pipeline = resolve_celeba_pipeline(
-        DATA_DIR,
-        device,
-        requested=args.data_pipeline,
+    options = resolve_progressive_gan_options(
+        phase_kimg=args.phase_kimg,
+        batch_scale=args.batch_scale,
+        d_reg_every=args.d_reg_every,
+        reg_batch_shrink=args.reg_batch_shrink,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        base_batch_sizes=BATCH_SIZES,
+        default_phase_kimg=PHASE_KIMG,
+        default_d_reg_every=D_REG_EVERY,
+        default_reg_batch_shrink=REG_BATCH_SHRINK,
+        default_num_workers=NUM_WORKERS,
     )
-    dataset_size = len(CelebAAlignedDataset(DATA_DIR, split="train"))
+    run = prepare_gan_run(
+        "stylegan",
+        seed=SEED,
+        data_pipeline=args.data_pipeline,
+        num_workers=options.num_workers,
+        prefetch_factor=options.prefetch_factor,
+    )
     training_schedule = build_training_schedule(
-        dataset_size,
-        batch_sizes=options["batch_sizes"],
-        phase_kimg=options["phase_kimg"],
+        run.dataset_size,
+        batch_sizes=options.batch_sizes,
+        phase_kimg=options.phase_kimg,
     )
     total_phases = len(training_schedule)
+    run.prepare_output(args.resume_from)
 
-    if args.resume_from is None:
-        reset_dir(str(TRAINING_DIR))
-        reset_dir(str(CHECKPOINT_DIR))
-
-    generator = StyleGANGenerator(**MODEL_CONFIG).to(
-        device,
-        memory_format=torch.channels_last,
+    generator, discriminator, averaged_generator = initialize_gan_models(
+        StyleGANGenerator(**MODEL_CONFIG),
+        StyleGANDiscriminator(**DISCRIMINATOR_CONFIG),
+        run.device,
     )
-    discriminator = StyleGANDiscriminator(**DISCRIMINATOR_CONFIG).to(
-        device,
-        memory_format=torch.channels_last,
-    )
-    averaged_generator = deepcopy(generator).eval().requires_grad_(False)
     optimizer_g = make_fused_adam(
         generator.parameters(),
-        device=device,
+        device=run.device,
         lr=LEARNING_RATE,
         betas=(0.0, 0.99),
     )
     optimizer_d = make_fused_adam(
         discriminator.parameters(),
-        device=device,
+        device=run.device,
         lr=LEARNING_RATE,
         betas=(0.0, 0.99),
     )
     print(
-        f"precision={precision.name} pipeline={pipeline} "
-        f"workers={options['num_workers']} "
-        f"phase_kimg={options['phase_kimg']} "
-        f"D_reg_every={options['d_reg_every']}"
+        f"precision={run.precision.name} pipeline={run.pipeline} "
+        f"workers={options.num_workers} "
+        f"phase_kimg={options.phase_kimg} "
+        f"D_reg_every={options.d_reg_every}"
     )
 
     models = {
@@ -403,46 +284,32 @@ def main(args):
         "discriminator": discriminator,
     }
     optimizers = {"generator": optimizer_g, "discriminator": optimizer_d}
-    checkpoint = TrainingCheckpoint(
-        CHECKPOINT_DIR / "latest.pth",
+    run_config = {
+        "precision": run.precision.name,
+        "data_pipeline": run.pipeline,
+        "phase_kimg": options.phase_kimg,
+        "batch_sizes": options.batch_sizes,
+        "d_reg_every": options.d_reg_every,
+        "reg_batch_shrink": options.reg_batch_shrink,
+    }
+    checkpoint, completed_phases, state = start_gan_checkpoint(
+        run.checkpoint_dir / "latest.pth",
+        resume_from=args.resume_from,
         unit="progressive-phase-main-metrics-v2",
         models=models,
         optimizers=optimizers,
-    )
-    run_config = {
-        "precision": precision.name,
-        "data_pipeline": pipeline,
-        "phase_kimg": options["phase_kimg"],
-        "batch_sizes": options["batch_sizes"],
-        "d_reg_every": options["d_reg_every"],
-        "reg_batch_shrink": options["reg_batch_shrink"],
-    }
-    fixed_z = torch.randn(SAMPLES_TO_DISPLAY, Z_DIM, device=device)
-    completed_phases, state = checkpoint.resume(
-        args.resume_from,
-        initial_state={
-            "loss_history": {
-                "kimg": [],
-                **{name: [] for name in METRIC_NAMES},
-            },
-            "fixed_z": fixed_z.cpu(),
-            "global_step": 0,
-            "run_config": run_config,
-        },
+        metric_names=METRIC_NAMES,
+        fixed_z=torch.randn(SAMPLES_TO_DISPLAY, Z_DIM, device=run.device),
+        run_config=run_config,
+        extra_state={"global_step": 0},
     )
     if completed_phases > total_phases:
         raise ValueError("Checkpoint phase exceeds the training schedule.")
-    if state.get("run_config") != run_config:
-        raise ValueError(
-            "Checkpoint runtime options differ from this run; reuse the "
-            "original batch, budget, regularization, and data-pipeline "
-            "options."
-        )
     if args.resume_from is not None:
         print(f"Resumed after phase {completed_phases}: {args.resume_from}")
 
     loss_history = state["loss_history"]
-    fixed_z = state["fixed_z"].to(device)
+    fixed_z = state["fixed_z"].to(run.device)
     global_step = int(state["global_step"])
     completed_schedule = training_schedule[:completed_phases]
     seen_images = sum(phase.num_images for phase in completed_schedule)
@@ -450,9 +317,6 @@ def main(args):
     if global_step != expected_steps:
         raise ValueError("Checkpoint global step does not match its phase.")
 
-    loader = None
-    batches = None
-    loader_key = None
     for phase_index, phase in enumerate(
         training_schedule[completed_phases:],
         start=completed_phases + 1,
@@ -461,59 +325,47 @@ def main(args):
             f"Phase {phase_index}/{total_phases}: "
             f"{phase.resolution}x{phase.resolution} {phase.name}"
         )
-        key = (
-            phase.batch_size,
-            None if pipeline == "cuda" else phase.resolution,
-        )
-        if key != loader_key:
-            loader = make_celeba_training_loader(
-                DATA_DIR,
-                phase.resolution,
-                phase.batch_size,
-                device,
-                pipeline=pipeline,
-                num_workers=options["num_workers"],
-                prefetch_factor=options["prefetch_factor"],
-            )
-            batches = iter(loader)
-            loader_key = key
-
-        metrics, global_step, batches = train_phase(
+        metrics, global_step = train_phase(
             generator,
             discriminator,
-            loader,
-            batches,
+            run.data,
             optimizer_g,
             optimizer_d,
             averaged_generator,
             phase,
-            device,
-            pipeline,
-            precision,
+            run.precision,
             global_step,
-            options["d_reg_every"],
-            options["reg_batch_shrink"],
+            options.d_reg_every,
+            options.reg_batch_shrink,
         )
         seen_images += phase.num_images
         seen_kimg = seen_images / 1_000
-        loss_history["kimg"].append(seen_kimg)
-        for name, value in metrics.items():
-            loss_history[name].append(value)
+        append_gan_metrics(loss_history, seen_kimg, metrics)
 
         state["global_step"] = global_step
         checkpoint.save(phase_index, state)
-        save_training_samples(
+        save_gan_samples(
             averaged_generator,
             fixed_z,
-            TRAINING_DIR / f"kimg_{round(seen_kimg):05d}.png",
-            phase,
-            seen_kimg,
-            precision,
+            run.training_dir / f"kimg_{round(seen_kimg):05d}.png",
+            precision=run.precision,
+            generate=partial(
+                averaged_generator,
+                resolution=phase.resolution,
+                alpha=phase_alpha(phase, phase.num_batches - 1),
+                noise_mode="fixed",
+            ),
+            batch_size=SAMPLE_BATCH_SIZE,
+            nrow=SAMPLE_GRID_COLUMNS,
+            title=(
+                f"StyleGAN EMA fixed samples - {phase.resolution}x"
+                f"{phase.resolution} {phase.name} - {seen_kimg:.0f} kimg"
+            ),
         )
 
     save_model_weights(
         averaged_generator,
-        OUT_DIR / "stylegan_generator.pth",
+        run.output_dir / "stylegan_generator.pth",
         metadata={"model_name": "stylegan", "model_config": MODEL_CONFIG},
     )
     save_loss_panels(
@@ -529,7 +381,7 @@ def main(args):
                 "Expected weighted contribution": loss_history["r1_penalty"],
             },
         },
-        OUT_DIR / "loss_curves.png",
+        run.output_dir / "loss_curves.png",
         xlabel="thousands of real images shown to the discriminator (kimg)",
     )
 

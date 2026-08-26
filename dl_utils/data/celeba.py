@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -264,6 +266,7 @@ def make_celeba_training_loader(
     device: torch.device,
     *,
     pipeline: str,
+    split: str = "train",
     num_workers: int = 4,
     prefetch_factor: int = 2,
 ) -> DataLoader:
@@ -273,6 +276,7 @@ def make_celeba_training_loader(
             root,
             batch_size,
             device,
+            split=split,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
         )
@@ -282,10 +286,99 @@ def make_celeba_training_loader(
             resolution,
             batch_size,
             device,
+            split=split,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
         )
     raise ValueError("pipeline must already be resolved to 'cpu' or 'cuda'.")
+
+
+class CelebATrainingStream:
+    """Reuse CelebA loaders and return device-ready training batches."""
+
+    def __init__(
+        self,
+        root,
+        device: torch.device,
+        *,
+        pipeline: str = "auto",
+        split: str = "train",
+        num_workers: int = 4,
+        prefetch_factor: int = 2,
+    ):
+        if num_workers < 0:
+            raise ValueError("num_workers must be non-negative.")
+        if prefetch_factor < 1:
+            raise ValueError("prefetch_factor must be positive.")
+        self.root = Path(root)
+        self.device = device
+        self.split = split
+        self.num_workers = num_workers
+        self.prefetch_factor = prefetch_factor
+        self.pipeline = resolve_celeba_pipeline(
+            self.root,
+            device,
+            requested=pipeline,
+        )
+        self.dataset_size = len(_aligned_image_paths(self.root, split))
+        self._loader: DataLoader | None = None
+        self._batches: Iterator[Any] | None = None
+        self._loader_key = None
+
+    def next_batch(
+        self,
+        resolution: int,
+        batch_size: int,
+        *,
+        limit: int | None = None,
+    ) -> torch.Tensor:
+        """Return the next normalized batch, restarting or rebuilding as needed."""
+        if resolution < 1 or batch_size < 1:
+            raise ValueError("resolution and batch_size must be positive.")
+        loader_key = (
+            batch_size,
+            None if self.pipeline == "cuda" else resolution,
+        )
+        if loader_key != self._loader_key:
+            self._loader = make_celeba_training_loader(
+                self.root,
+                resolution,
+                batch_size,
+                self.device,
+                pipeline=self.pipeline,
+                split=self.split,
+                num_workers=self.num_workers,
+                prefetch_factor=self.prefetch_factor,
+            )
+            self._batches = iter(self._loader)
+            self._loader_key = loader_key
+
+        loader = self._loader
+        batches = self._batches
+        if loader is None or batches is None:
+            raise RuntimeError("CelebA loader initialization failed.")
+        try:
+            raw_images, _ = next(batches)
+        except StopIteration:
+            batches = iter(loader)
+            self._batches = batches
+            raw_images, _ = next(batches)
+
+        if self.pipeline == "cuda":
+            images = prepare_encoded_celeba_batch(
+                raw_images,
+                resolution,
+                self.device,
+            )
+        else:
+            images = raw_images.to(self.device, non_blocking=True).contiguous(
+                memory_format=torch.channels_last
+            )
+        if limit is not None:
+            if not 1 <= limit <= len(images):
+                raise ValueError("limit must fit within the loaded batch.")
+            images = images[:limit]
+        return images
 
 
 __all__ = [
@@ -294,6 +387,7 @@ __all__ = [
     "CELEBA_PIPELINES",
     "CelebAAlignedDataset",
     "CelebAEncodedDataset",
+    "CelebATrainingStream",
     "cuda_jpeg_works",
     "make_aligned_celeba_loader",
     "make_celeba_training_loader",

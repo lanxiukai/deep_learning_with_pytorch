@@ -49,6 +49,7 @@ dl_utils/
 │   ├── downloads.py
 │   ├── glasses_label_corrections.json
 │   ├── images.py
+│   ├── loading.py
 │   └── vision.py
 │
 ├── diffusion/
@@ -87,13 +88,15 @@ dl_utils/
 │   ├── biggan.py
 │   ├── cyclegan.py
 │   ├── gan.py
+│   ├── inference.py
 │   ├── pix2pix.py
 │   ├── progan.py
 │   ├── sagan.py
 │   ├── sn_gan.py
 │   ├── stylegan.py
 │   ├── stylegan2.py
-│   └── stylegan_common.py
+│   ├── stylegan_common.py
+│   └── training.py
 │
 ├── plot/
 │   ├── __init__.py
@@ -108,9 +111,12 @@ dl_utils/
 │
 ├── training/
 │   ├── __init__.py
+│   ├── accelerator.py
+│   ├── checkpoints.py
 │   ├── metrics.py
 │   ├── optimization.py
 │   ├── parameters.py
+│   ├── session.py
 │   └── timing.py
 │
 └── vae/
@@ -197,12 +203,20 @@ Public entries: none (docstring-only package marker).
 
 ### dl_utils/data/celeba.py
 
-Dependencies: __future__ (annotations), csv, pathlib (Path),
-torch.utils.data (Dataset), dl_utils.data.images (load_rgb_image).
+Dependencies: __future__ (annotations), csv, collections.abc (Iterator),
+functools (lru_cache), pathlib (Path), typing (Any), torch,
+torch.nn.functional (as F), torch.utils.data (DataLoader, Dataset), torchvision
+(transforms), torchvision.io, dl_utils.data.images (load_rgb_image),
+dl_utils.data.loading (make_device_aware_loader).
 Public entries (__all__): CELEBA_ALIGNED_CROP_SIZE, CELEBA_PARTITIONS,
-CelebAAlignedDataset.
-The dataset reads the official split manifest from the locally prepared
-aligned CelebA tree and returns unconditional `(image, 0)` samples.
+CELEBA_PIPELINES, CelebAAlignedDataset, CelebAEncodedDataset,
+CelebATrainingStream, cuda_jpeg_works, make_aligned_celeba_loader,
+make_celeba_training_loader, make_encoded_celeba_loader,
+prepare_encoded_celeba_batch, resolve_celeba_pipeline.
+The module reads official CelebA partitions and provides CPU/PIL and
+CUDA/nvJPEG preprocessing. `CelebATrainingStream` resolves the pipeline once,
+reuses compatible loaders across training phases, restarts exhausted
+iterators, and returns normalized channels-last batches on the target device.
 
 ### dl_utils/data/downloads.py
 
@@ -231,6 +245,14 @@ Public entries: flatten_to_rgb, load_rgb_image.
 Both helpers preserve palette and explicit alpha information by compositing
 transparent images onto a caller-selectable solid background before returning
 RGB data.
+
+### dl_utils/data/loading.py
+
+Dependencies: __future__ (annotations), torch, torch.utils.data (DataLoader,
+Dataset).
+Public entries (__all__): make_device_aware_loader.
+The helper applies CUDA-aware pinned memory, persistent-worker, and prefetch
+settings without exposing DataLoader boilerplate in lesson scripts.
 
 ### dl_utils/data/vision.py
 
@@ -410,6 +432,14 @@ Public entries (__all__): DiffusionUNet, UNet.
 Dependencies: torch, torch.nn (as nn).
 Public entries: gradient_penalty, update_D, update_G, Generator, Critic.
 
+### dl_utils/gan/inference.py
+
+Dependencies: __future__ (annotations), collections.abc (Callable, Sequence),
+torch, torch (nn).
+Public entries (__all__): generate_in_batches.
+The helper runs bounded, mode-preserving generator inference for sample and
+evaluation artifacts.
+
 ### dl_utils/gan/pix2pix.py
 
 Dependencies: __future__ (annotations), csv, pathlib (Path), albumentations,
@@ -438,7 +468,7 @@ init_spectral_norm_state, spectral_norm_scratch_minimal.
 ### dl_utils/gan/stylegan_common.py
 
 Dependencies: math, random, collections.abc (Mapping, Sequence), dataclasses,
-torch, torch.nn.functional (as F), torch (nn).
+functools (lru_cache), torch, torch.nn.functional (as F), torch (nn).
 Public entries: RESOLUTIONS, CHANNEL_MULTIPLIERS, NOISE_MODES,
 make_channel_map, validate_resolution, validate_alpha, PixelNorm,
 EqualizedLinear, MappingNetwork, EqualizedConv2d,
@@ -471,6 +501,28 @@ dl_utils.gan.stylegan_common.
 Public entries: MappingNetwork, ModulatedConv2d, StyledConv, ToRGB,
 SynthesisBlock, StyleGenerator, DiscriminatorResidualBlock,
 StyleDiscriminator, denormalize.
+
+### dl_utils/gan/training.py
+
+Dependencies: __future__ (annotations), os, collections.abc (Callable,
+Mapping), copy (deepcopy), dataclasses, os (PathLike), pathlib (Path), typing
+(Any), torch, torch (nn), torch.optim (Optimizer),
+dl_utils.data.celeba (CelebATrainingStream),
+dl_utils.filesystem.directories (reset_dir),
+dl_utils.filesystem.project_root (infer_project_root), dl_utils.gan.inference
+(generate_in_batches), dl_utils.gan.stylegan_common (denormalize),
+dl_utils.plot.images (save_grid), dl_utils.runtime.devices (try_gpu),
+dl_utils.runtime.randomness (set_seed), dl_utils.training.accelerator
+(BF16Precision, configure_device, resolve_bf16_precision), and
+dl_utils.training.checkpoints (TrainingCheckpoint).
+Public entries (__all__): FixedResolutionGANOptions, GANRun,
+ProgressiveGANOptions, append_gan_metrics, initialize_gan_models,
+prepare_gan_run, resolve_fixed_resolution_gan_options, resolve_num_workers,
+resolve_progressive_gan_options, save_gan_samples, start_gan_checkpoint.
+The module owns shared BF16 runtime selection, output paths, EMA setup, option
+validation, fixed-latent sample grids, and checkpoint state validation for the
+three 128x128 GAN lessons. Model-specific schedules, objectives,
+regularization, and update ordering remain visible in the lesson scripts.
 
 ### dl_utils/vae/__init__.py
 
@@ -594,15 +646,25 @@ FP32 before rendering.
 Dependencies: none.
 Public entries: none (docstring-only package marker).
 
+### dl_utils/training/accelerator.py
+
+Dependencies: __future__ (annotations), dataclasses, torch.
+Public entries (__all__): BF16Precision, configure_device, make_fused_adam,
+resolve_bf16_precision.
+The module requires CUDA BF16 for the optimized lessons and centralizes
+autocast, fused Adam, throughput-oriented backend tuning, and optimizer steps
+without introducing a second precision mode.
+
 ### dl_utils/training/checkpoints.py
 
 Dependencies: hashlib, platform, random, tempfile, collections.abc (Mapping),
 importlib.metadata, os (PathLike), pathlib (Path), typing (Any), numpy, torch,
 torch (nn), torch.optim (Optimizer).
 Public entries (__all__): CHECKPOINT_FORMAT_VERSION, TrainingCheckpoint,
-atomic_torch_save, capture_rng_state, load_training_checkpoint,
-make_training_checkpoint, model_state_fingerprint, reproducibility_metadata,
-restore_rng_state, save_model_weights, save_periodic_checkpoint.
+atomic_torch_save, capture_rng_state, load_model_weights,
+load_training_checkpoint, make_training_checkpoint, model_state_fingerprint,
+reproducibility_metadata, restore_rng_state, save_model_weights,
+save_periodic_checkpoint.
 The helpers atomically save latest/archive checkpoints, restore named models,
 optimizers and RNG streams, and save metadata-rich final model weights.
 `TrainingCheckpoint` exposes only `resume` and `save` for lessons that need one
