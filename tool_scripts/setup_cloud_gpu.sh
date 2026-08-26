@@ -15,7 +15,7 @@ usage() {
     cat <<'EOF'
 Usage: bash tool_scripts/setup_cloud_gpu.sh [options]
 
-Prepare the locked project environment on an Ubuntu x86_64 cloud GPU host.
+Prepare the locked BF16 project environment on an Ubuntu x86_64 cloud GPU host.
 The script is idempotent and does not install NVIDIA drivers, CUDA Toolkit,
 Codex, datasets, or editor extensions.
 
@@ -189,8 +189,8 @@ log "environment sync finished in $((SECONDS - start_seconds)) seconds"
 
 if [[ "$skip_gpu_check" == false ]]; then
     uv run --locked --no-sync python -c \
-        'import torch; assert torch.cuda.is_available(), "CUDA unavailable"; print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPU {torch.cuda.get_device_name(0)}")'
+        'import torch; assert torch.cuda.is_available(), "CUDA unavailable"; name = torch.cuda.get_device_name(0); capability = torch.cuda.get_device_capability(0); bf16 = torch.cuda.is_bf16_supported(); assert bf16, "the selected GPU or PyTorch build does not support BF16"; print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPU {name}; SM {capability[0]}.{capability[1]}; BF16 {bf16}")'
 fi
 
 log "setup completed"
-log "next: uv run --locked --no-sync python genai/3.0_diffusion_model/1.0_ddpm.py --smoke-test"
+log "next: upload data/celeba, then run a GAN script or the concurrency benchmark"
