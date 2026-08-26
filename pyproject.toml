@@ -21,6 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+celeba = [
+    "kagglehub==1.0.2",
+]
 examples = [
     "aiohttp==3.14.3",
     "albumentations==2.0.8",

@@ -14,6 +14,9 @@ and tool scripts, install the `examples` extra:
 uv sync --all-extras --locked
 ```
 
+For the smallest environment that can download CelebA directly from Kaggle,
+use `uv sync --no-dev --extra celeba --locked`.
+
 **Reading conventions**
 
 - `→` denotes a direct import dependency; `.` and `..` denote package-relative imports.
@@ -229,14 +232,16 @@ the registry's standard subdirectory layout below a caller-selected root;
 
 ### dl_utils/data/dataset_preparation.py
 
-Dependencies: csv, filecmp, json, os, shutil, concurrent.futures
+Dependencies: csv, filecmp, json, os, shutil, collections.abc (Callable), concurrent.futures
 (ThreadPoolExecutor, as_completed), pathlib (Path), PIL (Image),
 dl_utils.data.images (flatten_to_rgb), and optional kagglehub inside
 `download_kaggle_dataset`.
-Public entries: download_kaggle_dataset, prepare_celeba_cyclegan_splits,
-resize_image, build_image_folder_cache, load_corrections,
+Public entries: celeba_dataset_is_ready, download_kaggle_dataset,
+prepare_celeba_cyclegan_splits, resize_image, build_image_folder_cache, load_corrections,
 ensure_glasses_classification, validate_glasses_classification,
 apply_glasses_label_corrections.
+`download_kaggle_dataset` accepts an optional readiness callback so an
+incomplete existing directory is retried and rejected if it remains invalid.
 
 ### dl_utils/data/images.py
 

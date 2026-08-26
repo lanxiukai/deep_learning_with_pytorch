@@ -322,6 +322,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+celeba = [
+    { name = "kagglehub" },
+]
 examples = [
     { name = "aiohttp" },
     { name = "albumentations" },
@@ -349,6 +352,7 @@ requires-dist = [
     { name = "einops", specifier = "==0.8.2" },
     { name = "imageio", specifier = "==2.37.4" },
     { name = "ipython", specifier = "==9.16.0" },
+    { name = "kagglehub", marker = "extra == 'celeba'", specifier = "==1.0.2" },
     { name = "kagglehub", marker = "extra == 'examples'", specifier = "==1.0.2" },
     { name = "matplotlib", specifier = "==3.11.1" },
     { name = "matplotlib-inline", specifier = "==0.2.2" },
@@ -361,7 +365,7 @@ requires-dist = [
     { name = "torchvision", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "tqdm", specifier = "==4.70.0" },
 ]
-provides-extras = ["examples", "test"]
+provides-extras = ["celeba", "examples", "test"]
 
 [package.metadata.requires-dev]
 dev = [

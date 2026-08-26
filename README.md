@@ -56,8 +56,10 @@ numbers do not correspond to book chapter numbers.
 
 #### Cloud GPU
 
-- One-command environment setup after cloning:
-  `bash tool_scripts/setup_cloud_gpu.sh --profile core`
+- Shortest Vast.ai B200/B300 setup from WSL after configuring `ssh vast-dl`:
+  `bash tool_scripts/cloud_gan.sh provision`
+- Manual environment-only setup after cloning:
+  `bash tool_scripts/setup_cloud_gpu.sh --profile celeba`
 
 ---
 
@@ -122,16 +124,18 @@ and change the `torch` and `torchvision` version suffixes from `+cu130` to
 
 #### Dataset Preparation
 
-To download the lesson datasets:
+To install the lightweight Kaggle dependency and download only CelebA:
 
 ```bash
-python tool_scripts/download_dataset.py
+uv sync --no-dev --extra celeba --locked
+uv run --locked --no-sync python tool_scripts/download_dataset.py --dataset celeba
 ```
 
-Every destination in this script derives from its `DATA_DIR` constant. Change
-that single constant to download and prepare the complete dataset collection
-under a different root. Kaggle downloads also use that destination directly
-instead of populating the default user-level Kaggle cache first.
+Use `--dataset all` with the `examples` extra to prepare the complete lesson
+collection. Every destination derives from the script's `DATA_DIR` constant.
+Kaggle downloads use that destination directly instead of first populating the
+default user-level Kaggle cache. The CelebA command verifies the official
+metadata and all 202,599 aligned images before it succeeds.
 
 Some datasets are large, and Kaggle-hosted datasets may require authentication.
 For the glasses dataset, the command resumes incomplete G/NoG classification,

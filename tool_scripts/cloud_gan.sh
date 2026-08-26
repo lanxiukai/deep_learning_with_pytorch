@@ -19,7 +19,7 @@ Run the short validation, concurrency benchmark, detached training, monitoring,
 or result download steps for the B200/B300 GAN lessons.
 
 Actions:
-  provision [OPTIONS]            Prepare the host and upload CelebA from WSL
+  provision [OPTIONS]            Prepare the host and download CelebA there
   validate [BENCHMARK OPTIONS]   Run smoke checks, then the concurrency test
   smoke                         Run all three isolated short training checks
   benchmark [OPTIONS]           Run test_gan_concurrency.sh with OPTIONS
@@ -143,9 +143,6 @@ provision_cloud() {
     done
     validate_host "$host"
     command -v ssh >/dev/null 2>&1 || die "ssh is unavailable"
-    command -v rsync >/dev/null 2>&1 || die "rsync is unavailable"
-    [[ -f "$PROJECT_ROOT/data/celeba/list_eval_partition.csv" ]] || \
-        die "prepared CelebA data is missing under data/celeba"
 
     log "preparing $host:$REMOTE_PROJECT_ROOT"
     ssh "$host" bash -se <<'REMOTE'
@@ -186,16 +183,11 @@ else
     git -C "$project_root" pull --ff-only
 fi
 cd "$project_root"
-bash tool_scripts/setup_cloud_gpu.sh --profile core
-mkdir -p data/celeba
+bash tool_scripts/setup_cloud_gpu.sh --profile celeba
+uv run --locked --no-sync python tool_scripts/download_dataset.py \
+    --dataset celeba
 REMOTE
-
-    log "uploading CelebA"
-    rsync -aP -- \
-        "$PROJECT_ROOT/data/celeba/" \
-        "$host:$REMOTE_PROJECT_ROOT/data/celeba/"
-    ssh "$host" "test -f $REMOTE_PROJECT_ROOT/data/celeba/list_eval_partition.csv"
-    log "provisioning and CelebA upload completed"
+    log "provisioning and direct CelebA download completed"
 }
 
 run_smoke() {

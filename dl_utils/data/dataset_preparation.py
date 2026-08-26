@@ -5,6 +5,7 @@ import filecmp
 import json
 import os
 import shutil
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -12,8 +13,8 @@ from PIL import Image
 
 from dl_utils.data.images import flatten_to_rgb
 
-
 CORRECTIONS_PATH = Path(__file__).with_name("glasses_label_corrections.json")
+CELEBA_IMAGE_COUNT = 202_599
 EXPECTED_TRAINING_IMAGES = 4500
 CORRECTED_CLASS_COUNTS = {"G": 2543, "NoG": 1957}
 RAW_IMAGE_DIRS = (
@@ -25,22 +26,53 @@ IMAGE_EXTENSIONS = {
 }
 
 
+def celeba_dataset_is_ready(
+    celeba_dir: Path,
+    *,
+    expected_images: int = CELEBA_IMAGE_COUNT,
+) -> bool:
+    """Return whether the official CelebA metadata and images are complete."""
+    celeba_dir = Path(celeba_dir)
+    required_files = (
+        celeba_dir / "list_attr_celeba.csv",
+        celeba_dir / "list_eval_partition.csv",
+    )
+    image_dir_candidates = (
+        celeba_dir / "img_align_celeba" / "img_align_celeba",
+        celeba_dir / "img_align_celeba",
+    )
+    image_dir = next(
+        (path for path in image_dir_candidates if path.is_dir()),
+        None,
+    )
+    if image_dir is None or not all(path.is_file() for path in required_files):
+        return False
+    return sum(1 for path in image_dir.glob("*.jpg") if path.is_file()) == (
+        expected_images
+    )
+
+
 def download_kaggle_dataset(
     owner_dataset: str,
     destination: Path,
+    *,
+    is_ready: Callable[[Path], bool] | None = None,
 ) -> bool:
-    """Download a Kaggle dataset unless its destination is already populated."""
+    """Download a Kaggle dataset unless its destination is already ready."""
     destination = Path(destination)
-    if destination.is_dir() and any(destination.iterdir()):
+    populated = destination.is_dir() and any(destination.iterdir())
+    if populated and (is_ready is None or is_ready(destination)):
         print(f"  Already exists: {destination}")
         return True
+    if populated:
+        print(f"  Existing download is incomplete; retrying: {destination}")
 
     try:
         import kagglehub
     except ImportError:
         print(
             "  SKIP: kagglehub not installed. "
-            "Install via: pip install kagglehub"
+            "Install via: uv sync --no-dev --extra celeba"
         )
         return False
 
@@ -51,6 +83,10 @@ def download_kaggle_dataset(
     if not destination.is_dir() or not any(destination.iterdir()):
         raise RuntimeError(
             f"Kaggle download produced no files under {destination}"
+        )
+    if is_ready is not None and not is_ready(destination):
+        raise RuntimeError(
+            f"Kaggle download is incomplete under {destination}"
         )
     print(f"  Downloaded to: {destination}")
     return True

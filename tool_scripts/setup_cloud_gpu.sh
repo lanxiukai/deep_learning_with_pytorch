@@ -20,15 +20,16 @@ The script is idempotent and does not install NVIDIA drivers, CUDA Toolkit,
 Codex, datasets, or editor extensions.
 
 Options:
-  --profile PROFILE          core (default), examples, or full
+  --profile PROFILE          core (default), celeba, examples, or full
   --state-dir PATH           Persistent uv/Python cache directory
-  --skip-system-packages     Do not install missing curl/git/tmux/rsync
+  --skip-system-packages     Do not install missing curl/git/tmux
   --skip-gpu-check           Allow setup without a visible compatible GPU
   --dry-run                  Validate inputs and print the planned actions
   -h, --help                 Show this help
 
 Profiles:
   core       Base dependencies, including PyTorch and torchvision
+  celeba     Core plus kagglehub, without development tools
   examples   Core plus the optional examples dependencies
   full       Every optional dependency, including examples and tests
 EOF
@@ -78,8 +79,8 @@ while (($# > 0)); do
 done
 
 case "$profile" in
-    core|examples|full) ;;
-    *) die "profile must be one of: core, examples, full" ;;
+    core|celeba|examples|full) ;;
+    *) die "profile must be one of: core, celeba, examples, full" ;;
 esac
 
 case "$state_dir" in
@@ -111,7 +112,7 @@ else
 fi
 
 missing_packages=()
-for command_package in curl:curl git:git tmux:tmux rsync:rsync; do
+for command_package in curl:curl git:git tmux:tmux; do
     command_name="${command_package%%:*}"
     package_name="${command_package##*:}"
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -179,6 +180,7 @@ uv python install "$python_version"
 sync_args=(sync --locked)
 case "$profile" in
     core) ;;
+    celeba) sync_args+=(--no-dev --extra celeba) ;;
     examples) sync_args+=(--extra examples) ;;
     full) sync_args+=(--all-extras) ;;
 esac
@@ -193,4 +195,4 @@ if [[ "$skip_gpu_check" == false ]]; then
 fi
 
 log "setup completed"
-log "next: upload data/celeba, then run 'bash tool_scripts/cloud_gan.sh smoke'"
+log "next: prepare data/celeba, then run 'bash tool_scripts/cloud_gan.sh smoke'"
