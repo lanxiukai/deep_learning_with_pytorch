@@ -285,6 +285,7 @@ printf 'elapsed_seconds\texit_code\n%s\t%s\n' \
     printf 'r1_every_batches=16\n'
     printf 'timed_r1_steps=%s\n' "$r1_steps"
     printf 'process_elapsed_seconds=%s\n' "$elapsed_seconds"
+    grep -E '^(metrics_finite|nonfinite_metrics)=' "$log_file"
     printf '\n'
     cat "$result_file"
 } | tee "$output_dir/summary.txt"

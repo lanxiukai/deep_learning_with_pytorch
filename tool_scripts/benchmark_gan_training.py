@@ -82,6 +82,20 @@ def non_negative_int(value: str) -> int:
     return parsed
 
 
+def validate_metrics(
+    metrics: dict[str, float],
+    *,
+    tolerate_nonfinite: bool,
+) -> tuple[str, ...]:
+    """Return non-finite metric names or reject them for updating runs."""
+    nonfinite = tuple(
+        name for name, value in metrics.items() if not math.isfinite(value)
+    )
+    if nonfinite and not tolerate_nonfinite:
+        raise RuntimeError(f"benchmark produced non-finite metrics: {metrics}")
+    return nonfinite
+
+
 def build_state(args: argparse.Namespace) -> BenchmarkState:
     """Build the real lesson models, optimizers, BF16 runtime, and data stream."""
     lesson = runpy.run_path(str(LESSON_DIR / LESSON_FILES[args.model]))
@@ -204,8 +218,16 @@ def train_batches(
         )
     if state.global_step != starting_step + num_batches:
         raise RuntimeError("benchmark completed an unexpected number of steps.")
-    if not all(math.isfinite(value) for value in metrics.values()):
-        raise RuntimeError(f"benchmark produced non-finite metrics: {metrics}")
+    nonfinite = validate_metrics(
+        metrics,
+        tolerate_nonfinite=isinstance(state.run.precision, BackwardOnlyPrecision),
+    )
+    if nonfinite:
+        names = ",".join(nonfinite)
+        print(
+            "warning: fixed-parameter benchmark observed non-finite metrics "
+            f"({names}); throughput remains valid"
+        )
     return metrics
 
 
@@ -278,12 +300,15 @@ def main(args: argparse.Namespace) -> None:
     write_result(args.result_file, state, args, elapsed_seconds)
 
     metric_summary = " ".join(f"{name}={value:.6g}" for name, value in metrics.items())
+    nonfinite = validate_metrics(metrics, tolerate_nonfinite=True)
     print(
         f"timed_batches={args.batches} "
         f"train_seconds={elapsed_seconds:.3f} "
         f"images_per_second={state.batch_size * args.batches / elapsed_seconds:.3f}"
     )
     print(f"metrics {metric_summary}")
+    print(f"metrics_finite={'false' if nonfinite else 'true'}")
+    print(f"nonfinite_metrics={','.join(nonfinite) if nonfinite else 'none'}")
 
 
 def parse_args() -> argparse.Namespace:
