@@ -228,7 +228,7 @@ run_smoke() {
             stylegan)
                 command+=(--phase-kimg 1 --num-workers 0 --data-pipeline cuda)
                 if [[ "$rtx_blackwell" == true ]]; then
-                    command+=(--d-reg-every 2 --reg-batch-shrink 64)
+                    command+=(--d-reg-every 1 --reg-batch-shrink 64)
                 fi
                 ;;
             stylegan2)
