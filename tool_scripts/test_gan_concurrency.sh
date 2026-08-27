@@ -9,9 +9,9 @@ models_csv="progan,stylegan,stylegan2"
 timed_batches=16
 warmup_batches=1
 batch_scale=1
-num_workers=4
+num_workers=0
 prefetch_factor=2
-data_pipeline="auto"
+data_pipeline="cuda"
 gpu_index=0
 enable_mps=false
 output_dir=""
@@ -26,8 +26,9 @@ usage() {
 Usage: bash tool_scripts/test_gan_concurrency.sh [options]
 
 Compare sequential and concurrent execution of two or three BF16 GAN lessons
-on one NVIDIA B200 or B300. Each worker skips progressive growth and runs a
-short, real 128x128 training burst with lazy regularization and EMA updates.
+on one NVIDIA B200, B300, RTX 5080, or RTX 5090. Each worker skips progressive
+growth and runs a short, real 128x128 training burst with lazy regularization
+and EMA updates.
 Logs, timings, and GPU samples are isolated under
 output/concurrency-benchmark/ by default.
 
@@ -37,9 +38,9 @@ Options:
   --batches N                Timed 128x128 batches per worker (default: 16)
   --warmup-batches N         Untimed warm-up batches per worker (default: 1)
   --batch-scale N            Multiply each lesson's 128x128 batch (default: 1)
-  --num-workers N            DataLoader workers per process (default: 4)
+  --num-workers N            DataLoader workers per process (default: 0)
   --prefetch-factor N        DataLoader prefetch factor (default: 2)
-  --data-pipeline PIPELINE   auto (default), cuda, or cpu
+  --data-pipeline PIPELINE   cuda (default), auto, or cpu
   --gpu-index N              GPU index for a non-MPS run (default: 0)
   --mps                      Start a private NVIDIA MPS daemon for the test
   --output-dir PATH          New benchmark directory; must not already exist
@@ -68,6 +69,14 @@ die() {
 
 is_positive_integer() {
     [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+is_supported_gpu_name() {
+    local gpu_name_upper="${1^^}"
+    case "$gpu_name_upper" in
+        *B200*|*B300*|*RTX*5080*|*RTX*5090*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 cleanup() {
@@ -197,9 +206,8 @@ command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
 gpu_name="$(nvidia-smi -i "$gpu_index" --query-gpu=name --format=csv,noheader)" || \
     die "cannot query GPU $gpu_index"
 gpu_name="${gpu_name//$'\n'/ }"
-gpu_name_upper="${gpu_name^^}"
-if [[ "$gpu_name_upper" != *B200* && "$gpu_name_upper" != *B300* ]]; then
-    die "GPU $gpu_index is '$gpu_name'; this benchmark is limited to B200/B300"
+if ! is_supported_gpu_name "$gpu_name"; then
+    die "GPU $gpu_index is '$gpu_name'; expected B200, B300, RTX 5080, or RTX 5090"
 fi
 
 cd "$PROJECT_ROOT"

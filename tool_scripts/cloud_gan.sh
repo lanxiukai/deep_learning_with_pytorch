@@ -16,7 +16,7 @@ usage() {
 Usage: bash tool_scripts/cloud_gan.sh ACTION [options]
 
 Run the short validation, concurrency benchmark, detached training, monitoring,
-or result download steps for the B200/B300 GAN lessons.
+or result download steps on B200, B300, RTX 5080, or RTX 5090.
 
 Actions:
   provision [OPTIONS]            Prepare the host and download CelebA there
@@ -34,8 +34,8 @@ Train options:
   --models LIST                 Comma-separated progan, stylegan, stylegan2
   --mps                         Start and use a persistent MPS daemon
   --resume                      Resume every selected model from latest.pth
-  --num-workers N               DataLoader workers per process (default: 4)
-  --data-pipeline PIPELINE      auto (default), cuda, or cpu
+  --num-workers N               DataLoader workers per process (default: 0)
+  --data-pipeline PIPELINE      cuda (default), auto, or cpu
 
 Download options:
   --host HOST                   SSH config host (default: vast-dl)
@@ -83,6 +83,14 @@ validate_model() {
     esac
 }
 
+is_supported_gpu_name() {
+    local gpu_name_upper="${1^^}"
+    case "$gpu_name_upper" in
+        *B200*|*B300*|*RTX*5080*|*RTX*5090*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 parse_models() {
     local models_csv="$1"
     local model existing
@@ -109,16 +117,15 @@ lesson_path() {
 }
 
 cloud_preflight() {
-    local gpu_name gpu_name_upper
+    local gpu_name
     command -v uv >/dev/null 2>&1 || die "uv is unavailable; run setup_cloud_gpu.sh"
     command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
     [[ -f "$PROJECT_ROOT/data/celeba/list_eval_partition.csv" ]] || \
         die "prepared CelebA data is missing under data/celeba"
     gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)" || \
         die "cannot query the GPU"
-    gpu_name_upper="${gpu_name^^}"
-    if [[ "$gpu_name_upper" != *B200* && "$gpu_name_upper" != *B300* ]]; then
-        die "GPU is '$gpu_name'; cloud GAN actions require a B200 or B300"
+    if ! is_supported_gpu_name "$gpu_name"; then
+        die "GPU is '$gpu_name'; expected B200, B300, RTX 5080, or RTX 5090"
     fi
     cd "$PROJECT_ROOT"
     uv run --locked --no-sync python -c \
@@ -199,8 +206,12 @@ run_smoke() {
         script="$(lesson_path "$model")"
         command=(uv run --locked --no-sync python -u "$script")
         case "$model" in
-            progan|stylegan) command+=(--phase-kimg 1 --num-workers 4) ;;
-            stylegan2) command+=(--total-kimg 10 --num-workers 4) ;;
+            progan|stylegan)
+                command+=(--phase-kimg 1 --num-workers 0 --data-pipeline cuda)
+                ;;
+            stylegan2)
+                command+=(--total-kimg 10 --num-workers 0 --data-pipeline cuda)
+                ;;
         esac
         log "smoke: starting $model"
         DL_OUTPUT_ROOT="$PROJECT_ROOT/output/smoke" "${command[@]}"
@@ -283,8 +294,8 @@ run_train() {
     local models_csv=""
     local use_mps=false
     local resume=false
-    local num_workers=4
-    local data_pipeline="auto"
+    local num_workers=0
+    local data_pipeline="cuda"
     local model session checkpoint worker_command
     while (($# > 0)); do
         case "$1" in
