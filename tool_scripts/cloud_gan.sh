@@ -10,6 +10,7 @@ readonly MPS_ROOT="/tmp/dl-gan-mps"
 readonly REMOTE_PROJECT_ROOT="/workspace/deep-learning-with-pytorch"
 
 selected_models=()
+CLOUD_GPU_NAME=""
 
 usage() {
     cat <<'EOF'
@@ -91,6 +92,14 @@ is_supported_gpu_name() {
     esac
 }
 
+is_rtx_blackwell_gpu_name() {
+    local gpu_name_upper="${1^^}"
+    case "$gpu_name_upper" in
+        *RTX*5080*|*RTX*5090*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 parse_models() {
     local models_csv="$1"
     local model existing
@@ -117,15 +126,14 @@ lesson_path() {
 }
 
 cloud_preflight() {
-    local gpu_name
     command -v uv >/dev/null 2>&1 || die "uv is unavailable; run setup_cloud_gpu.sh"
     command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
     [[ -f "$PROJECT_ROOT/data/celeba/list_eval_partition.csv" ]] || \
         die "prepared CelebA data is missing under data/celeba"
-    gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)" || \
+    CLOUD_GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)" || \
         die "cannot query the GPU"
-    if ! is_supported_gpu_name "$gpu_name"; then
-        die "GPU is '$gpu_name'; expected B200, B300, RTX 5080, or RTX 5090"
+    if ! is_supported_gpu_name "$CLOUD_GPU_NAME"; then
+        die "GPU is '$CLOUD_GPU_NAME'; expected B200, B300, RTX 5080, or RTX 5090"
     fi
     cd "$PROJECT_ROOT"
     uv run --locked --no-sync python -c \
@@ -200,17 +208,34 @@ REMOTE
 run_smoke() {
     local model script
     local command=()
+    local rtx_blackwell=false
     require_no_args smoke "$@"
     cloud_preflight
+    if is_rtx_blackwell_gpu_name "$CLOUD_GPU_NAME"; then
+        rtx_blackwell=true
+        log "smoke: using the RTX Blackwell regularization profile"
+    fi
     for model in progan stylegan stylegan2; do
         script="$(lesson_path "$model")"
         command=(uv run --locked --no-sync python -u "$script")
         case "$model" in
-            progan|stylegan)
+            progan)
                 command+=(--phase-kimg 1 --num-workers 0 --data-pipeline cuda)
+                if [[ "$rtx_blackwell" == true ]]; then
+                    command+=(--d-reg-every 2 --reg-batch-shrink 8)
+                fi
+                ;;
+            stylegan)
+                command+=(--phase-kimg 1 --num-workers 0 --data-pipeline cuda)
+                if [[ "$rtx_blackwell" == true ]]; then
+                    command+=(--d-reg-every 2 --reg-batch-shrink 64)
+                fi
                 ;;
             stylegan2)
-                command+=(--total-kimg 10 --num-workers 0 --data-pipeline cuda)
+                command+=(--total-kimg 1 --num-workers 0 --data-pipeline cuda)
+                if [[ "$rtx_blackwell" == true ]]; then
+                    command+=(--r1-batch-shrink 64 --path-batch-shrink 64)
+                fi
                 ;;
         esac
         log "smoke: starting $model"
