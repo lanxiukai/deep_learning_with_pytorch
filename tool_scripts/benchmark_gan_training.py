@@ -45,6 +45,25 @@ class BenchmarkState:
     optimizer_d: Optimizer
     batch_size: int
     path_mean: torch.Tensor
+    global_step: int
+
+
+@dataclass(frozen=True)
+class BackwardOnlyPrecision:
+    """Run the real BF16 backward path without changing model parameters."""
+
+    base: Any
+
+    @property
+    def name(self) -> str:
+        return self.base.name
+
+    def autocast(self):
+        return self.base.autocast()
+
+    def backward_step(self, loss, optimizer) -> None:
+        del optimizer
+        loss.backward()
 
 
 def positive_int(value: str) -> int:
@@ -74,12 +93,18 @@ def build_state(args: argparse.Namespace) -> BenchmarkState:
         prefetch_factor=args.prefetch_factor,
         project_root=PROJECT_ROOT,
     )
+    if args.backward_only:
+        run.precision = BackwardOnlyPrecision(run.precision)
     base_batch_size = (
         int(lesson["BATCH_SIZES"][RESOLUTION])
         if args.model in {"progan", "stylegan"}
         else int(lesson["BATCH_SIZE"])
     )
-    batch_size = base_batch_size * args.batch_scale
+    batch_size = (
+        args.batch_size
+        if args.batch_size is not None
+        else base_batch_size * args.batch_scale
+    )
     if run.dataset_size < batch_size:
         raise ValueError("CelebA train split is smaller than the benchmark batch.")
 
@@ -126,6 +151,7 @@ def build_state(args: argparse.Namespace) -> BenchmarkState:
         optimizer_d=optimizer_d,
         batch_size=batch_size,
         path_mean=torch.zeros((), device=run.device),
+        global_step=0,
     )
 
 
@@ -134,6 +160,7 @@ def train_batches(
     num_batches: int,
 ) -> dict[str, float]:
     """Run one representative regularization cycle at 128x128."""
+    starting_step = state.global_step
     if state.model_name in {"progan", "stylegan"}:
         phase = ProgressivePhase(
             resolution=RESOLUTION,
@@ -141,7 +168,7 @@ def train_batches(
             batch_size=state.batch_size,
             num_batches=num_batches,
         )
-        metrics, completed_steps = state.lesson["train_phase"](
+        metrics, state.global_step = state.lesson["train_phase"](
             state.generator,
             state.discriminator,
             state.run.data,
@@ -150,7 +177,7 @@ def train_batches(
             state.averaged_generator,
             phase,
             state.run.precision,
-            0,
+            state.global_step,
             state.lesson["D_REG_EVERY"],
             state.lesson["REG_BATCH_SHRINK"],
         )
@@ -160,7 +187,7 @@ def train_batches(
             num_images=num_batches * state.batch_size,
             final_batch_size=state.batch_size,
         )
-        metrics, state.path_mean, completed_steps = state.lesson["train_epoch"](
+        metrics, state.path_mean, state.global_step = state.lesson["train_epoch"](
             state.generator,
             state.discriminator,
             state.run.data,
@@ -168,14 +195,14 @@ def train_batches(
             state.optimizer_d,
             state.averaged_generator,
             state.path_mean,
-            0,
+            state.global_step,
             epoch,
             state.batch_size,
             state.run.precision,
             state.lesson["R1_BATCH_SHRINK"],
             state.lesson["PATH_BATCH_SHRINK"],
         )
-    if completed_steps != num_batches:
+    if state.global_step != starting_step + num_batches:
         raise RuntimeError("benchmark completed an unexpected number of steps.")
     if not all(math.isfinite(value) for value in metrics.values()):
         raise RuntimeError(f"benchmark produced non-finite metrics: {metrics}")
@@ -268,7 +295,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("model", choices=tuple(LESSON_FILES))
     parser.add_argument("--batches", type=positive_int, default=16)
     parser.add_argument("--warmup-batches", type=non_negative_int, default=1)
-    parser.add_argument("--batch-scale", type=positive_int, default=1)
+    parser.add_argument("--backward-only", action="store_true")
+    batch_group = parser.add_mutually_exclusive_group()
+    batch_group.add_argument("--batch-scale", type=positive_int, default=1)
+    batch_group.add_argument("--batch-size", type=positive_int)
     parser.add_argument("--num-workers", type=non_negative_int, default=4)
     parser.add_argument("--prefetch-factor", type=positive_int, default=2)
     parser.add_argument(
