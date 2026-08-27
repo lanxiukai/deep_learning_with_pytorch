@@ -50,6 +50,7 @@ from dl_utils.gan.training import (
     resolve_fixed_resolution_gan_options,
     save_gan_samples,
     start_gan_checkpoint,
+    validate_finite_gan_state,
 )
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.training.accelerator import make_fused_adam
@@ -250,7 +251,7 @@ def train_epoch(
         )
         global_step += 1
 
-    return metrics.compute(), path_mean, global_step
+    return metrics.compute_finite(), path_mean, global_step
 
 
 def main(args):
@@ -378,6 +379,11 @@ def main(args):
             run.precision,
             options.r1_batch_shrink,
             options.path_batch_shrink,
+        )
+        validate_finite_gan_state(
+            models,
+            optimizers,
+            extra_tensors={"path_mean": path_mean},
         )
         seen_images += epoch.num_images
         seen_kimg = seen_images / 1_000

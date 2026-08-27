@@ -19,12 +19,14 @@ usage() {
 Usage: bash tool_scripts/cloud_gan.sh ACTION [options]
 
 Run the short validation, concurrency benchmark, detached training, monitoring,
-or result download steps on B200, B300, RTX 5080, or RTX 5090.
+precision comparison, or result download steps on H100, B200, B300, RTX 5080,
+or RTX 5090.
 
 Actions:
   provision [OPTIONS]            Prepare the host and download CelebA there
   validate [BENCHMARK OPTIONS]   Run smoke checks, then the concurrency test
   smoke                         Run all three isolated short training checks
+  precision [OPTIONS]           Compare FP32, TF32, and BF16 on one H100
   benchmark [OPTIONS]           Run test_gan_concurrency.sh with OPTIONS
   train --models LIST [OPTIONS] Start selected full runs in dedicated tmux sessions
   status                        Show training sessions, GPU state, and recent logs
@@ -51,6 +53,7 @@ Examples:
   bash tool_scripts/cloud_gan.sh provision
   bash tool_scripts/cloud_gan.sh validate --mps
   bash tool_scripts/cloud_gan.sh smoke
+  bash tool_scripts/cloud_gan.sh precision
   bash tool_scripts/cloud_gan.sh benchmark --mps
   bash tool_scripts/cloud_gan.sh train --models progan,stylegan --mps
   bash tool_scripts/cloud_gan.sh status
@@ -90,7 +93,7 @@ validate_model() {
 is_supported_gpu_name() {
     local gpu_name_upper="${1^^}"
     case "$gpu_name_upper" in
-        *B200*|*B300*|*RTX*5080*|*RTX*5090*) return 0 ;;
+        *H100*|*B200*|*B300*|*RTX*5080*|*RTX*5090*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -136,7 +139,7 @@ cloud_preflight() {
     CLOUD_GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)" || \
         die "cannot query the GPU"
     if ! is_supported_gpu_name "$CLOUD_GPU_NAME"; then
-        die "GPU is '$CLOUD_GPU_NAME'; expected B200, B300, RTX 5080, or RTX 5090"
+        die "GPU is '$CLOUD_GPU_NAME'; expected H100, B200, B300, RTX 5080, or RTX 5090"
     fi
     cd "$PROJECT_ROOT"
     uv run --locked --no-sync python -c \
@@ -254,6 +257,11 @@ run_validation() {
     run_smoke
     log "starting the fixed 128x128 concurrency benchmark"
     bash "$SCRIPT_DIR/test_gan_concurrency.sh" "$@"
+}
+
+run_precision_benchmark() {
+    cloud_preflight
+    exec bash "$SCRIPT_DIR/benchmark_h100_precision.sh" "$@"
 }
 
 start_mps() {
@@ -495,6 +503,7 @@ case "$action" in
     provision) provision_cloud "$@" ;;
     validate) run_validation "$@" ;;
     smoke) run_smoke "$@" ;;
+    precision) run_precision_benchmark "$@" ;;
     benchmark) exec bash "$SCRIPT_DIR/test_gan_concurrency.sh" "$@" ;;
     train) run_train "$@" ;;
     status) show_status "$@" ;;

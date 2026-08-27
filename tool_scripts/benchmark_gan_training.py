@@ -6,9 +6,10 @@ import argparse
 import math
 import runpy
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from torch import nn
@@ -18,8 +19,13 @@ from dl_utils.gan.progan import ProGANDiscriminator, ProGANGenerator
 from dl_utils.gan.stylegan import StyleGANDiscriminator, StyleGANGenerator
 from dl_utils.gan.stylegan2 import StyleDiscriminator, StyleGenerator
 from dl_utils.gan.stylegan_common import ProgressivePhase
-from dl_utils.gan.training import GANRun, initialize_gan_models, prepare_gan_run
-from dl_utils.training.accelerator import make_fused_adam
+from dl_utils.gan.training import (
+    GANRun,
+    initialize_gan_models,
+    prepare_gan_run,
+    validate_finite_gan_state,
+)
+from dl_utils.training.accelerator import BF16Precision, make_fused_adam
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LESSON_DIR = PROJECT_ROOT / "genai" / "1.0_generative_adversarial_network"
@@ -31,6 +37,29 @@ LESSON_FILES = {
 RESOLUTION = 128
 
 
+@dataclass(frozen=True)
+class FP32BenchmarkPrecision:
+    """Run a benchmark with FP32 tensors and optional TF32 math."""
+
+    device: torch.device
+    mode: Literal["fp32", "tf32"]
+
+    @property
+    def name(self) -> str:
+        return self.mode
+
+    def autocast(self):
+        return nullcontext()
+
+    def backward_step(self, loss: torch.Tensor, optimizer: Optimizer) -> None:
+        loss.backward()
+        torch.cuda.synchronize(self.device)
+        optimizer.step()
+
+
+type BenchmarkPrecision = BF16Precision | FP32BenchmarkPrecision
+
+
 @dataclass
 class BenchmarkState:
     """Objects needed to run repeated training bursts for one lesson."""
@@ -38,6 +67,7 @@ class BenchmarkState:
     model_name: str
     lesson: dict[str, Any]
     run: GANRun
+    precision: BenchmarkPrecision
     generator: nn.Module
     discriminator: nn.Module
     averaged_generator: nn.Module
@@ -46,24 +76,6 @@ class BenchmarkState:
     batch_size: int
     path_mean: torch.Tensor
     global_step: int
-
-
-@dataclass(frozen=True)
-class BackwardOnlyPrecision:
-    """Run the real BF16 backward path without changing model parameters."""
-
-    base: Any
-
-    @property
-    def name(self) -> str:
-        return self.base.name
-
-    def autocast(self):
-        return self.base.autocast()
-
-    def backward_step(self, loss, optimizer) -> None:
-        del optimizer
-        loss.backward()
 
 
 def positive_int(value: str) -> int:
@@ -82,22 +94,31 @@ def non_negative_int(value: str) -> int:
     return parsed
 
 
-def validate_metrics(
-    metrics: dict[str, float],
-    *,
-    tolerate_nonfinite: bool,
-) -> tuple[str, ...]:
-    """Return non-finite metric names or reject them for updating runs."""
+def validate_metrics(metrics: dict[str, float]) -> None:
+    """Reject a benchmark trajectory containing non-finite metrics."""
     nonfinite = tuple(
         name for name, value in metrics.items() if not math.isfinite(value)
     )
-    if nonfinite and not tolerate_nonfinite:
+    if nonfinite:
         raise RuntimeError(f"benchmark produced non-finite metrics: {metrics}")
-    return nonfinite
+
+
+def resolve_benchmark_precision(
+    run: GANRun,
+    mode: Literal["bf16", "tf32", "fp32"],
+) -> BenchmarkPrecision:
+    """Select BF16 autocast, TF32-enabled FP32, or strict FP32."""
+    if mode == "bf16":
+        return run.precision
+    use_tf32 = mode == "tf32"
+    torch.backends.cuda.matmul.allow_tf32 = use_tf32
+    torch.backends.cudnn.allow_tf32 = use_tf32
+    torch.set_float32_matmul_precision("high" if use_tf32 else "highest")
+    return FP32BenchmarkPrecision(run.device, mode)
 
 
 def build_state(args: argparse.Namespace) -> BenchmarkState:
-    """Build the real lesson models, optimizers, BF16 runtime, and data stream."""
+    """Build the real lesson models, optimizers, precision, and data stream."""
     lesson = runpy.run_path(str(LESSON_DIR / LESSON_FILES[args.model]))
     run = prepare_gan_run(
         f"benchmark-{args.model}",
@@ -107,8 +128,7 @@ def build_state(args: argparse.Namespace) -> BenchmarkState:
         prefetch_factor=args.prefetch_factor,
         project_root=PROJECT_ROOT,
     )
-    if args.backward_only:
-        run.precision = BackwardOnlyPrecision(run.precision)
+    precision = resolve_benchmark_precision(run, args.precision)
     base_batch_size = (
         int(lesson["BATCH_SIZES"][RESOLUTION])
         if args.model in {"progan", "stylegan"}
@@ -158,6 +178,7 @@ def build_state(args: argparse.Namespace) -> BenchmarkState:
         model_name=args.model,
         lesson=lesson,
         run=run,
+        precision=precision,
         generator=generator,
         discriminator=discriminator,
         averaged_generator=averaged_generator,
@@ -190,7 +211,7 @@ def train_batches(
             state.optimizer_d,
             state.averaged_generator,
             phase,
-            state.run.precision,
+            state.precision,
             state.global_step,
             state.lesson["D_REG_EVERY"],
             state.lesson["REG_BATCH_SHRINK"],
@@ -212,22 +233,13 @@ def train_batches(
             state.global_step,
             epoch,
             state.batch_size,
-            state.run.precision,
+            state.precision,
             state.lesson["R1_BATCH_SHRINK"],
             state.lesson["PATH_BATCH_SHRINK"],
         )
     if state.global_step != starting_step + num_batches:
         raise RuntimeError("benchmark completed an unexpected number of steps.")
-    nonfinite = validate_metrics(
-        metrics,
-        tolerate_nonfinite=isinstance(state.run.precision, BackwardOnlyPrecision),
-    )
-    if nonfinite:
-        names = ",".join(nonfinite)
-        print(
-            "warning: fixed-parameter benchmark observed non-finite metrics "
-            f"({names}); throughput remains valid"
-        )
+    validate_metrics(metrics)
     return metrics
 
 
@@ -261,7 +273,7 @@ def write_result(
         str(RESOLUTION),
         str(state.batch_size),
         state.run.pipeline,
-        state.run.precision.name,
+        state.precision.name,
         str(args.warmup_batches),
         str(args.batches),
         str(timed_images),
@@ -282,7 +294,7 @@ def main(args: argparse.Namespace) -> None:
     state = build_state(args)
     print(
         f"model={state.model_name} resolution={RESOLUTION} "
-        f"batch={state.batch_size} precision={state.run.precision.name} "
+        f"batch={state.batch_size} precision={state.precision.name} "
         f"pipeline={state.run.pipeline}"
     )
     if args.warmup_batches:
@@ -297,30 +309,46 @@ def main(args: argparse.Namespace) -> None:
     elapsed_seconds = time.perf_counter() - start_time
     if elapsed_seconds <= 0:
         raise RuntimeError("benchmark timer returned a non-positive duration.")
+    validate_finite_gan_state(
+        {
+            "generator": state.generator,
+            "discriminator": state.discriminator,
+            "averaged_generator": state.averaged_generator,
+        },
+        {
+            "generator": state.optimizer_g,
+            "discriminator": state.optimizer_d,
+        },
+        extra_tensors={"path_mean": state.path_mean},
+    )
     write_result(args.result_file, state, args, elapsed_seconds)
 
     metric_summary = " ".join(f"{name}={value:.6g}" for name, value in metrics.items())
-    nonfinite = validate_metrics(metrics, tolerate_nonfinite=True)
+    validate_metrics(metrics)
     print(
         f"timed_batches={args.batches} "
         f"train_seconds={elapsed_seconds:.3f} "
         f"images_per_second={state.batch_size * args.batches / elapsed_seconds:.3f}"
     )
     print(f"metrics {metric_summary}")
-    print(f"metrics_finite={'false' if nonfinite else 'true'}")
-    print(f"nonfinite_metrics={','.join(nonfinite) if nonfinite else 'none'}")
+    print("metrics_finite=true")
+    print("nonfinite_metrics=none")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a short, full-training-load 128x128 BF16 benchmark for one GAN."
+            "Run a short, full-training-load 128x128 precision benchmark for one GAN."
         )
     )
     parser.add_argument("model", choices=tuple(LESSON_FILES))
+    parser.add_argument(
+        "--precision",
+        choices=("bf16", "tf32", "fp32"),
+        default="bf16",
+    )
     parser.add_argument("--batches", type=positive_int, default=16)
     parser.add_argument("--warmup-batches", type=non_negative_int, default=1)
-    parser.add_argument("--backward-only", action="store_true")
     batch_group = parser.add_mutually_exclusive_group()
     batch_group.add_argument("--batch-scale", type=positive_int, default=1)
     batch_group.add_argument("--batch-size", type=positive_int)

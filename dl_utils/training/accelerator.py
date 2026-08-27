@@ -25,8 +25,11 @@ class BF16Precision:
         )
 
     def backward_step(self, loss, optimizer) -> None:
-        """Backpropagate one loss and update one optimizer."""
+        """Finish one CUDA backward pass before updating its parameters."""
         loss.backward()
+        # PyTorch 2.13 + CUDA 13 needs an explicit completion boundary here for
+        # stable BF16 GAN updates that include higher-order regularization.
+        torch.cuda.synchronize(self.device)
         optimizer.step()
 
 
@@ -35,8 +38,10 @@ def configure_device(device: torch.device) -> None:
     if device.type != "cuda":
         return
     torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.enabled = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
     torch.set_float32_matmul_precision("high")
 
 

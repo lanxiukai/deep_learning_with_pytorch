@@ -26,9 +26,9 @@ usage() {
 Usage: bash tool_scripts/test_gan_concurrency.sh [options]
 
 Compare sequential and concurrent execution of two or three BF16 GAN lessons
-on one NVIDIA B200, B300, RTX 5080, or RTX 5090. Each worker skips progressive
-growth and runs a short, real 128x128 training burst with lazy regularization
-and EMA updates.
+on one NVIDIA H100, B200, B300, RTX 5080, or RTX 5090. Each worker skips
+progressive growth and runs a short, real 128x128 training burst with lazy
+regularization and EMA updates.
 Logs, timings, and GPU samples are isolated under
 output-vast-dl/concurrency-benchmark/ by default.
 
@@ -74,7 +74,7 @@ is_positive_integer() {
 is_supported_gpu_name() {
     local gpu_name_upper="${1^^}"
     case "$gpu_name_upper" in
-        *B200*|*B300*|*RTX*5080*|*RTX*5090*) return 0 ;;
+        *H100*|*B200*|*B300*|*RTX*5080*|*RTX*5090*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -207,7 +207,7 @@ gpu_name="$(nvidia-smi -i "$gpu_index" --query-gpu=name --format=csv,noheader)" 
     die "cannot query GPU $gpu_index"
 gpu_name="${gpu_name//$'\n'/ }"
 if ! is_supported_gpu_name "$gpu_name"; then
-    die "GPU $gpu_index is '$gpu_name'; expected B200, B300, RTX 5080, or RTX 5090"
+    die "GPU $gpu_index is '$gpu_name'; expected H100, B200, B300, RTX 5080, or RTX 5090"
 fi
 
 cd "$PROJECT_ROOT"

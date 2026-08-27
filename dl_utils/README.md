@@ -523,10 +523,12 @@ dl_utils.training.checkpoints (TrainingCheckpoint).
 Public entries (__all__): FixedResolutionGANOptions, GANRun,
 ProgressiveGANOptions, append_gan_metrics, initialize_gan_models,
 prepare_gan_run, resolve_fixed_resolution_gan_options, resolve_num_workers,
-resolve_progressive_gan_options, save_gan_samples, start_gan_checkpoint.
+resolve_progressive_gan_options, save_gan_samples, start_gan_checkpoint,
+validate_finite_gan_state.
 The module owns shared BF16 runtime selection, output paths, EMA setup, option
-validation, fixed-latent sample grids, and checkpoint state validation for the
-three 128x128 GAN lessons. Model-specific schedules, objectives,
+validation, fixed-latent sample grids, and phase-boundary finite-value
+validation for model, EMA, optimizer, auxiliary state, and rendered samples in
+the three 128x128 GAN lessons. Model-specific schedules, objectives,
 regularization, and update ordering remain visible in the lesson scripts.
 
 ### dl_utils/vae/__init__.py
@@ -657,8 +659,9 @@ Dependencies: __future__ (annotations), dataclasses, torch.
 Public entries (__all__): BF16Precision, configure_device, make_fused_adam,
 resolve_bf16_precision.
 The module requires CUDA BF16 for the optimized lessons and centralizes
-autocast, fused Adam, throughput-oriented backend tuning, and optimizer steps
-without introducing a second precision mode.
+autocast, fused Adam, throughput-oriented backend tuning, and the CUDA
+backward-to-optimizer synchronization required by the GAN lessons. It does not
+introduce a second precision mode.
 
 ### dl_utils/training/checkpoints.py
 
@@ -689,8 +692,15 @@ checkpoints, and final per-model weights without owning the training loop.
 
 ### dl_utils/training/metrics.py
 
-Dependencies: csv, math, os, collections.abc (Mapping, Sequence), os (PathLike), typing (TypeAlias), torch, torch.nn.
-Public entries: NumericScalar, MetricHistory, Accumulator, accuracy, evaluate_accuracy, evaluate_accuracy_gpu, evaluate_loss, as_list, has_any_finite, align_metrics_for_csv, align_and_drop_all_nan_rows, save_metrics_csv.
+Dependencies: csv, math, os, collections.abc (Mapping, Sequence), os
+(PathLike), torch, torch.nn.
+Public entries: NumericScalar, MetricHistory, MetricAccumulator, Accumulator,
+accuracy, evaluate_accuracy, evaluate_accuracy_gpu, evaluate_loss, as_list,
+has_any_finite, align_metrics_for_csv, align_and_drop_all_nan_rows,
+save_metrics_csv.
+`MetricAccumulator.compute_finite` reports a mean metric containing NaN or
+infinity without retaining per-batch tensors, so long GAN phases cannot
+silently save invalid checkpoints or blank sample grids.
 
 ### dl_utils/training/optimization.py
 

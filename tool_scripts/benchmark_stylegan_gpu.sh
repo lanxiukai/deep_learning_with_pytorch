@@ -11,6 +11,7 @@ batch_size=32
 num_workers=0
 prefetch_factor=2
 data_pipeline="cuda"
+precision="bf16"
 gpu_index=0
 output_dir=""
 monitor_pid=""
@@ -19,13 +20,14 @@ usage() {
     cat <<'EOF'
 Usage: bash tool_scripts/benchmark_stylegan_gpu.sh [options]
        bash tool_scripts/benchmark_stylegan_gpu.sh --compare BASELINE CANDIDATE
+       bash tool_scripts/benchmark_stylegan_gpu.sh --compare-precision BASELINE CANDIDATE
 
-Run a fixed-workload, single-GPU StyleGAN BF16 benchmark at the progressive
-model's maximum 128x128 resolution. The timed loop uses the lesson's real BF16
-discriminator/generator forward and backward paths, EMA, and full-FP32 lazy R1
-regularization every 16 batches. Parameters remain fixed so both GPUs follow a
-stable, comparable compute trajectory. The defaults are intended to take
-roughly one to two hours on an RTX 4070 Ti.
+Run a fixed-workload, single-GPU StyleGAN benchmark at the progressive model's
+maximum 128x128 resolution. The timed loop uses real discriminator/generator
+forward and backward paths, EMA, lazy R1 regularization every 16 batches, and
+fused Adam parameter updates. BF16 remains the default training precision.
+TF32 and strict FP32 are benchmark-only diagnostics. The full defaults are
+intended to take roughly one to two hours on an RTX 4070 Ti.
 
 Options:
   --batches N                Timed batches (default: 22528)
@@ -34,10 +36,13 @@ Options:
   --num-workers N            DataLoader workers (default: 0)
   --prefetch-factor N        DataLoader prefetch factor (default: 2)
   --data-pipeline PIPELINE   cuda (default), auto, or cpu
+  --precision PRECISION      bf16 (default), tf32, or strict fp32
   --gpu-index N              GPU index (default: 0)
   --output-dir PATH          New result directory; must not already exist
   --compare BASELINE CANDIDATE
                              Compare two training.tsv files from identical runs
+  --compare-precision BASELINE CANDIDATE
+                             Compare different precisions with identical loads
   -h, --help                 Show this help
 
 Run the same command on both GPUs. Pass the RTX 4070 Ti result first when
@@ -84,14 +89,16 @@ tsv_field() {
 }
 
 compare_results() {
-    local baseline="$1"
-    local candidate="$2"
+    local comparison_kind="$1"
+    local baseline="$2"
+    local candidate="$3"
     local field baseline_value candidate_value
+    local baseline_precision candidate_precision
     local baseline_rate candidate_rate speedup
     [[ -f "$baseline" ]] || die "baseline result is missing: $baseline"
     [[ -f "$candidate" ]] || die "candidate result is missing: $candidate"
 
-    for field in model resolution batch_size pipeline precision \
+    for field in model resolution batch_size pipeline \
         warmup_batches timed_batches timed_images; do
         baseline_value="$(tsv_field "$baseline" "$field")"
         candidate_value="$(tsv_field "$candidate" "$field")"
@@ -100,6 +107,18 @@ compare_results() {
         [[ "$baseline_value" == "$candidate_value" ]] || \
             die "$field differs: baseline=$baseline_value candidate=$candidate_value"
     done
+
+    baseline_precision="$(tsv_field "$baseline" precision)"
+    candidate_precision="$(tsv_field "$candidate" precision)"
+    [[ -n "$baseline_precision" && -n "$candidate_precision" ]] || \
+        die "precision is missing from one comparison result"
+    if [[ "$comparison_kind" == "hardware" ]]; then
+        [[ "$baseline_precision" == "$candidate_precision" ]] || \
+            die "precision differs: baseline=$baseline_precision candidate=$candidate_precision"
+    else
+        [[ "$baseline_precision" != "$candidate_precision" ]] || \
+            die "--compare-precision requires two different precisions"
+    fi
 
     baseline_rate="$(tsv_field "$baseline" images_per_second)"
     candidate_rate="$(tsv_field "$candidate" images_per_second)"
@@ -111,14 +130,20 @@ compare_results() {
 
     printf 'baseline=%s\n' "$baseline"
     printf 'candidate=%s\n' "$candidate"
+    printf 'baseline_precision=%s\n' "$baseline_precision"
+    printf 'candidate_precision=%s\n' "$candidate_precision"
     printf 'baseline_images_per_second=%s\n' "$baseline_rate"
     printf 'candidate_images_per_second=%s\n' "$candidate_rate"
     printf 'candidate_speedup=%sx\n' "$speedup"
 }
 
-if (($# > 0)) && [[ "$1" == "--compare" ]]; then
-    (($# == 3)) || die "--compare requires BASELINE and CANDIDATE"
-    compare_results "$2" "$3"
+if (($# > 0)) && [[ "$1" == "--compare" || "$1" == "--compare-precision" ]]; then
+    (($# == 3)) || die "$1 requires BASELINE and CANDIDATE"
+    if [[ "$1" == "--compare" ]]; then
+        compare_results hardware "$2" "$3"
+    else
+        compare_results precision "$2" "$3"
+    fi
     exit 0
 fi
 
@@ -154,6 +179,11 @@ while (($# > 0)); do
             data_pipeline="$2"
             shift 2
             ;;
+        --precision)
+            (($# >= 2)) || die "--precision requires a value"
+            precision="$2"
+            shift 2
+            ;;
         --gpu-index)
             (($# >= 2)) || die "--gpu-index requires a value"
             gpu_index="$2"
@@ -187,6 +217,10 @@ case "$data_pipeline" in
     auto|cuda|cpu) ;;
     *) die "--data-pipeline must be one of: auto, cuda, cpu" ;;
 esac
+case "$precision" in
+    bf16|tf32|fp32) ;;
+    *) die "--precision must be one of: bf16, tf32, fp32" ;;
+esac
 
 command -v uv >/dev/null 2>&1 || die "uv is unavailable"
 command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
@@ -210,8 +244,8 @@ memory_mib="${memory_mib//[[:space:]]/}"
 cd "$PROJECT_ROOT"
 runtime="$(CUDA_VISIBLE_DEVICES="$gpu_index" \
     uv run --locked --no-sync python -c \
-    'import torch; assert torch.cuda.is_available(), "CUDA unavailable"; assert torch.cuda.is_bf16_supported(), "BF16 unavailable"; print(f"torch={torch.__version__} cuda={torch.version.cuda} capability={torch.cuda.get_device_capability(0)[0]}.{torch.cuda.get_device_capability(0)[1]} bf16={torch.cuda.is_bf16_supported()}")')" || \
-    die "PyTorch BF16 preflight failed"
+    'import sys, torch; requested = sys.argv[1]; assert torch.cuda.is_available(), "CUDA unavailable"; assert requested != "bf16" or torch.cuda.is_bf16_supported(), "BF16 unavailable"; print(f"torch={torch.__version__} cuda={torch.version.cuda} capability={torch.cuda.get_device_capability(0)[0]}.{torch.cuda.get_device_capability(0)[1]} bf16={torch.cuda.is_bf16_supported()}")' \
+    "$precision")" || die "PyTorch precision preflight failed"
 
 if [[ -z "$output_dir" ]]; then
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -243,9 +277,9 @@ benchmark_command=(
     uv run --locked --no-sync python -u
     tool_scripts/benchmark_gan_training.py
     stylegan
+    --precision "$precision"
     --batches "$timed_batches"
     --warmup-batches "$warmup_batches"
-    --backward-only
     --batch-size "$batch_size"
     --num-workers "$num_workers"
     --prefetch-factor "$prefetch_factor"
@@ -255,8 +289,8 @@ benchmark_command=(
 
 log "GPU: $gpu_name (${memory_mib} MiB), driver $driver_version"
 log "runtime: $runtime"
-log "load: 128x128, batch=$batch_size, warmup=$warmup_batches, timed=$timed_batches"
-log "parameter updates are disabled for a repeatable training-compute trajectory"
+log "load: 128x128, batch=$batch_size, precision=$precision, warmup=$warmup_batches, timed=$timed_batches"
+log "parameter updates: fused Adam enabled"
 log "timed regularization: R1=$r1_steps"
 log "results: $output_dir"
 
@@ -281,7 +315,8 @@ printf 'elapsed_seconds\texit_code\n%s\t%s\n' \
     printf 'gpu_memory_mib=%s\n' "$memory_mib"
     printf 'driver=%s\n' "$driver_version"
     printf 'runtime=%s\n' "$runtime"
-    printf 'parameter_updates=false\n'
+    printf 'precision=%s\n' "$precision"
+    printf 'parameter_updates=true\n'
     printf 'r1_every_batches=16\n'
     printf 'timed_r1_steps=%s\n' "$r1_steps"
     printf 'process_elapsed_seconds=%s\n' "$elapsed_seconds"

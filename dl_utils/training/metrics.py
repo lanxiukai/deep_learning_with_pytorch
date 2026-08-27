@@ -5,14 +5,12 @@ import math
 import os
 from collections.abc import Mapping, Sequence
 from os import PathLike
-from typing import TypeAlias
 
 import torch
 from torch import nn
 
-
-NumericScalar: TypeAlias = int | float
-MetricHistory: TypeAlias = Mapping[str, Sequence[NumericScalar]]
+type NumericScalar = int | float
+type MetricHistory = Mapping[str, Sequence[NumericScalar]]
 
 
 class MetricAccumulator:
@@ -40,29 +38,41 @@ class MetricAccumulator:
             raise ValueError("metric values do not match configured names.")
         if any(value.ndim != 0 for value in values):
             raise ValueError("metric values must be scalar tensors.")
-        stacked_values = torch.stack(tuple(values)).detach().to(
-            self._accumulated_values
+        stacked_values = (
+            torch.stack(tuple(values)).detach().to(self._accumulated_values)
         )
         self._accumulated_values += stacked_values * num_examples
         self._accumulated_examples += num_examples
+
+    def compute_finite(self) -> dict[str, float]:
+        """Return means or identify a metric containing a non-finite value."""
+        if self._accumulated_examples == 0:
+            raise RuntimeError("cannot compute metrics before an update.")
+        means = self._accumulated_values / self._accumulated_examples
+        nonfinite_indices = (~torch.isfinite(means)).nonzero().flatten().tolist()
+        if nonfinite_indices:
+            metric_index = nonfinite_indices[0]
+            name = self.names[metric_index]
+            value = means[metric_index].item()
+            raise FloatingPointError(f"non-finite mean metric {name}={value}")
+        return dict(zip(self.names, means.tolist(), strict=True))
 
     def compute(self) -> dict[str, float]:
         """Return weighted means for all configured metrics."""
         if self._accumulated_examples == 0:
             raise RuntimeError("cannot compute metrics before an update.")
-        means = (
-            self._accumulated_values / self._accumulated_examples
-        ).tolist()
+        means = (self._accumulated_values / self._accumulated_examples).tolist()
         return dict(zip(self.names, means, strict=True))
 
 
 class Accumulator:
     """
     Accumulate sum over n variables (for multiple metrics).
-    
+
     Args:
         n: the number of variables, initialize the data with n zeros
     """
+
     def __init__(self, n):
         self.data = [0.0] * n  # initialize the data with n zeros
 
@@ -101,7 +111,9 @@ def accuracy(y_hat, y):
     """
     # len(y_hat.shape) > 1 and y_hat.shape[1] > 1: means y_hat is a matrix
     if len(y_hat.shape) > 1 and y_hat.shape[1] > 1:
-        y_hat_idx = y_hat.argmax(axis=1)  # y_hat_idx: (batch_size,), obtain the index of the maximum probability
+        y_hat_idx = y_hat.argmax(
+            axis=1
+        )  # y_hat_idx: (batch_size,), obtain the index of the maximum probability
         cmp = y_hat_idx.type(y.dtype) == y  # cmp: (batch_size,), True or False
         return float(cmp.type(y.dtype).sum())  # sum the True values, convert to float
     return 0.0  # return 0.0 if y_hat is not a matrix
@@ -117,19 +129,23 @@ def evaluate_accuracy(net, data_iter):
     Returns:
         the accuracy of the model
     """
-    if isinstance(net, torch.nn.Module): # Determine whether net is an instance of torch.nn.Module
+    if isinstance(
+        net, torch.nn.Module
+    ):  # Determine whether net is an instance of torch.nn.Module
         net.eval()  # set the model to evaluation mode
     metric = Accumulator(2)  # correct predictions, total predictions
     with torch.no_grad():
         for features, labels in data_iter:
-            metric.add(accuracy(net(features), labels), labels.numel())  # metric.add(correct predictions, total predictions)
+            metric.add(
+                accuracy(net(features), labels), labels.numel()
+            )  # metric.add(correct predictions, total predictions)
     return metric[0] / metric[1]  # return the accuracy
 
 
 def evaluate_accuracy_gpu(net, data_iter, device=None):
     """
     Evaluate the accuracy of the model on the given dataset using GPU.
-    
+
     Args:
         net: the model
         data_iter: the data iterator
@@ -151,14 +167,16 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
             else:
                 device_features = features.to(device)
             device_labels = labels.to(device)
-            metric.add(accuracy(net(device_features), device_labels), device_labels.numel())
+            metric.add(
+                accuracy(net(device_features), device_labels), device_labels.numel()
+            )
     return metric[0] / metric[1]  # Return the accuracy
 
 
 def evaluate_loss(net, data_iter, loss):
     """
     Evaluate the model's loss on the given dataset.
-    
+
     Args:
         net: the model
         data_iter: the data iterator
@@ -235,7 +253,7 @@ def align_and_drop_all_nan_rows(
         return {}
 
     # Determine which keys are "value columns" we use to decide keep/drop.
-    value_keys = [k for k in aligned.keys() if k not in exclude]
+    value_keys = [k for k in aligned if k not in exclude]
     if not value_keys:
         return aligned
 

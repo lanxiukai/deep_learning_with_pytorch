@@ -52,6 +52,7 @@ from dl_utils.gan.training import (
     resolve_progressive_gan_options,
     save_gan_samples,
     start_gan_checkpoint,
+    validate_finite_gan_state,
 )
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.training.accelerator import make_fused_adam
@@ -222,7 +223,7 @@ def train_phase(
         )
         global_step += 1
 
-    return metrics.compute(), global_step
+    return metrics.compute_finite(), global_step
 
 
 def main(args):
@@ -338,6 +339,7 @@ def main(args):
             options.d_reg_every,
             options.reg_batch_shrink,
         )
+        validate_finite_gan_state(models, optimizers)
         seen_images += phase.num_images
         seen_kimg = seen_images / 1_000
         append_gan_metrics(loss_history, seen_kimg, metrics)
