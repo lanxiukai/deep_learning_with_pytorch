@@ -210,7 +210,9 @@ def prepare_gan_run(
             "Run tool_scripts/download_dataset.py first."
         )
 
-    output_root = Path(os.environ.get("DL_OUTPUT_ROOT", str(root / "output")))
+    output_root = Path(
+        os.environ.get("DL_OUTPUT_ROOT", str(root / "output-vast-dl"))
+    )
     output_dir = output_root / model_name
     set_seed(seed)
     device = try_gpu()

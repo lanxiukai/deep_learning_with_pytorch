@@ -6,9 +6,9 @@ Adam, channels-last tensors, and CUDA JPEG decoding when nvJPEG is available.
 They favor useful reference images over paper-level quality or exact
 reproduction.
 
-Fresh runs reset ``output/progan/training`` and ``checkpoints``.  A resumable
-checkpoint and an EMA sample grid are written at each progressive phase
-boundary, matching the reference lesson.
+Fresh runs reset ``output-vast-dl/progan/training`` and ``checkpoints``.  A
+resumable checkpoint and an EMA sample grid are written at each progressive
+phase boundary, matching the reference lesson.
 
 Run:
     uv run --locked --no-sync python \
@@ -17,7 +17,7 @@ Run:
 Resume:
     uv run --locked --no-sync python \
         genai/1.0_generative_adversarial_network/7.0_progan.py \
-        --resume-from output/progan/checkpoints/latest.pth
+        --resume-from output-vast-dl/progan/checkpoints/latest.pth
 
 Default schedule:
     Progressive phases:      11 x 200 kimg

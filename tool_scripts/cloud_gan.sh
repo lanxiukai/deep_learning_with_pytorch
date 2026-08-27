@@ -8,6 +8,8 @@ readonly SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
 readonly TMUX_SOCKET="gan-cloud"
 readonly MPS_ROOT="/tmp/dl-gan-mps"
 readonly REMOTE_PROJECT_ROOT="/workspace/deep-learning-with-pytorch"
+readonly OUTPUT_ROOT="$PROJECT_ROOT/output-vast-dl"
+readonly REMOTE_OUTPUT_ROOT="$REMOTE_PROJECT_ROOT/output-vast-dl"
 
 selected_models=()
 CLOUD_GPU_NAME=""
@@ -54,6 +56,7 @@ Examples:
   bash tool_scripts/cloud_gan.sh status
   bash tool_scripts/cloud_gan.sh attach stylegan
   bash tool_scripts/cloud_gan.sh download --apply
+  bash tool_scripts/cloud_gan.sh download --host vast-dl-direct --apply
 EOF
 }
 
@@ -239,9 +242,9 @@ run_smoke() {
                 ;;
         esac
         log "smoke: starting $model"
-        DL_OUTPUT_ROOT="$PROJECT_ROOT/output/smoke" "${command[@]}"
+        DL_OUTPUT_ROOT="$OUTPUT_ROOT/smoke" "${command[@]}"
     done
-    log "smoke checks completed; inspect output/smoke"
+    log "smoke checks completed; inspect output-vast-dl/smoke"
 }
 
 run_validation() {
@@ -296,8 +299,8 @@ train_worker() {
     local command=()
     validate_model "$model"
     script="$(lesson_path "$model")"
-    checkpoint="$PROJECT_ROOT/output/$model/checkpoints/latest.pth"
-    log_file="$PROJECT_ROOT/output/logs/$model.log"
+    checkpoint="$OUTPUT_ROOT/$model/checkpoints/latest.pth"
+    log_file="$OUTPUT_ROOT/logs/$model.log"
     command=(
         uv run --locked --no-sync python -u "$script"
         --num-workers "$num_workers"
@@ -306,12 +309,12 @@ train_worker() {
     if [[ "$resume" == true ]]; then
         command+=(--resume-from "$checkpoint")
     fi
-    mkdir -p "$PROJECT_ROOT/output/logs"
+    mkdir -p "$OUTPUT_ROOT/logs"
     cd "$PROJECT_ROOT"
     {
         printf '\n=== %s model=%s resume=%s ===\n' \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$model" "$resume"
-        "${command[@]}"
+        DL_OUTPUT_ROOT="$OUTPUT_ROOT" "${command[@]}"
     } 2>&1 | tee -a "$log_file"
 }
 
@@ -369,7 +372,7 @@ run_train() {
 
     for model in "${selected_models[@]}"; do
         if [[ "$resume" == true ]]; then
-            checkpoint="$PROJECT_ROOT/output/$model/checkpoints/latest.pth"
+            checkpoint="$OUTPUT_ROOT/$model/checkpoints/latest.pth"
             [[ -f "$checkpoint" ]] || die "resume checkpoint is missing: $checkpoint"
         fi
     done
@@ -407,7 +410,7 @@ show_status() {
         log "no active GAN tmux sessions"
     fi
     shopt -s nullglob
-    logs=("$PROJECT_ROOT"/output/logs/*.log)
+    logs=("$OUTPUT_ROOT"/logs/*.log)
     if ((${#logs[@]} > 0)); then
         tail -n 8 "${logs[@]}"
     fi
@@ -442,7 +445,7 @@ download_output() {
     local host="vast-dl"
     local apply=false
     local remote_source
-    local rsync_args=(-aPvn)
+    local rsync_args=(-aPzvn)
     while (($# > 0)); do
         case "$1" in
             --host)
@@ -464,19 +467,19 @@ download_output() {
     validate_host "$host"
     command -v ssh >/dev/null 2>&1 || die "ssh is unavailable"
     command -v rsync >/dev/null 2>&1 || die "rsync is unavailable"
-    ssh "$host" "test -d $REMOTE_PROJECT_ROOT/output" || \
+    ssh "$host" "test -d $REMOTE_OUTPUT_ROOT" || \
         die "remote output directory is unavailable"
-    mkdir -p "$PROJECT_ROOT/output"
-    remote_source="$host:$REMOTE_PROJECT_ROOT/output/"
+    mkdir -p "$OUTPUT_ROOT"
+    remote_source="$host:$REMOTE_OUTPUT_ROOT/"
     if [[ "$apply" == true ]]; then
-        rsync_args=(-aPv)
-        log "merging remote output into $PROJECT_ROOT/output"
+        rsync_args=(-aPzv)
+        log "merging remote output into $OUTPUT_ROOT"
     else
         log "previewing output merge; add --apply to copy files"
     fi
-    rsync "${rsync_args[@]}" -- "$remote_source" "$PROJECT_ROOT/output/"
+    rsync "${rsync_args[@]}" -- "$remote_source" "$OUTPUT_ROOT/"
     if [[ "$apply" == true ]]; then
-        find "$PROJECT_ROOT/output" -type f -printf '%T@ %p\n' | \
+        find "$OUTPUT_ROOT" -type f -printf '%T@ %p\n' | \
             sort -n | tail -n 10 | cut -d' ' -f2-
     fi
 }

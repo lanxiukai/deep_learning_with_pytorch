@@ -30,7 +30,7 @@ on one NVIDIA B200, B300, RTX 5080, or RTX 5090. Each worker skips progressive
 growth and runs a short, real 128x128 training burst with lazy regularization
 and EMA updates.
 Logs, timings, and GPU samples are isolated under
-output/concurrency-benchmark/ by default.
+output-vast-dl/concurrency-benchmark/ by default.
 
 Options:
   --models LIST              Comma-separated model names (at least two):
@@ -217,7 +217,7 @@ CUDA_VISIBLE_DEVICES="$gpu_index" \
 
 if [[ -z "$output_dir" ]]; then
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    output_dir="$PROJECT_ROOT/output/concurrency-benchmark/$timestamp"
+    output_dir="$PROJECT_ROOT/output-vast-dl/concurrency-benchmark/$timestamp"
 elif [[ "$output_dir" != /* ]]; then
     output_dir="$PROJECT_ROOT/$output_dir"
 fi

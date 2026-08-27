@@ -215,7 +215,7 @@ runtime="$(CUDA_VISIBLE_DEVICES="$gpu_index" \
 
 if [[ -z "$output_dir" ]]; then
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    output_dir="$PROJECT_ROOT/output/single-gpu-benchmark/$timestamp"
+    output_dir="$PROJECT_ROOT/output-vast-dl/single-gpu-benchmark/$timestamp"
 elif [[ "$output_dir" != /* ]]; then
     output_dir="$PROJECT_ROOT/$output_dir"
 fi

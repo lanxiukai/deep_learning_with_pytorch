@@ -67,6 +67,7 @@ htmlcov/
 /data/
 /book_repos/
 /output/
+/output-vast-dl/
 /supplementary-materials
 
 # Local documentation, tests, and reference attachments
