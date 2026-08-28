@@ -33,20 +33,27 @@ the PyTorch framework.
 │   ├── 2.0_variational_autoencoder/
 │   └── 3.0_diffusion_model/
 │
-├── docs/                            # Implementation notes and model guides
-├── tool_scripts/
+├── tool_scripts/                    # Dataset, cloud-GPU, and benchmark helpers
+│   ├── benchmark_gan_training.py
+│   ├── benchmark_h100_precision.sh
+│   ├── benchmark_stylegan_gpu.sh
+│   ├── cloud_gan.sh
 │   ├── download_dataset.py
 │   ├── plot_fashion_mnist.py
 │   ├── pytorch_test.py
 │   ├── setup_cloud_gpu.sh
 │   ├── sgd_animation.py
+│   ├── test_gan_concurrency.sh
 │   └── word_frequency.py
 │
-├── tests/                           # Utility and lesson regression tests
-│
+├── .editorconfig
+├── .gitattributes
+├── .gitignore
+├── .python-version
+├── LICENSE
 ├── pyproject.toml
-├── uv.lock
-└── .gitignore
+├── README.md
+└── uv.lock
 ```
 
 Lesson directories and files are numbered in suggested reading order; the
@@ -56,10 +63,48 @@ numbers do not correspond to book chapter numbers.
 
 #### Cloud GPU
 
-- Shortest Vast.ai B200/B300 setup from WSL after configuring `ssh vast-dl`:
-  `bash tool_scripts/cloud_gan.sh provision`
-- Manual environment-only setup after cloning:
-  `bash tool_scripts/setup_cloud_gpu.sh --profile celeba`
+`cloud_gan.sh` orchestrates short validation, benchmarks, detached training,
+monitoring, and result download on H100, B200, B300, RTX 5080, and RTX 5090
+hosts. After configuring an SSH host named `vast-dl`, provision it from WSL
+and connect to the checked-out project:
+
+```bash
+# From WSL
+bash tool_scripts/cloud_gan.sh provision
+ssh vast-dl
+
+# On the cloud host
+cd /workspace/deep-learning-with-pytorch
+bash tool_scripts/cloud_gan.sh validate --mps
+```
+
+For a manually cloned host, prepare only the environment with
+`bash tool_scripts/setup_cloud_gpu.sh --profile celeba`. Start selected full
+GAN lessons in separate tmux sessions with
+`bash tool_scripts/cloud_gan.sh train --models progan,stylegan --mps`; use
+`bash tool_scripts/cloud_gan.sh status` and
+`bash tool_scripts/cloud_gan.sh attach MODEL` on the cloud host to monitor and
+connect to a session. Back in WSL, run
+`bash tool_scripts/cloud_gan.sh download --apply` to merge remote results.
+
+Direct GAN lesson runs write to the ignored `output/` directory by default.
+The cloud workflow explicitly uses `output-vast-dl/`, keeping downloaded cloud
+artifacts separate from local runs.
+
+#### GAN Benchmarks
+
+The focused benchmark utilities all require prepared CelebA data and a
+compatible CUDA GPU:
+
+- `benchmark_h100_precision.sh` compares BF16, TF32, and strict FP32 using
+  the same fixed 128x128 StyleGAN workload on an H100.
+- `benchmark_stylegan_gpu.sh` runs or compares fixed-workload single-GPU
+  StyleGAN measurements; BF16 is the default precision.
+- `test_gan_concurrency.sh` compares sequential and concurrent BF16 lesson
+  runs on supported cloud GPUs. `cloud_gan.sh validate` invokes it after the
+  smoke checks.
+
+Use each script's `--help` option to inspect its workload and output options.
 
 ---
 

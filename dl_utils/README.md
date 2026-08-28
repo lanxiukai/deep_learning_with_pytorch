@@ -48,8 +48,10 @@ dl_utils/
 ├── data/
 │   ├── __init__.py
 │   ├── celeba.py
+│   ├── cifar10.py
 │   ├── dataset_preparation.py
 │   ├── downloads.py
+│   ├── factor_shapes.py
 │   ├── glasses_label_corrections.json
 │   ├── images.py
 │   ├── loading.py
@@ -124,6 +126,11 @@ dl_utils/
 │
 └── vae/
     ├── __init__.py
+    ├── conditional.py
+    ├── disentanglement.py
+    ├── hierarchy_training.py
+    ├── image_quality.py
+    ├── inference.py
     ├── perceptual_autoencoder.py
     ├── quantization.py
     ├── token_prior.py
@@ -221,6 +228,17 @@ CUDA/nvJPEG preprocessing. `CelebATrainingStream` resolves the pipeline once,
 reuses compatible loaders across training phases, restarts exhausted
 iterators, and returns normalized channels-last batches on the target device.
 
+### dl_utils/data/cifar10.py
+
+Dependencies: __future__ (annotations), collections.abc (Callable), pathlib
+(Path), torch, torch.utils.data (DataLoader), torchvision (datasets,
+transforms), dl_utils.data.loading (make_device_aware_loader).
+Public entries (__all__): make_cifar10_dataset, make_cifar10_loader,
+normalized_cifar10_transform.
+The helpers open prepared CIFAR-10 splits without network access and construct
+device-aware loaders. The optional training transform applies a horizontal
+flip and normalizes RGB tensors to [-1, 1].
+
 ### dl_utils/data/downloads.py
 
 Dependencies: hashlib, hmac, os, shutil, tarfile, tempfile, zipfile, urllib.parse (urlsplit), requests, dl_utils.filesystem.project_root (infer_project_root).
@@ -242,6 +260,16 @@ ensure_glasses_classification, validate_glasses_classification,
 apply_glasses_label_corrections.
 `download_kaggle_dataset` accepts an optional readiness callback so an
 incomplete existing directory is retried and rejected if it remains invalid.
+
+### dl_utils/data/factor_shapes.py
+
+Dependencies: __future__ (annotations), math, collections.abc (Sequence),
+torch, torch.nn.functional (as F), torch (Tensor), torch.utils.data (Dataset).
+Public entries (__all__): FACTOR_NAMES, FACTOR_SIZES, FactorShapes32,
+all_factor_combinations, render_factor_shapes.
+The module renders antialiased 32x32 grayscale shapes from independent shape,
+scale, rotation, and position factors. `FactorShapes32` materializes the full
+factor grid and supplies deterministic train, test, or complete splits.
 
 ### dl_utils/data/images.py
 
