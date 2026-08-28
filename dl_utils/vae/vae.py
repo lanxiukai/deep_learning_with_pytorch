@@ -29,73 +29,71 @@ def reparameterize(mu, std):
 
 
 class VAEEncoder(nn.Module):
-    # Manual forward (not Sequential) — the network branches into μ and log σ
+    # Manual forward (not Sequential) — the network branches into μ and log(σ)
     def __init__(self, latent_dims=100):
         super().__init__()
-        # input 256 by 256 by 3 channels
-        self.conv1 = nn.Conv2d(3, 8, 3, stride=2, padding=1)
-        # 128 by 128 with 8 channels
-        self.conv2 = nn.Conv2d(8, 16, 3, stride=2, padding=1)
-        # 64 by 64 with 16 channels
+        self.conv1 = nn.Conv2d(3, 8, 3, stride=2, padding=1)    # (B, 8, 128, 128)
+        self.conv2 = nn.Conv2d(8, 16, 3, stride=2, padding=1)   # (B, 16, 64, 64)
         self.batch2 = nn.BatchNorm2d(16)
-        self.conv3 = nn.Conv2d(16, 32, 3, stride=2, padding=0)
-        # 31 by 31 with 32 channels
-        self.linear1 = nn.Linear(32*31*31, 1024)
+        self.conv3 = nn.Conv2d(16, 32, 3, stride=2, padding=0)  # (B, 32, 31, 31)
+        self.linear1 = nn.Linear(32*31*31, 1024)                # (B, 1024)
         self.linear2 = nn.Linear(1024, latent_dims)   # μ
-        self.linear3 = nn.Linear(1024, latent_dims)   # log σ
+        self.linear3 = nn.Linear(1024, latent_dims)   # log(σ)
 
-    def statistics(self, x):
+    def statistics(self, inputs):
         """Encode an image batch into posterior mean and standard deviation."""
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.batch2(self.conv2(x)))
-        x = F.relu(self.conv3(x))
-        x = torch.flatten(x, start_dim=1)
-        x = F.relu(self.linear1(x))
-        mu = self.linear2(x)                         # (B, latent_dims)
+        # inputs: (B, 3, 256, 256)
+        hidden = F.relu(self.conv1(inputs))               # (B, 8, 128, 128)
+        hidden = F.relu(self.batch2(self.conv2(hidden)))  # (B, 16, 64, 64)
+        hidden = F.relu(self.conv3(hidden))               # (B, 32, 31, 31)
+        hidden = torch.flatten(hidden, start_dim=1)       # (B, 32 * 31 * 31)
+        hidden = F.relu(self.linear1(hidden))             # (B, 1024)
+        mu = self.linear2(hidden)                         # μ: (B, latent_dims)
         # Bound only the exponential's numerical range, not the sampled z.
-        log_std = self.linear3(x).clamp(-12.0, 12.0)
-        std = torch.exp(log_std)                     # (B, latent_dims)
+        log_std = self.linear3(hidden).clamp(-12.0, 12.0) # log(σ): (B, latent_dims)
+        std = torch.exp(log_std)                          # σ: (B, latent_dims)
         return mu, std
 
-    def forward(self, x):
-        mu, std = self.statistics(x)
-        z = reparameterize(mu, std)                  # (B, 100)
+    def forward(self, inputs):
+        mu, std = self.statistics(inputs)
+        z = reparameterize(mu, std)  # (B, latent_dims)
         return mu, std, z
 
 
 class VAEDecoder(nn.Module):
     def __init__(self, latent_dims=100):
         super().__init__()
-        self.decoder_lin = nn.Sequential(
+        self.linear = nn.Sequential(
             nn.Linear(latent_dims, 1024),
             nn.ReLU(True),
             nn.Linear(1024, 32*31*31),
             nn.ReLU(True))
         self.unflatten = nn.Unflatten(dim=1,
-                  unflattened_size=(32,31,31))
+                  unflattened_size=(32,31,31))                 # (B, 32, 31, 31)
         # padding: symmetric crop from output edges
         # 0 ≤ output_padding < stride:
         # extra rows/cols on right & bottom
-        self.decoder_conv = nn.Sequential(
+        self.conv_transpose = nn.Sequential(
             nn.ConvTranspose2d(32, 16, 3, stride=2,
-                                output_padding=1),      # 31→63
+                                output_padding=1),             # (B, 16, 63, 63)
             nn.BatchNorm2d(16),
             nn.ReLU(True),
             nn.ConvTranspose2d(16, 8, 3, stride=2,
-                                padding=1, output_padding=1),  # 63→128
+                                padding=1, output_padding=1),  # (B, 8, 128, 128)
             nn.BatchNorm2d(8),
             nn.ReLU(True),
             nn.ConvTranspose2d(8, 3, 3, stride=2,
-                                padding=1, output_padding=1))  # 128→256
+                                padding=1, output_padding=1))  # (B, 3, 256, 256)
 
-    def forward(self, x):
-        x = self.decoder_lin(x)
-        x = self.unflatten(x)
-        x = self.decoder_conv(x)  # → (B, 3, 256, 256)
+    def forward(self, z):
+        # latent vector z: (B, latent_dims)
+        hidden = self.linear(z)               # (B, 32 * 31 * 31)
+        hidden = self.unflatten(hidden)       # (B, 32, 31, 31)
+        hidden = self.conv_transpose(hidden)  # (B, 3, 256, 256)
         # Pixel-wise Gaussian mean; the fixed likelihood scale is absorbed by
         # the reconstruction-loss coefficient in the lesson script.
-        x = torch.sigmoid(x)
-        return x
+        hidden = torch.sigmoid(hidden)
+        return hidden
 
 
 class VAE(nn.Module):
@@ -104,14 +102,14 @@ class VAE(nn.Module):
         self.encoder = VAEEncoder(latent_dims)
         self.decoder = VAEDecoder(latent_dims)
 
-    def reconstruct(self, x, *, sample=True):
+    def reconstruct(self, inputs, *, sample=True):
         """Reconstruct from a posterior sample or deterministically from mu."""
-        mu, std = self.encoder.statistics(x)
+        mu, std = self.encoder.statistics(inputs)
         z = reparameterize(mu, std) if sample else mu
         return mu, std, self.decoder(z)
 
-    def forward(self, x):
-        return self.reconstruct(x, sample=True)
+    def forward(self, inputs):
+        return self.reconstruct(inputs, sample=True)
 
 
 __all__ = [
