@@ -1,142 +1,78 @@
-## Deep Learning with PyTorch
+# Deep Learning with PyTorch
 
-A Python code repository for introductory learning in deep learning and
-generative AI, based on the reference books listed below and implemented with
-the PyTorch framework.
+An educational PyTorch repository for introductory deep learning and generative
+AI. Lessons are organized in a suggested reading order; shared utilities and
+operational workflows live outside the lesson directories so their behavior
+remains explicit and reusable.
 
-#### Reference Books
+## Quick start
 
-- Aston Zhang et al. *Dive into Deep Learning* — https://d2l.ai
-- Ian Goodfellow, Yoshua Bengio, Aaron Courville. *Deep Learning* — https://www.deeplearningbook.org
-- Jakub M. Tomczak. *Deep Generative Modeling* — https://link.springer.com/book/10.1007/978-3-031-64087-2
-- Mark Liu. *Learn Generative AI with PyTorch* — https://www.manning.com/books/learn-generative-ai-with-pytorch
-
----
-
-#### Repository Structure
-
-```
-.
-├── dl_utils/                        # Shared utility package; see dl_utils/README.md
-│
-├── deep_learning/                   # Deep learning lessons
-│   ├── 0.0_neural_networks/
-│   ├── 1.0_convolutional_neural_network/
-│   ├── 2.0_recurrent_neural_network/
-│   ├── 3.0_attention_mechanisms/
-│   ├── 4.0_optimization/
-│   └── 5.0_computational_performance/
-│
-├── genai/                           # Generative AI lessons
-│   ├── 0.0_energy_based_model/
-│   ├── 1.0_generative_adversarial_network/
-│   ├── 2.0_variational_autoencoder/
-│   └── 3.0_diffusion_model/
-│
-├── tool_scripts/                    # Tools; see tool_scripts/README.md
-│   ├── README.md
-│   ├── benchmark_gan_training.py
-│   ├── benchmark_h100_precision.sh
-│   ├── benchmark_stylegan_gpu.sh
-│   ├── cloud_gan.sh
-│   ├── download_dataset.py
-│   ├── plot_fashion_mnist.py
-│   ├── pytorch_test.py
-│   ├── setup_cloud_gpu.sh
-│   ├── sgd_animation.py
-│   ├── test_gan_concurrency.sh
-│   └── word_frequency.py
-│
-├── .editorconfig
-├── .gitattributes
-├── .gitignore
-├── .python-version
-├── LICENSE
-├── pyproject.toml
-├── README.md
-└── uv.lock
-```
-
-Lesson directories and files are numbered in suggested reading order; the
-numbers do not correspond to book chapter numbers.
-
----
-
-#### Cloud GPU
-
-`cloud_gan.sh` orchestrates short validation, benchmarks, detached training,
-monitoring, and result download on H100, B200, B300, RTX 5080, and RTX 5090
-hosts. It operates on an existing cloud instance; it does not create, stop, or
-destroy provider resources. After configuring an SSH host named `vast-dl`, run:
+The project uses a locked, project-local uv environment:
 
 ```bash
-# From WSL
-bash tool_scripts/cloud_gan.sh provision
-ssh vast-dl
-
-# On the cloud host
-cd /workspace/deep-learning-with-pytorch
-bash tool_scripts/cloud_gan.sh validate --mps
+uv sync --locked
+uv run --locked --no-sync python tool_scripts/pytorch_test.py
 ```
 
-See [tool_scripts/README.md](tool_scripts/README.md) for the complete lifecycle,
-host requirements, provisioning effects, tmux and MPS operation, checkpoint
-resume, benchmark interpretation, result download, cost controls, and
-troubleshooting.
+The second command is a read-only check of the installed PyTorch/CUDA runtime.
+Python is pinned by [`.python-version`](.python-version), direct dependencies
+by [`pyproject.toml`](pyproject.toml), and exact resolution by
+[`uv.lock`](uv.lock).
 
-#### GAN Benchmarks
+## Explore the repository
 
-The focused benchmark utilities all require prepared CelebA data and a
-compatible CUDA GPU:
-
-- `benchmark_h100_precision.sh` compares BF16, TF32, and strict FP32 using
-  the same fixed 128x128 StyleGAN workload on an H100.
-- `benchmark_stylegan_gpu.sh` runs or compares fixed-workload single-GPU
-  StyleGAN measurements; BF16 is the default precision.
-- `test_gan_concurrency.sh` compares sequential and concurrent BF16 lesson
-  runs on supported cloud GPUs. `cloud_gan.sh validate` invokes it after the
-  smoke checks.
-
-Use each script's `--help` option for its current flags and the
-[tool scripts guide](tool_scripts/README.md#gan-benchmarks) for workflow and
-output details.
-
----
-
-#### Experimental Environment
-
-| Item | Version |
+| Goal | Start here |
 |---|---|
-| OS | Ubuntu 24.04, x86_64 |
-| GPU | NVIDIA GeForce RTX 4070 Ti |
-| NVIDIA driver | 610.88 |
-| PyTorch CUDA runtime | 13.0 |
-| PyTorch | 2.13.0+cu130 |
-| torchvision | 0.28.0+cu130 |
-| Python | 3.14.6 |
+| Core deep-learning lessons | [`deep_learning/`](deep_learning/) |
+| Generative-AI lessons | [`genai/`](genai/) |
+| Shared data, models, training, and plotting utilities | [`dl_utils/README.md`](dl_utils/README.md) |
+| Dataset preparation, local utilities, cloud workflows, and benchmarks | [`tool_scripts/README.md`](tool_scripts/README.md) |
+| Project dependencies and tooling configuration | [`pyproject.toml`](pyproject.toml) |
 
----
+The lesson directory names are numbered in suggested reading order; they do
+not correspond directly to book chapter numbers.
 
-#### Prerequisites
+## Documentation map
 
-- [uv](https://docs.astral.sh/uv/) 0.12 or newer
-- Optional NVIDIA GPU: Turing or newer, with driver 580 or newer for CUDA 13.x
-- Sufficient disk space for the environment and datasets
+Read the short overview first, then open a detailed reference only for the
+task at hand:
 
-#### Setup
+| Area | Overview | Detailed reference |
+|---|---|---|
+| Shared utility package | [`dl_utils/README.md`](dl_utils/README.md) | [`dl_utils/MODULE_REFERENCE.md`](dl_utils/MODULE_REFERENCE.md) |
+| Repository scripts | [`tool_scripts/README.md`](tool_scripts/README.md) | [`tool_scripts/SCRIPT_REFERENCE.md`](tool_scripts/SCRIPT_REFERENCE.md) |
+| Generative-model lesson routes | [GAN roadmap](genai/1.0_generative_adversarial_network/0.0-ROADMAP.md), [VAE roadmap](genai/2.0_variational_autoencoder/0.0-ROADMAP.md), [diffusion roadmap](genai/3.0_diffusion_model/0.0-ROADMAP.md) | Relevant lesson source file |
+
+## Datasets
+
+For a minimal CelebA downloader profile:
 
 ```bash
-uv sync --all-extras --locked
-uv run --locked --no-sync python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+uv sync --no-dev --extra celeba --locked
+uv run --locked --no-sync python tool_scripts/download_dataset.py --dataset celeba
 ```
 
-The default development environment is project-local. `.python-version` pins
-Python, `pyproject.toml` declares the direct dependencies and the explicit
-PyTorch cu130 index, and `uv.lock` records the exact resolution. uv installs
-this repository's `dl-utils` package in editable mode.
+For all lesson datasets, synchronize the `examples` extra and use
+`--dataset all`. Dataset choices, external-provider requirements, and derived
+caches are documented in the
+[script reference](tool_scripts/SCRIPT_REFERENCE.md#dataset-preparation).
 
-Ruff and Pyright are installed through the default development dependency
-group. Run them from the locked project environment:
+## Cloud GAN workflows and benchmarks
+
+`cloud_gan.sh` provisions and operates on an existing cloud GPU host; it does
+not create, stop, or destroy provider resources. GPU and storage billing remain
+the operator's responsibility. The full lifecycle, host requirements, MPS/tmux
+operation, result download, and troubleshooting live in the
+[script reference](tool_scripts/SCRIPT_REFERENCE.md#cloud-gpu-workflow).
+
+GAN benchmarks require prepared CelebA data and a compatible CUDA GPU. See the
+[benchmark guide](tool_scripts/SCRIPT_REFERENCE.md#gan-benchmarks) before
+running `test_gan_concurrency.sh`, `benchmark_h100_precision.sh`, or
+`benchmark_stylegan_gpu.sh`.
+
+## Quality checks
+
+Run checks from the locked project environment:
 
 ```bash
 uv run --locked --no-sync ruff check .
@@ -144,39 +80,12 @@ uv run --locked --no-sync ruff format --check .
 uv run --locked --no-sync pyright
 ```
 
-The previous `d2l` Conda environment, declaration, and exact runtime snapshot
-were retired on 2026-08-15. `.python-version`, `pyproject.toml`, and `uv.lock`
-are now the sole environment recovery sources. `pyproject.toml` also defines
-the local `dl-utils` package required by the editable installation.
+## References
 
-The PyTorch and torchvision wheels come from the official CUDA 13.0 (`cu130`)
-index and carry their environment-local CUDA runtime dependencies; a system
-CUDA Toolkit is not required and the setup does not modify the NVIDIA driver.
-
-The dependency set covers imports in the active project source. Generated
-`build/` copies and the ignored nested reference repositories under
-`book_repos/` do not add packages to the environment. The repository uses the
-local `dl_utils.d2l` package rather than the external PyPI `d2l` distribution.
-
-For a CPU-only environment, change the wheel index suffix from `cu130` to `cpu`
-and change the `torch` and `torchvision` version suffixes from `+cu130` to
-`+cpu` before creating the environment. GPU lesson results will then differ.
-
-#### Dataset Preparation
-
-To install the lightweight Kaggle dependency and download only CelebA:
-
-```bash
-uv sync --no-dev --extra celeba --locked
-uv run --locked --no-sync python tool_scripts/download_dataset.py --dataset celeba
-```
-
-Use `--dataset all` with the `examples` extra to prepare the complete lesson
-collection. Every destination derives from the script's `DATA_DIR` constant.
-Kaggle downloads use that destination directly instead of first populating the
-default user-level Kaggle cache. The CelebA command verifies the official
-metadata and all 202,599 aligned images before it succeeds.
-
-Some datasets are large, and Kaggle-hosted datasets may require authentication.
-For the glasses dataset, the command resumes incomplete G/NoG classification,
-applies the reviewed label corrections, and builds `data/glasses-256/`.
+- [Dive into Deep Learning](https://d2l.ai) — Aston Zhang et al.
+- [Deep Learning](https://www.deeplearningbook.org) — Ian Goodfellow, Yoshua
+  Bengio, and Aaron Courville.
+- [Deep Generative Modeling](https://link.springer.com/book/10.1007/978-3-031-64087-2) —
+  Jakub M. Tomczak.
+- [Learn Generative AI with PyTorch](https://www.manning.com/books/learn-generative-ai-with-pytorch) —
+  Mark Liu.
