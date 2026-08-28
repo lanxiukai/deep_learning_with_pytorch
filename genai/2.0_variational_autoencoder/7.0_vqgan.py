@@ -1,4 +1,4 @@
-"""VQGAN: VQ-VAE tokenizer plus LPIPS and patch-adversarial losses.
+"""Train a VQGAN tokenizer and its frozen-token causal Transformer prior.
 
 The first stage adds three ideas to ``6.0_vq_vae.py``:
 
@@ -14,7 +14,20 @@ token-prior interface without its large-scale sliding-window setup.
 
 The tokenizer file is a stage handoff, not a training-resume checkpoint. Each
 stage stores final weights, constructor metadata, and the tokenizer identity;
-the tokenizer artifact also retains the trained discriminator weights.
+the tokenizer artifact also retains the trained discriminator weights and the
+objective configuration needed to compare fixed and adaptive runs.
+
+This entry keeps only training and bounded training-time validation. Run
+``7.1_vqgan_evaluation.py`` to reload artifacts independently and compare
+paired fidelity, reconstruction distributions, token rates, prior likelihood,
+and complete generation under one held-out protocol.
+
+Named runs make the intended same-architecture progression explicit::
+
+    python 7.0_vqgan.py --run-name pixel-vq --perceptual-weight 0 --discriminator-weight 0
+    python 7.0_vqgan.py --run-name lpips --discriminator-weight 0
+    python 7.0_vqgan.py --run-name fixed
+    python 7.0_vqgan.py --run-name adaptive --adversarial-weighting adaptive
 """
 
 from __future__ import annotations
@@ -26,7 +39,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
 from dl_utils.data.cifar10 import (
@@ -75,9 +88,7 @@ def vqgan_autoencoder_step(
     pixel_l1 = F.l1_loss(reconstruction, x)
     perceptual_loss = perceptual(reconstruction, x)
     # VQGAN's adaptive ratio uses the reconstruction scalar, not VQ loss.
-    reconstruction_objective = (
-        pixel_l1 + float(perceptual_weight) * perceptual_loss
-    )
+    reconstruction_objective = pixel_l1 + float(perceptual_weight) * perceptual_loss
 
     discriminator.requires_grad_(False)
     try:
@@ -92,9 +103,7 @@ def vqgan_autoencoder_step(
         elif step >= discriminator_start and adversarial_weighting == "fixed":
             adversarial_scale = x.new_tensor(float(discriminator_weight))
         elif step >= discriminator_start:
-            raise ValueError(
-                "adversarial_weighting must be 'fixed' or 'adaptive'"
-            )
+            raise ValueError("adversarial_weighting must be 'fixed' or 'adaptive'")
         else:
             adversarial_scale = x.new_zeros(())
         loss = (
@@ -107,16 +116,20 @@ def vqgan_autoencoder_step(
         optimizer.step()
     finally:
         discriminator.requires_grad_(True)
-    return reconstruction.detach(), indices.detach(), {
-        "autoencoder": loss.detach(),
-        "pixel_l1": pixel_l1.detach(),
-        "perceptual": perceptual_loss.detach(),
-        "vq": vq_loss.detach(),
-        "generator_adversarial": adversarial.detach(),
-        "adversarial_scale": adversarial_scale.detach(),
-        "perplexity": diagnostics["perplexity"],
-        "active_codes": diagnostics["active_codes"].float(),
-    }
+    return (
+        reconstruction.detach(),
+        indices.detach(),
+        {
+            "autoencoder": loss.detach(),
+            "pixel_l1": pixel_l1.detach(),
+            "perceptual": perceptual_loss.detach(),
+            "vq": vq_loss.detach(),
+            "generator_adversarial": adversarial.detach(),
+            "adversarial_scale": adversarial_scale.detach(),
+            "perplexity": diagnostics["perplexity"],
+            "active_codes": diagnostics["active_codes"].float(),
+        },
+    )
 
 
 def vqgan_discriminator_step(
@@ -175,15 +188,11 @@ def smoke_test() -> None:
     )
     assert all(
         torch.equal(before, parameter)
-        for before, parameter in zip(
-            discriminator_before, discriminator.parameters()
-        )
+        for before, parameter in zip(discriminator_before, discriminator.parameters())
     )
     assert all(
         torch.equal(before, parameter)
-        for before, parameter in zip(
-            perceptual_before, perceptual.parameters()
-        )
+        for before, parameter in zip(perceptual_before, perceptual.parameters())
     )
     model_before_discriminator = [
         parameter.detach().clone() for parameter in model.parameters()
@@ -198,9 +207,7 @@ def smoke_test() -> None:
     )
     assert all(
         torch.equal(before, parameter)
-        for before, parameter in zip(
-            model_before_discriminator, model.parameters()
-        )
+        for before, parameter in zip(model_before_discriminator, model.parameters())
     )
     fixed_model = VQPerceptualAutoencoder32(
         latent_channels=8, codebook_size=32, hidden_channels=32
@@ -220,19 +227,39 @@ def smoke_test() -> None:
         discriminator_weight=0.25,
         adversarial_weighting="fixed",
     )
-    assert torch.allclose(
-        fixed_metrics["adversarial_scale"], x.new_tensor(0.25)
-    )
-    prior = CausalTransformerPrior(
-        32, 64, model_dim=32, heads=4, layers=2
-    )
+    assert torch.allclose(fixed_metrics["adversarial_scale"], x.new_tensor(0.25))
+    prior = CausalTransformerPrior(32, 64, model_dim=32, heads=4, layers=2)
     logits, targets = prior.teacher_forcing(indices)
     prior_loss = F.cross_entropy(logits.flatten(0, 1), targets.flatten())
     prior_loss.backward()
+    validation_loader = DataLoader(
+        TensorDataset(
+            x.repeat(3, 1, 1, 1),
+            torch.zeros(6, dtype=torch.long),
+        ),
+        batch_size=4,
+    )
+    tokenizer_validation = validate_tokenizer(
+        model,
+        discriminator,
+        perceptual,
+        validation_loader,
+        max_examples=5,
+        device=torch.device("cpu"),
+    )
+    prior_validation = validate_prior(
+        model,
+        prior,
+        validation_loader,
+        max_examples=5,
+        device=torch.device("cpu"),
+    )
     assert reconstruction.shape == x.shape
     assert indices.shape == (2, 8, 8)
     assert model.decoder.last_layer.grad is not None
     assert discriminator.head[-1].weight.grad is not None
+    assert tokenizer_validation["examples"] == 5
+    assert prior_validation["examples"] == 5
     print(
         f"smoke test passed: AE={metrics['autoencoder'].item():.3f}, "
         f"D={d_metrics['discriminator'].item():.3f}, "
@@ -267,12 +294,13 @@ def make_loaders(
 
 
 @torch.inference_mode()
-def evaluate_tokenizer(
+def validate_tokenizer(
     model: VQPerceptualAutoencoder32,
     discriminator: PatchDiscriminator32,
     perceptual: nn.Module,
     loader: DataLoader,
     *,
+    max_examples: int,
     device: torch.device,
 ) -> dict[str, float]:
     model.eval()
@@ -283,25 +311,32 @@ def evaluate_tokenizer(
     examples = 0
     usage = TokenUsageAccumulator(vocabulary_size)
     for x, _ in loader:
-        x = x.to(device, non_blocking=True)
+        remaining = max_examples - examples
+        if remaining <= 0:
+            break
+        x = x[:remaining].to(device, non_blocking=True)
         reconstruction, indices, _, diagnostics = model(x)
-        totals += torch.stack(
-            [
-                F.l1_loss(reconstruction, x),
-                perceptual(reconstruction, x),
-                diagnostics["quantization_mse"],
-                discriminator(x).mean(),
-                discriminator(reconstruction).mean(),
-            ]
-        ) * x.shape[0]
+        totals += (
+            torch.stack(
+                [
+                    F.l1_loss(reconstruction, x),
+                    perceptual(reconstruction, x),
+                    diagnostics["quantization_mse"],
+                    discriminator(x).mean(),
+                    discriminator(reconstruction).mean(),
+                ]
+            )
+            * x.shape[0]
+        )
         usage.update(indices)
         examples += x.shape[0]
+    if examples == 0:
+        raise ValueError("tokenizer validation observed no examples")
     values = (totals / examples).tolist()
     statistics = usage.statistics()
-    entropy_bits = (
-        float(statistics["token_entropy_nats"]) / math.log(2)
-    )
+    entropy_bits = float(statistics["token_entropy_nats"]) / math.log(2)
     return {
+        "examples": float(examples),
         "pixel_l1": values[0],
         "perceptual_distance": values[1],
         "quantization_mse": values[2],
@@ -312,18 +347,17 @@ def evaluate_tokenizer(
         "usage_fraction": float(statistics["usage_fraction"]),
         "marginal_entropy_bits_per_token": entropy_bits,
         "marginal_entropy_bits_per_image": 64 * entropy_bits,
-        "fixed_length_bits_per_image": (
-            64 * math.ceil(math.log2(vocabulary_size))
-        ),
+        "fixed_length_bits_per_image": (64 * math.ceil(math.log2(vocabulary_size))),
     }
 
 
 @torch.inference_mode()
-def evaluate_prior(
+def validate_prior(
     tokenizer: VQPerceptualAutoencoder32,
     prior: CausalTransformerPrior,
     loader: DataLoader,
     *,
+    max_examples: int,
     device: torch.device,
 ) -> dict[str, float]:
     tokenizer.eval()
@@ -331,16 +365,20 @@ def evaluate_prior(
     nll = 0.0
     examples = 0
     for x, _ in loader:
-        x = x.to(device, non_blocking=True)
+        remaining = max_examples - examples
+        if remaining <= 0:
+            break
+        x = x[:remaining].to(device, non_blocking=True)
         _, indices, _, _ = tokenizer.encode(x)
         logits, targets = prior.teacher_forcing(indices)
-        loss = F.cross_entropy(
-            logits.flatten(0, 1), targets.flatten()
-        )
+        loss = F.cross_entropy(logits.flatten(0, 1), targets.flatten())
         nll += float(loss) * x.shape[0]
         examples += x.shape[0]
+    if examples == 0:
+        raise ValueError("prior validation observed no examples")
     nll /= examples
     return {
+        "examples": float(examples),
         "nll_nats_per_token": nll,
         "bits_per_token": nll / math.log(2),
         "bits_per_image": 64 * nll / math.log(2),
@@ -363,9 +401,7 @@ def train_tokenizer(
     model = VQPerceptualAutoencoder32(**config).to(device)
     discriminator = PatchDiscriminator32(args.discriminator_channels).to(device)
     perceptual = build_perceptual_loss("lpips", device)
-    ae_optimizer = torch.optim.Adam(
-        model.parameters(), lr=args.lr, betas=(0.5, 0.9)
-    )
+    ae_optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.5, 0.9))
     d_optimizer = torch.optim.Adam(
         discriminator.parameters(), lr=args.discriminator_lr, betas=(0.5, 0.9)
     )
@@ -432,11 +468,12 @@ def train_tokenizer(
                 out_dir / f"tokenizer_{epoch:03d}.png",
                 nrow=8,
             )
-    validation = evaluate_tokenizer(
+    validation = validate_tokenizer(
         model,
         discriminator,
         perceptual,
         validation_loader,
+        max_examples=args.validation_examples,
         device=device,
     )
     interface_id = model_state_fingerprint(model)
@@ -451,6 +488,26 @@ def train_tokenizer(
             },
             "perceptual_loss": "lpips-v0.1-vgg",
             "model_config": config,
+            "training_config": {
+                "run_name": args.run_name or "default",
+                "seed": args.seed,
+                "tokenizer_epochs": args.tokenizer_epochs,
+                "completed_optimizer_steps": global_step,
+                "batch_size": args.batch_size,
+                "validation_examples": args.validation_examples,
+                "dataset": "CIFAR-10",
+                "image_shape": [3, 32, 32],
+                "horizontal_flip": False,
+                "pixel_loss": "l1",
+                "perceptual_weight": args.perceptual_weight,
+                "vq_weight": args.vq_weight,
+                "discriminator_weight": args.discriminator_weight,
+                "adversarial_weighting": args.adversarial_weighting,
+                "discriminator_start": args.discriminator_start,
+                "learning_rate": args.lr,
+                "discriminator_learning_rate": args.discriminator_lr,
+            },
+            "validation": validation,
         },
         out_dir / "tokenizer.pth",
     )
@@ -500,6 +557,7 @@ def train_prior(
         dropout=args.prior_dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(prior.parameters(), lr=args.prior_lr)
+    optimizer_steps = 0
     for epoch in range(1, args.prior_epochs + 1):
         prior.train()
         nll_sum = 0.0
@@ -513,6 +571,7 @@ def train_prior(
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+            optimizer_steps += 1
             nll_sum += loss.item() * x.shape[0]
             examples += x.shape[0]
         nll = nll_sum / examples
@@ -531,8 +590,12 @@ def train_prior(
                 out_dir / f"prior_{epoch:03d}.png",
                 nrow=8,
             )
-    validation = evaluate_prior(
-        tokenizer, prior, validation_loader, device=device
+    validation = validate_prior(
+        tokenizer,
+        prior,
+        validation_loader,
+        max_examples=args.validation_examples,
+        device=device,
     )
     tokenizer_interface_id = model_state_fingerprint(tokenizer)
     prior_config = {
@@ -550,6 +613,17 @@ def train_prior(
             "model_name": "vqgan_transformer_prior",
             "model_config": prior_config,
             "tokenizer_interface_id": tokenizer_interface_id,
+            "training_config": {
+                "run_name": args.run_name or "default",
+                "seed": args.seed,
+                "prior_epochs": args.prior_epochs,
+                "completed_optimizer_steps": optimizer_steps,
+                "batch_size": args.batch_size,
+                "validation_examples": args.validation_examples,
+                "dataset": "CIFAR-10 tokens",
+                "learning_rate": args.prior_lr,
+            },
+            "validation": validation,
         },
     )
     print(
@@ -558,9 +632,28 @@ def train_prior(
     )
 
 
+def output_directory(run_name: str | None) -> Path:
+    base = PROJECT_ROOT / "output" / "vae" / "vqgan"
+    if run_name is None:
+        return base
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789-")
+    if (
+        not run_name
+        or run_name[0] == "-"
+        or run_name[-1] == "-"
+        or any(character not in allowed for character in run_name)
+    ):
+        raise ValueError(
+            "run_name must use lowercase letters, digits, and interior hyphens"
+        )
+    return base / run_name
+
+
 def train(args: argparse.Namespace) -> None:
+    if args.validation_examples < 1:
+        raise ValueError("validation_examples must be positive")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    out_dir = PROJECT_ROOT / "output" / "vae" / "vqgan"
+    out_dir = output_directory(args.run_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     train_loader, validation_loader = make_loaders(args, device)
     path = out_dir / "tokenizer.pth"
@@ -591,6 +684,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--stage", choices=("tokenizer", "prior", "all"), default="all")
+    parser.add_argument(
+        "--run-name",
+        help=(
+            "optional lowercase run label; writes to output/vae/vqgan/<name> "
+            "so fixed, adaptive, and loss-ablation artifacts can coexist"
+        ),
+    )
     parser.add_argument("--tokenizer-epochs", type=int, default=30)
     parser.add_argument("--prior-epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -621,6 +721,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prior-lr", type=float, default=3e-4)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--sample-every", type=int, default=5)
+    parser.add_argument("--validation-examples", type=int, default=1_024)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()

@@ -204,7 +204,7 @@ def analyze(args, device):
     """Load the final checkpoint and write all standard-VAE diagnostics."""
     if not args.checkpoint.is_file():
         raise FileNotFoundError(
-            f"checkpoint not found at {args.checkpoint}; run 1.0_vae_train.py first"
+            f"checkpoint not found at {args.checkpoint}; run 1.0_vae.py first"
         )
     model, model_config = load_model_weights(
         args.checkpoint,

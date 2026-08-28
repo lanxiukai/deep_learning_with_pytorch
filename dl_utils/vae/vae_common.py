@@ -13,7 +13,6 @@ import math
 import torch
 from torch import Tensor, nn
 
-
 LOG_2PI = math.log(2.0 * math.pi)
 
 
@@ -143,8 +142,8 @@ class ConvGaussianVAE28(nn.Module):
 
 
 __all__ = [
-    "ConvGaussianVAE28",
     "LOG_2PI",
+    "ConvGaussianVAE28",
     "diagonal_gaussian_kl_from_logvar",
     "diagonal_gaussian_log_density",
     "fuse_diagonal_gaussians",

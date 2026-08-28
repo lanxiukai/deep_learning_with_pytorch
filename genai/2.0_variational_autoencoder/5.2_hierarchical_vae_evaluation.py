@@ -38,7 +38,6 @@ from dl_utils.vae.vae_hierarchy import (
     LadderVAE32,
 )
 
-
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 
