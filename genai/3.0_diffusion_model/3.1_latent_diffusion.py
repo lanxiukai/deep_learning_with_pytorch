@@ -40,7 +40,11 @@ from dl_utils.vae.perceptual_autoencoder import KLPerceptualAutoencoder32
 PROJECT_ROOT = infer_project_root()
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
 DEFAULT_AUTOENCODER = (
-    PROJECT_ROOT / "output" / "kl_autoencoder" / "kl_autoencoder.pth"
+    PROJECT_ROOT
+    / "output"
+    / "diffusion"
+    / "kl_autoencoder"
+    / "kl_autoencoder.pth"
 )
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output" / "diffusion" / "latent_diffusion"
 

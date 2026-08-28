@@ -312,6 +312,7 @@ def train_one(
     out_dir = (
         PROJECT_ROOT
         / "output"
+        / "vae"
         / "beta_tc_vae"
         / f"beta_{number_slug(beta)}"
         / f"seed_{seed}"

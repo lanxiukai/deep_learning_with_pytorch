@@ -11,15 +11,15 @@ in the lesson sequence can be evaluated independently.
 
 Inputs:
     data/cifar10, prepared by tool_scripts/download_dataset.py
-    output/sn_gan/generator.pth, created by 6.0_sn_gan.py
-    output/sagan/generator.pth, created by 6.1_sagan.py
-    output/biggan/generator.pth, created by 6.2_biggan.py
+    output/gan/sn_gan/generator.pth, created by 6.0_sn_gan.py
+    output/gan/sagan/generator.pth, created by 6.1_sagan.py
+    output/gan/biggan/generator.pth, created by 6.2_biggan.py
 
 Outputs:
     Each evaluation directory is reset at the start of every run.
-    output/sn_gan/evaluation/real_vs_generated.png
-    output/sagan/evaluation/real_vs_generated.png
-    output/biggan/evaluation/real_vs_generated.png
+    output/gan/sn_gan/evaluation/real_vs_generated.png
+    output/gan/sagan/evaluation/real_vs_generated.png
+    output/gan/biggan/evaluation/real_vs_generated.png
 """
 
 import torch
@@ -48,7 +48,7 @@ from dl_utils.training.checkpoints import load_model_weights
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
 MODEL_OUT_DIRS = {
-    model_name: PROJECT_ROOT / "output" / model_name
+    model_name: PROJECT_ROOT / "output" / "gan" / model_name
     for model_name in ("sn_gan", "sagan", "biggan")
 }
 EVALUATION_DIRS = {

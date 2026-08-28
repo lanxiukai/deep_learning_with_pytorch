@@ -16,11 +16,11 @@ Data:
     are derived in memory, so no second dataset copy is required.
 
 Outputs:
-    output/pix2pix/training/, reset at the start of every run. The directory
+    output/gan/pix2pix/training/, reset at the start of every run. The directory
     contains titled input/generated/target grids for fixed validation pairs.
-    - output/pix2pix/loss_curves.png: total D/G, G GAN, and
+    - output/gan/pix2pix/loss_curves.png: total D/G, G GAN, and
       LAMBDA_L1-weighted G L1 losses in one four-panel figure
-    - output/pix2pix/pix2pix_generator.pth: trained grayscale -> color generator
+    - output/gan/pix2pix/pix2pix_generator.pth: trained grayscale -> color generator
 
 Related scripts:
     - 5.1_pix2pix_evaluation.py evaluates the saved colorization generator.
@@ -64,7 +64,7 @@ from dl_utils.training.timing import Timer, format_epoch_timing
 
 PROJECT_ROOT = infer_project_root()
 CELEBA_DIR = PROJECT_ROOT / "data" / "celeba"
-OUT_DIR = PROJECT_ROOT / "output" / "pix2pix" / "training"
+OUT_DIR = PROJECT_ROOT / "output" / "gan" / "pix2pix" / "training"
 PIX2PIX_OUT_DIR = OUT_DIR.parent
 
 NUM_EPOCHS = 20

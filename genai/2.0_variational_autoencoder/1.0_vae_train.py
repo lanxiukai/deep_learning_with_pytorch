@@ -6,9 +6,9 @@ rather than new random inputs. The final metadata-rich checkpoint stores only
 model weights; this short FP32 run intentionally has no resume machinery.
 
 Outputs:
-    output/vae/training/epoch_*.png: fixed-z prior samples
-    output/vae/vae.pth: final model checkpoint
-    output/vae/loss_curves.png: independent total, reconstruction, and KL panels
+    output/vae/vae/training/epoch_*.png: fixed-z prior samples
+    output/vae/vae/vae.pth: final model checkpoint
+    output/vae/vae/loss_curves.png: independent total, reconstruction, and KL panels
 """
 
 import torch
@@ -27,7 +27,7 @@ from dl_utils.vae.vae import VAE, diagonal_gaussian_kl
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data" / "glasses-256"
-OUT_DIR = PROJECT_ROOT / "output" / "vae"
+OUT_DIR = PROJECT_ROOT / "output" / "vae" / "vae"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_PATH = OUT_DIR / "vae.pth"
 

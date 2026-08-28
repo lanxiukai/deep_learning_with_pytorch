@@ -181,7 +181,7 @@ def train_cvae(
     device: torch.device,
 ) -> None:
     variant = "learned-prior" if learned_prior else "standard-prior"
-    out_dir = PROJECT_ROOT / "output" / "conditional_vae" / variant
+    out_dir = PROJECT_ROOT / "output" / "vae" / "conditional_vae" / variant
     out_dir.mkdir(parents=True, exist_ok=True)
     model = ConditionalVAE32(
         latent_dim=args.latent_dim,
@@ -281,7 +281,7 @@ def train_deterministic(
     validation_loader: DataLoader,
     device: torch.device,
 ) -> None:
-    out_dir = PROJECT_ROOT / "output" / "conditional_vae" / "deterministic"
+    out_dir = PROJECT_ROOT / "output" / "vae" / "conditional_vae" / "deterministic"
     out_dir.mkdir(parents=True, exist_ok=True)
     model = ConditionalMeanDecoder32(
         condition_dim=args.condition_dim,

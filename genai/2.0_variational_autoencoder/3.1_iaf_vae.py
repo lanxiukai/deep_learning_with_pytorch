@@ -139,7 +139,7 @@ def train(args: argparse.Namespace) -> None:
         max_examples=args.validation_examples,
         device=device,
     )
-    out_dir = PROJECT_ROOT / "output" / "iaf_vae"
+    out_dir = PROJECT_ROOT / "output" / "vae" / "iaf_vae"
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
         {

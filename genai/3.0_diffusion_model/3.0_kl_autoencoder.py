@@ -380,7 +380,7 @@ def make_loaders(
 
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    out_dir = PROJECT_ROOT / "output" / "kl_autoencoder"
+    out_dir = PROJECT_ROOT / "output" / "diffusion" / "kl_autoencoder"
     out_dir.mkdir(parents=True, exist_ok=True)
     train_loader, statistics_loader, validation_loader = make_loaders(args, device)
     config = {

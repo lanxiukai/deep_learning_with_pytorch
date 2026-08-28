@@ -13,18 +13,18 @@ uses current metadata-rich checkpoints and intentionally omits legacy formats,
 FID reproduction, and a large evaluation framework.
 
 Inputs:
-    output/progan/progan_generator.pth, created by 7.0_progan.py
-    output/stylegan/stylegan_generator.pth, created by 7.1_stylegan.py
-    output/stylegan2/stylegan2_generator.pth, created by 7.2_stylegan2.py
+    output/gan/progan/progan_generator.pth, created by 7.0_progan.py
+    output/gan/stylegan/stylegan_generator.pth, created by 7.1_stylegan.py
+    output/gan/stylegan2/stylegan2_generator.pth, created by 7.2_stylegan2.py
 
 Outputs:
     Each evaluation directory is reset after inputs have been validated.
-    output/{progan,stylegan,stylegan2}/evaluation/fixed_samples.png
-    output/{stylegan,stylegan2}/evaluation/noise_variations.png
-    output/stylegan/evaluation/stylegan_style_mixing.png
-    output/stylegan2/evaluation/stylegan2_style_mixing.png
-    output/{stylegan,stylegan2}/evaluation/truncation.png
-    output/{progan,stylegan,stylegan2}/evaluation/latent_interpolation.png
+    output/gan/{progan,stylegan,stylegan2}/evaluation/fixed_samples.png
+    output/gan/{stylegan,stylegan2}/evaluation/noise_variations.png
+    output/gan/stylegan/evaluation/stylegan_style_mixing.png
+    output/gan/stylegan2/evaluation/stylegan2_style_mixing.png
+    output/gan/{stylegan,stylegan2}/evaluation/truncation.png
+    output/gan/{progan,stylegan,stylegan2}/evaluation/latent_interpolation.png
 """
 
 from dataclasses import dataclass
@@ -47,7 +47,7 @@ from dl_utils.training.checkpoints import load_model_weights
 
 PROJECT_ROOT = infer_project_root()
 MODEL_OUT_DIRS = {
-    model_name: PROJECT_ROOT / "output" / model_name
+    model_name: PROJECT_ROOT / "output" / "gan" / model_name
     for model_name in ("progan", "stylegan", "stylegan2")
 }
 EVALUATION_DIRS = {

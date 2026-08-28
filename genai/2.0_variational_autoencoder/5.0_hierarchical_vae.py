@@ -135,6 +135,7 @@ def main() -> None:
         out_dir=(
             PROJECT_ROOT
             / "output"
+            / "vae"
             / "hierarchical_vae"
             / args.run_name
         ),

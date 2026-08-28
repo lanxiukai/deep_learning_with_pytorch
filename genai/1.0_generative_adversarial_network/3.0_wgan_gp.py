@@ -33,7 +33,7 @@ from dl_utils.training.timing import Timer, format_epoch_timing
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / 'data'
-OUT_DIR = PROJECT_ROOT / 'output' / 'wgan_gp' / 'anime_face'
+OUT_DIR = PROJECT_ROOT / 'output' / 'gan' / 'wgan_gp' / 'anime_face'
 reset_dir(str(OUT_DIR))
 
 class G_block(nn.Module):

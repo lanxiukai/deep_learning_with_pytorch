@@ -6,7 +6,7 @@ regularization.  Higher-order penalties stay in FP32 on reduced regularization
 batches.  Fused Adam, channels-last tensors, and batched CUDA JPEG decoding
 avoid requiring custom CUDA kernels.
 
-Fresh runs reset ``output/stylegan2/training`` and ``checkpoints``.  A
+Fresh runs reset ``output/gan/stylegan2/training`` and ``checkpoints``.  A
 latest full-state checkpoint is written at every data-epoch boundary, matching
 the reference lesson, together with a fixed-latent/noise EMA sample grid.
 
@@ -17,7 +17,7 @@ Run:
 Resume:
     uv run --locked --no-sync python \
         genai/1.0_generative_adversarial_network/7.2_stylegan2.py \
-        --resume-from output/stylegan2/checkpoints/latest.pth
+        --resume-from output/gan/stylegan2/checkpoints/latest.pth
 
 Default schedule:
     Real images shown to D:  2.5 million

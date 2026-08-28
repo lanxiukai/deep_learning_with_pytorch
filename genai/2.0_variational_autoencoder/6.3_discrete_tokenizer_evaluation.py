@@ -53,7 +53,7 @@ from dl_utils.vae.token_prior import PixelCNNPrior
 
 
 PROJECT_ROOT = infer_project_root()
-OUTPUT_ROOT = PROJECT_ROOT / "output"
+OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 
 
 @dataclass

@@ -8,12 +8,12 @@ Data:
     tool_scripts/download_dataset.py.
 
 Inputs:
-    - output/cyclegan/gen_black.pth: blond -> black generator
-    - output/cyclegan/gen_blond.pth: black -> blond generator
+    - output/gan/cyclegan/gen_black.pth: blond -> black generator
+    - output/gan/cyclegan/gen_blond.pth: black -> blond generator
     Run 5.2_cycle_gan.py first to create both checkpoints.
 
 Outputs:
-    output/cyclegan/evaluation/, reset at the start of every run.
+    output/gan/cyclegan/evaluation/, reset at the start of every run.
     - black_to_blond_cycle.png: black, fake_blond, and fake2black rows
     - blond_to_black_cycle.png: blond, fake_black, and fake2blond rows
 """
@@ -32,7 +32,7 @@ from dl_utils.plot.images import save_image_row_grid
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data"
-OUT_DIR = PROJECT_ROOT / "output" / "cyclegan" / "evaluation"
+OUT_DIR = PROJECT_ROOT / "output" / "gan" / "cyclegan" / "evaluation"
 CHECKPOINT_DIR = OUT_DIR.parent
 
 BLACK_DIR = DATA_DIR / "celeba" / "black"

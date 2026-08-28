@@ -62,7 +62,7 @@ def main():
     b = torch.tensor([1, 2])
     data = torch.matmul(X, A) + b  # (1000, 2)
 
-    out_dir = infer_project_root() / "output" / "gan"
+    out_dir = infer_project_root() / "output" / "gan" / "gan"
     reset_dir(str(out_dir))
 
     set_figsize()

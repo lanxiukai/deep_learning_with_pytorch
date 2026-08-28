@@ -23,16 +23,16 @@ Data:
 Outputs:
     Fresh runs reset training/ and checkpoints/ before setup; --resume-from
     preserves both directories.
-    output/sn_gan/training/epoch_*.png: fixed-z unconditional samples
-    output/sn_gan/checkpoints/latest.pth: full recoverable training state
-    output/sn_gan/checkpoints/epoch_*.pth: sparse full-state archives
-    output/sn_gan/generator.pth: final generator and configuration
-    output/sn_gan/discriminator.pth: final discriminator and configuration
-    output/sn_gan/loss_curves.png: separate D and G loss panels
+    output/gan/sn_gan/training/epoch_*.png: fixed-z unconditional samples
+    output/gan/sn_gan/checkpoints/latest.pth: full recoverable training state
+    output/gan/sn_gan/checkpoints/epoch_*.pth: sparse full-state archives
+    output/gan/sn_gan/generator.pth: final generator and configuration
+    output/gan/sn_gan/discriminator.pth: final discriminator and configuration
+    output/gan/sn_gan/loss_curves.png: separate D and G loss panels
 
 Resume an interrupted run:
     python genai/1.0_generative_adversarial_network/6.0_sn_gan.py \
-        --resume-from output/sn_gan/checkpoints/latest.pth
+        --resume-from output/gan/sn_gan/checkpoints/latest.pth
 
 Training data -- CIFAR-10:
 Training images:         50,000
@@ -73,7 +73,7 @@ from dl_utils.training.session import TrainingSession
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
-OUT_DIR = PROJECT_ROOT / "output" / "sn_gan"
+OUT_DIR = PROJECT_ROOT / "output" / "gan" / "sn_gan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 

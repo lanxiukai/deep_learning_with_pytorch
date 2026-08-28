@@ -21,17 +21,17 @@ Data:
 Outputs:
     Fresh runs reset training/ and checkpoints/ before setup; --resume-from
     preserves both directories.
-    output/biggan/training/epoch_*.png: fixed-z EMA samples by class
-    output/biggan/checkpoints/latest.pth: full recoverable training state
-    output/biggan/checkpoints/epoch_*.pth: sparse full-state archives
-    output/biggan/generator.pth: final EMA generator and configuration
-    output/biggan/online_generator.pth: final non-averaged generator
-    output/biggan/discriminator.pth: final discriminator and configuration
-    output/biggan/loss_curves.png: adversarial and regularization losses
+    output/gan/biggan/training/epoch_*.png: fixed-z EMA samples by class
+    output/gan/biggan/checkpoints/latest.pth: full recoverable training state
+    output/gan/biggan/checkpoints/epoch_*.pth: sparse full-state archives
+    output/gan/biggan/generator.pth: final EMA generator and configuration
+    output/gan/biggan/online_generator.pth: final non-averaged generator
+    output/gan/biggan/discriminator.pth: final discriminator and configuration
+    output/gan/biggan/loss_curves.png: adversarial and regularization losses
 
 Resume an interrupted run:
     python genai/1.0_generative_adversarial_network/6.2_biggan.py \
-        --resume-from output/biggan/checkpoints/latest.pth
+        --resume-from output/gan/biggan/checkpoints/latest.pth
 
 Training data -- CIFAR-10:
 Training images:         50,000
@@ -82,7 +82,7 @@ from dl_utils.training.session import TrainingSession
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
-OUT_DIR = PROJECT_ROOT / "output" / "biggan"
+OUT_DIR = PROJECT_ROOT / "output" / "gan" / "biggan"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_DIR = OUT_DIR / "checkpoints"
 

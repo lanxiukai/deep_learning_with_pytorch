@@ -433,7 +433,7 @@ def train(args: argparse.Namespace) -> None:
     if args.scaffold_epochs < 1:
         raise ValueError("scaffold_epochs must be positive")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    out_dir = PROJECT_ROOT / "output" / "vae_gan"
+    out_dir = PROJECT_ROOT / "output" / "vae" / "vae_gan"
     out_dir.mkdir(parents=True, exist_ok=True)
     train_loader, validation_loader = make_loaders(args, device)
     model = KLPerceptualAutoencoder32(

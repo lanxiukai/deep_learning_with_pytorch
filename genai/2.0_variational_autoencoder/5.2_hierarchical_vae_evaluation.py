@@ -40,7 +40,7 @@ from dl_utils.vae.vae_hierarchy import (
 
 
 PROJECT_ROOT = infer_project_root()
-OUTPUT_ROOT = PROJECT_ROOT / "output"
+OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 
 
 def load_model(

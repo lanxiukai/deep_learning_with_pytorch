@@ -2,7 +2,7 @@
 Analyze a previously trained Conditional GAN (cGAN) checkpoint — sample
 faces with/without glasses, then interpolate in latent (z) and label space.
 
-Requires output/cgan/cgan.pth — run 4.0_conditional_gan.py first.
+Requires output/gan/cgan/cgan.pth — run 4.0_conditional_gan.py first.
 """
 
 from dl_utils.filesystem.directories import reset_dir
@@ -14,7 +14,7 @@ from dl_utils.plot._backend import pyplot as plt
 import torch
 
 PROJECT_ROOT = infer_project_root()
-OUT_DIR = PROJECT_ROOT / 'output' / 'cgan'
+OUT_DIR = PROJECT_ROOT / 'output' / 'gan' / 'cgan'
 
 checkpoint_path = OUT_DIR / 'cgan.pth'
 if not checkpoint_path.exists():

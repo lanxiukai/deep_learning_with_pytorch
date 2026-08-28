@@ -191,7 +191,7 @@ def train_one(
         if args.match_particle_budget
         else f"k{particles}"
     )
-    out_dir = PROJECT_ROOT / "output" / "iwae" / run_name
+    out_dir = PROJECT_ROOT / "output" / "vae" / "iwae" / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     inference_parameters = [

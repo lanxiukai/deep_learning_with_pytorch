@@ -101,7 +101,7 @@ def train(net_D, net_G, data_iter, num_epochs, lr_D, lr_G, latent_dim, out_dir,
 
 
 def main():
-    out_dir = infer_project_root() / 'output' / 'dcgan' / 'anime_face'
+    out_dir = infer_project_root() / 'output' / 'gan' / 'dcgan' / 'anime_face'
     reset_dir(str(out_dir))
 
     batch_size = 128

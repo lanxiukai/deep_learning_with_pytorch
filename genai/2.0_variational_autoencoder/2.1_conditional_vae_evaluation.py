@@ -35,7 +35,7 @@ from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
 
 
 PROJECT_ROOT = infer_project_root()
-DEFAULT_ROOT = PROJECT_ROOT / "output" / "conditional_vae"
+DEFAULT_ROOT = PROJECT_ROOT / "output" / "vae" / "conditional_vae"
 
 
 class DigitClassifier32(nn.Module):

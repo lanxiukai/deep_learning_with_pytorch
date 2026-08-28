@@ -4,7 +4,7 @@ without glasses.
 
 Adapted from "Generative Deep Learning", 2nd ed.
 Data: data/glasses-256, prepared by tool_scripts/download_dataset.py.
-Outputs: output/cgan/.
+Outputs: output/gan/cgan/.
 Checkpoint analysis: 4.1_conditional_gan_analysis.py.
 
 Training data:
@@ -21,7 +21,7 @@ Total:      15.7 M params
 """
 
 # Data lives under <project_root>/data; generated images and checkpoints
-# are written under <project_root>/output/cgan
+# are written under <project_root>/output/gan/cgan
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.runtime.devices import try_gpu
@@ -39,7 +39,7 @@ from dl_utils.plot._backend import pyplot as plt
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / 'data'
 CACHED_DATA_DIR = DATA_DIR / 'glasses-256'
-OUT_DIR = PROJECT_ROOT / 'output' / 'cgan'
+OUT_DIR = PROJECT_ROOT / 'output' / 'gan' / 'cgan'
 reset_dir(str(OUT_DIR))
 
 def weights_init(m):

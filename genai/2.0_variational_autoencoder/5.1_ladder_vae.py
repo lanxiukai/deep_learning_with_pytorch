@@ -139,7 +139,7 @@ def main() -> None:
         active_variance_threshold=args.active_variance_threshold,
         seed=args.seed,
         out_dir=(
-            PROJECT_ROOT / "output" / "ladder_vae" / args.run_name
+            PROJECT_ROOT / "output" / "vae" / "ladder_vae" / args.run_name
         ),
         checkpoint_metadata={
             "model_name": "ladder_vae",

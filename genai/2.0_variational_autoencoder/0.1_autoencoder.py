@@ -6,9 +6,9 @@ weights and constructor metadata only; this short run intentionally has no
 resume machinery.
 
 Outputs:
-    output/autoencoder_mnist/training/epoch_*.png: fixed reconstructions
-    output/autoencoder_mnist/autoencoder.pth: final model checkpoint
-    output/autoencoder_mnist/loss_curves.png: per-image reconstruction loss
+    output/vae/autoencoder_mnist/training/epoch_*.png: fixed reconstructions
+    output/vae/autoencoder_mnist/autoencoder.pth: final model checkpoint
+    output/vae/autoencoder_mnist/loss_curves.png: per-image reconstruction loss
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from dl_utils.training.timing import Timer, format_epoch_timing
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data" / "mnist"
-OUT_DIR = PROJECT_ROOT / "output" / "autoencoder_mnist"
+OUT_DIR = PROJECT_ROOT / "output" / "vae" / "autoencoder_mnist"
 TRAINING_DIR = OUT_DIR / "training"
 CHECKPOINT_PATH = OUT_DIR / "autoencoder.pth"
 

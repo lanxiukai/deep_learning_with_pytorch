@@ -29,9 +29,9 @@ from dl_utils.training.checkpoints import load_model_weights
 from dl_utils.vae.vae import VAE, diagonal_gaussian_kl, reparameterize
 
 PROJECT_ROOT = infer_project_root()
-DEFAULT_CHECKPOINT = PROJECT_ROOT / "output" / "vae" / "vae.pth"
+DEFAULT_CHECKPOINT = PROJECT_ROOT / "output" / "vae" / "vae" / "vae.pth"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "glasses-256"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output" / "vae" / "evaluation"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output" / "vae" / "vae" / "evaluation"
 
 DEFAULT_BATCH_SIZE = 16
 DEFAULT_MAXIMUM_BATCHES = 100

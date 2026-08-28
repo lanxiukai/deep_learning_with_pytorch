@@ -4,7 +4,7 @@ Adapted from the companion code of "Generative Deep Learning", 2nd edition
 (book_repos/DGAI/utils/ch06util.py): unpaired image-to-image translation
 with two generators and two discriminators, trained with adversarial +
 cycle-consistency losses. Snapshot and training paths are parameterized so
-outputs land under the project's output/ directory.
+outputs land under the project's output/gan/ directory.
 """
 
 import os

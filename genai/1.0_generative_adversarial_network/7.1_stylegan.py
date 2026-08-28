@@ -5,7 +5,7 @@ size, a 2.2-million-image schedule, lazy full-FP32 R1, channels-last tensors,
 fused Adam, and automatic CUDA JPEG preprocessing.  They aim for recognizable
 reference samples rather than paper-level fidelity.
 
-Fresh runs reset ``output/stylegan/training`` and ``checkpoints``.  The
+Fresh runs reset ``output/gan/stylegan/training`` and ``checkpoints``.  The
 latest full-state checkpoint is replaced atomically at each progressive phase
 boundary, matching the reference lesson, together with a fixed-latent/noise EMA
 sample grid.
@@ -17,7 +17,7 @@ Run:
 Resume:
     uv run --locked --no-sync python \
         genai/1.0_generative_adversarial_network/7.1_stylegan.py \
-        --resume-from output/stylegan/checkpoints/latest.pth
+        --resume-from output/gan/stylegan/checkpoints/latest.pth
 
 Default schedule:
     Progressive phases:      11 x 200 kimg

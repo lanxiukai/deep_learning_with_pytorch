@@ -33,7 +33,7 @@ from dl_utils.vae.inference import (
 
 
 PROJECT_ROOT = infer_project_root()
-OUTPUT_ROOT = PROJECT_ROOT / "output"
+OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 
 
 def make_test_loader(

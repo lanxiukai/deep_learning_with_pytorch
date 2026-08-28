@@ -4,10 +4,10 @@ This mirrors 5.3_cycle_gan_evaluation.py, but every generated image has an
 aligned target that can be inspected directly.
 
 Input:
-    output/pix2pix/pix2pix_generator.pth, created by 5.0_pix2pix.py.
+    output/gan/pix2pix/pix2pix_generator.pth, created by 5.0_pix2pix.py.
 
 Outputs:
-    output/pix2pix/evaluation/, reset at the start of every run.
+    output/gan/pix2pix/evaluation/, reset at the start of every run.
     - pix2pix_evaluation.png: input, generated, and target rows
 """
 
@@ -27,7 +27,7 @@ from dl_utils.plot.images import save_image_row_grid
 
 PROJECT_ROOT = infer_project_root()
 CELEBA_DIR = PROJECT_ROOT / "data" / "celeba"
-OUT_DIR = PROJECT_ROOT / "output" / "pix2pix" / "evaluation"
+OUT_DIR = PROJECT_ROOT / "output" / "gan" / "pix2pix" / "evaluation"
 GENERATOR_PATH = OUT_DIR.parent / "pix2pix_generator.pth"
 
 

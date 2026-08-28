@@ -43,7 +43,7 @@ from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
 
 
 PROJECT_ROOT = infer_project_root()
-OUTPUT_ROOT = PROJECT_ROOT / "output"
+OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 
 
 def discover_checkpoints(args: argparse.Namespace) -> list[Path]:
