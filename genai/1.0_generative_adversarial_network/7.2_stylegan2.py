@@ -60,7 +60,7 @@ from dl_utils.training.optimization import update_ema_by_images
 
 BATCH_SIZE = 64
 TOTAL_KIMG = 2_500
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 Z_DIM = 128
 STYLE_DIM = 128
 BASE_CHANNELS = 32

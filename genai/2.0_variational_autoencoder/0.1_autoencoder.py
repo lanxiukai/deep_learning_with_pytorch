@@ -1,137 +1,220 @@
+"""Train a compact deterministic autoencoder on MNIST.
+
+The lesson keeps one fixed, label-ordered reconstruction grid across epochs so
+training progress is directly comparable. The final checkpoint contains model
+weights and constructor metadata only; this short run intentionally has no
+resume machinery.
+
+Outputs:
+    output/autoencoder_mnist/training/epoch_*.png: fixed reconstructions
+    output/autoencoder_mnist/autoencoder.pth: final model checkpoint
+    output/autoencoder_mnist/loss_curves.png: per-image reconstruction loss
 """
-AutoEncoder
-"""
+
+from __future__ import annotations
 
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-from dl_utils.plot.figures import Animator
-from dl_utils.plot._backend import pyplot as plt
+from torch import Tensor, nn
+from torchvision.utils import save_image
+from tqdm import tqdm
+
 from dl_utils.data.vision import vision_loaders
-from dl_utils.runtime.devices import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.plot.images import show_images
+from dl_utils.plot.figures import save_loss_panels
+from dl_utils.runtime.devices import try_gpu
+from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.checkpoints import save_model_weights
+from dl_utils.training.metrics import MetricAccumulator
+from dl_utils.training.timing import Timer, format_epoch_timing
+
+PROJECT_ROOT = infer_project_root()
+DATA_DIR = PROJECT_ROOT / "data" / "mnist"
+OUT_DIR = PROJECT_ROOT / "output" / "autoencoder_mnist"
+TRAINING_DIR = OUT_DIR / "training"
+CHECKPOINT_PATH = OUT_DIR / "autoencoder.pth"
+
+NUM_EPOCHS = 10
+BATCH_SIZE = 32
+NUM_WORKERS = 4
+INPUT_DIMS = 28 * 28
+Z_DIM = 20
+HIDDEN_DIMS = 200
+LEARNING_RATE = 2.5e-4
+NUM_FIXED_DIGITS = 10
+SAMPLE_EVERY_EPOCHS = 1
+SEED = 42
+
+MODEL_CONFIG = {
+    "input_dims": INPUT_DIMS,
+    "z_dim": Z_DIM,
+    "hidden_dims": HIDDEN_DIMS,
+}
 
 
-class AE(nn.Module):
-    def __init__(self,input_dim, z_dim, h_dim):
+class Autoencoder(nn.Module):
+    """Fully connected MNIST autoencoder with one latent bottleneck."""
+
+    def __init__(
+        self,
+        input_dims: int,
+        z_dim: int,
+        hidden_dims: int,
+    ) -> None:
         super().__init__()
-        # shared input layer: maps raw input to hidden space
-        self.common = nn.Linear(input_dim, h_dim)
-        # encoder output: compresses hidden representation to latent bottleneck
-        self.encoded = nn.Linear(h_dim, z_dim)
-        # decoder hidden layer: expands latent code back to hidden space
-        self.l1 = nn.Linear(z_dim, h_dim)
-        # decoder output: reconstructs hidden representation to original input space
-        self.decode = nn.Linear(h_dim, input_dim)                
-    def encoder(self, x):
-        common = F.relu(self.common(x))
-        mu = self.encoded(common)
-        return mu
-    def decoder(self, z):
-        out=F.relu(self.l1(z))
-        out=torch.sigmoid(self.decode(out))
-        return out
-    def forward(self, x):
-        mu=self.encoder(x)
-        out=self.decoder(mu)
-        return out, mu
+        self.encoder_hidden = nn.Linear(input_dims, hidden_dims)
+        self.encoder_output = nn.Linear(hidden_dims, z_dim)
+        self.decoder_hidden = nn.Linear(z_dim, hidden_dims)
+        self.decoder_output = nn.Linear(hidden_dims, input_dims)
+
+    def encode(self, inputs: Tensor) -> Tensor:
+        return self.encoder_output(F.relu(self.encoder_hidden(inputs)))
+
+    def decode(self, z: Tensor) -> Tensor:
+        hidden = F.relu(self.decoder_hidden(z))
+        return torch.sigmoid(self.decoder_output(hidden))
+
+    def forward(self, inputs: Tensor) -> tuple[Tensor, Tensor]:
+        z = self.encode(inputs)
+        return self.decode(z), z
 
 
-def plot_digits(
-    originals,
-    model,
-    device,
-    input_dim,
-    out_dir: Path,
-    epoch=None,
-):
-    reconstructed = []
-    for idx in range(10):
-        with torch.no_grad():
-            img = originals[idx].reshape(1, input_dim)
-            out, _ = model(img.to(device))
-        reconstructed.append(out.reshape(28, 28))
-    originals_2d = [o.reshape(28, 28) for o in originals]
-    show_images(originals_2d + reconstructed, 2, 10, cmap="binary")
-    tag = f"_epoch_{epoch}" if epoch is not None else ""
-    path = out_dir / f"ae_recon{tag}.png"
-    plt.savefig(path, dpi=300)
-    plt.close()
-    print(f"Saved -> {path}")
-
-
-def main():
-    batch_size = 32
-    project_root = infer_project_root()
-    data_dir = project_root / "data" / "mnist"
-
-    train_loader, test_loader = vision_loaders(
-        'mnist', data_dir=data_dir, batch_size=batch_size,
-        num_workers=4, pin_memory=True
-    )
-    num_samples = len(train_loader.dataset)  # type: ignore[arg-type]
-
-    out_dir = project_root / "output" / "ae_mnist"
-    reset_dir(str(out_dir))
-
-    device = try_gpu()
-    input_dim = 784
-    z_dim = 20   # dimension of latent variable of encoder
-    h_dim = 200  # dimension of hidden layer of encoder/decoder
-
-    model = AE(input_dim,z_dim,h_dim).to(device)
-    lr = 0.00025
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    pairs = []
-    seen = set()
-    for imgs, labels in test_loader:
-        for img, label in zip(imgs, labels):
-            lbl = label.item()
-            if lbl not in seen:
-                pairs.append((lbl, img))
-                seen.add(lbl)
-            if len(seen) == 10:
-                break
-        if len(seen) == 10:
+def collect_fixed_digits(loader) -> Tensor:
+    """Return one test image for each digit, ordered from zero to nine."""
+    examples: dict[int, Tensor] = {}
+    for images, labels in loader:
+        for image, label in zip(images, labels, strict=True):
+            examples.setdefault(int(label), image)
+        if len(examples) == NUM_FIXED_DIGITS:
             break
-    pairs.sort(key=lambda x: x[0])
-    originals = [img for _, img in pairs]
+    if len(examples) != NUM_FIXED_DIGITS:
+        raise ValueError("MNIST test data does not contain every digit class.")
+    return torch.stack([examples[label] for label in range(NUM_FIXED_DIGITS)])
 
-    plot_digits(originals, model, device, input_dim, out_dir, "init")
 
-    animator = Animator(xlabel='epoch', ylabel='mean loss',
-                        xlim=[1, 10], legend=['train loss'])
-
-    for epoch in range(10):
-        epoch_loss = 0.0  # the total loss
-        for imgs, labels in train_loader:
-            # reconstruct the images
-            imgs = imgs.to(device).view(-1, input_dim)
-            out, _ = model(imgs)
-            # reconstruction loss (MSE), total loss of a mini-batch
-            loss = ((out - imgs) ** 2).sum()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-        animator.add(epoch + 1, epoch_loss / num_samples)
-        plot_digits(originals, model, device, input_dim, out_dir, epoch)
-
-    model_path = out_dir / "AEdigits.pt"
-
-    # Export to TorchScript
-    scripted = torch.jit.script(model) 
-    scripted.save(str(model_path))
-
-    model = torch.jit.load(str(model_path), map_location=device)
+@torch.inference_mode()
+def save_reconstruction_grid(
+    model: Autoencoder,
+    originals: Tensor,
+    device: torch.device,
+    output_path: Path,
+) -> None:
+    """Save fixed originals above their deterministic reconstructions."""
+    was_training = model.training
     model.eval()
+    flattened = originals.to(device).flatten(1)
+    reconstructions, _ = model(flattened)
+    reconstructions = reconstructions.reshape_as(originals).cpu()
+    save_image(
+        torch.cat((originals, reconstructions)),
+        output_path,
+        nrow=NUM_FIXED_DIGITS,
+    )
+    model.train(was_training)
 
-    plot_digits(originals, model, device, input_dim, out_dir, "final")
+
+def train_epoch(
+    model: Autoencoder,
+    loader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    progress_bar: tqdm,
+) -> float:
+    """Train one epoch and return summed-pixel MSE per image."""
+    model.train()
+    metrics = MetricAccumulator(("reconstruction",), device=device)
+    for images, _ in loader:
+        images = images.to(device, non_blocking=True).flatten(1)
+        reconstructions, _ = model(images)
+        reconstruction_loss = (
+            (reconstructions - images).square().flatten(1).sum(dim=1).mean()
+        )
+        optimizer.zero_grad(set_to_none=True)
+        reconstruction_loss.backward()
+        optimizer.step()
+        metrics.update((reconstruction_loss,), num_examples=images.shape[0])
+        progress_bar.update(1)
+    return metrics.compute_finite()["reconstruction"]
+
+
+def main() -> None:
+    reset_dir(str(OUT_DIR))
+    reset_dir(str(TRAINING_DIR))
+    set_seed(SEED)
+    device = try_gpu()
+    train_loader, test_loader = vision_loaders(
+        "mnist",
+        data_dir=DATA_DIR,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        pin_memory=device.type == "cuda",
+    )
+    fixed_digits = collect_fixed_digits(test_loader)
+
+    model = Autoencoder(**MODEL_CONFIG).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    epochs: list[int] = []
+    reconstruction_history: list[float] = []
+
+    save_reconstruction_grid(
+        model,
+        fixed_digits,
+        device,
+        TRAINING_DIR / "epoch_000.png",
+    )
+
+    timer = Timer()
+    with tqdm(
+        total=NUM_EPOCHS * len(train_loader),
+        desc=f"Epoch 1/{NUM_EPOCHS}",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    ) as progress_bar:
+        for epoch in range(1, NUM_EPOCHS + 1):
+            progress_bar.set_description(f"Epoch {epoch}/{NUM_EPOCHS}", refresh=False)
+            reconstruction_loss = train_epoch(
+                model,
+                train_loader,
+                optimizer,
+                device,
+                progress_bar,
+            )
+            epochs.append(epoch)
+            reconstruction_history.append(reconstruction_loss)
+            progress_bar.set_postfix(
+                reconstruction=f"{reconstruction_loss:.4f}", refresh=False
+            )
+
+            if epoch % SAMPLE_EVERY_EPOCHS == 0:
+                save_reconstruction_grid(
+                    model,
+                    fixed_digits,
+                    device,
+                    TRAINING_DIR / f"epoch_{epoch:03d}.png",
+                )
+
+    save_model_weights(
+        model,
+        CHECKPOINT_PATH,
+        metadata={
+            "model_name": "mnist_autoencoder",
+            "model_config": MODEL_CONFIG,
+        },
+    )
+    save_loss_panels(
+        epochs,
+        {
+            "Reconstruction objective": {
+                "Summed-pixel MSE per image": reconstruction_history,
+            },
+        },
+        OUT_DIR / "loss_curves.png",
+    )
+    print(format_epoch_timing(timer.stop(), NUM_EPOCHS))
 
 
 if __name__ == "__main__":

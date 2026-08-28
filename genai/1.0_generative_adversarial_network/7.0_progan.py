@@ -59,7 +59,7 @@ from dl_utils.training.optimization import update_ema_by_images
 
 BATCH_SIZES = {4: 256, 8: 256, 16: 128, 32: 64, 64: 64, 128: 64}
 PHASE_KIMG = 200
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 Z_DIM = 128
 BASE_CHANNELS = 32
 LEARNING_RATE = 1e-3
