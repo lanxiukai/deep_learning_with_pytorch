@@ -566,8 +566,8 @@ Public entries: none (docstring-only package marker).
 
 ### dl_utils/vae/vae.py
 
-Dependencies: torch, torch.nn.functional, torch.nn, dl_utils.runtime.devices (try_gpu).
-Public entries: device, diagonal_gaussian_kl, reparameterize, VAEEncoder,
+Dependencies: torch, torch.nn.functional, torch.nn.
+Public entries (__all__): diagonal_gaussian_kl, reparameterize, VAEEncoder,
 VAEDecoder, VAE.
 
 ### dl_utils/vae/vae_common.py
@@ -664,9 +664,10 @@ writes each group on its own independent-y subplot.
 
 ### dl_utils/plot/images.py
 
-Dependencies: math, os, pathlib (Path), typing (Any), dl_utils.plot._backend, numpy, torch, torchvision, matplotlib.pyplot.
+Dependencies: math, os, pathlib (Path), typing (Any),
+dl_utils.plot._backend, torch, torchvision, matplotlib.pyplot.
 Public entries: show_images, save_grid, save_image_row_grid,
-save_fixed_noise_samples, save_training_samples, vae_sample_grid.
+save_fixed_noise_samples, save_training_samples.
 `save_image_row_grid` supports an optional figure title, column labels, and
 output DPI while retaining labelled image rows.
 `save_fixed_noise_samples` preserves an unconditional generator's mode while

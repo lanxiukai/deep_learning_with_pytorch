@@ -4,10 +4,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from dl_utils.runtime.devices import try_gpu
-
-device = try_gpu()
-
 
 def diagonal_gaussian_kl(mu, std):
     """Return KL[N(mu, std^2) || N(0, 1)] per sample and dimension."""
@@ -18,7 +14,7 @@ def diagonal_gaussian_kl(mu, std):
         + std.square()
         - 1.0
         - 2.0 * torch.log(std.clamp_min(1e-8))
-    )
+    )  # (B, z_dim)
 
 
 def reparameterize(mu, std):
@@ -29,47 +25,54 @@ def reparameterize(mu, std):
 
 
 class VAEEncoder(nn.Module):
+    """Map 256x256 RGB images to diagonal-Gaussian posterior parameters."""
+
     # Manual forward (not Sequential) — the network branches into μ and log(σ)
-    def __init__(self, latent_dims=100):
+    def __init__(self, z_dim=100):
         super().__init__()
-        self.conv1 = nn.Conv2d(3, 8, 3, stride=2, padding=1)    # (B, 8, 128, 128)
-        self.conv2 = nn.Conv2d(8, 16, 3, stride=2, padding=1)   # (B, 16, 64, 64)
+        self.conv1 = nn.Conv2d(3, 8, 3, stride=2, padding=1)  # (B, 8, 128, 128)
+        self.conv2 = nn.Conv2d(8, 16, 3, stride=2, padding=1)  # (B, 16, 64, 64)
         self.batch2 = nn.BatchNorm2d(16)
-        self.conv3 = nn.Conv2d(16, 32, 3, stride=2, padding=0)  # (B, 32, 31, 31)
-        self.linear1 = nn.Linear(32*31*31, 1024)                # (B, 1024)
-        self.linear2 = nn.Linear(1024, latent_dims)   # μ
-        self.linear3 = nn.Linear(1024, latent_dims)   # log(σ)
+        self.conv3 = nn.Conv2d(16, 32, 3, stride=2)  # (B, 32, 31, 31)
+        self.linear1 = nn.Linear(32 * 31 * 31, 1024)  # (B, 1024)
+        self.linear2 = nn.Linear(1024, z_dim)  # μ
+        self.linear3 = nn.Linear(1024, z_dim)  # log(σ)
 
     def statistics(self, inputs):
         """Encode an image batch into posterior mean and standard deviation."""
         # inputs: (B, 3, 256, 256)
-        hidden = F.relu(self.conv1(inputs))               # (B, 8, 128, 128)
+        hidden = F.relu(self.conv1(inputs))  # (B, 8, 128, 128)
         hidden = F.relu(self.batch2(self.conv2(hidden)))  # (B, 16, 64, 64)
-        hidden = F.relu(self.conv3(hidden))               # (B, 32, 31, 31)
-        hidden = torch.flatten(hidden, start_dim=1)       # (B, 32 * 31 * 31)
-        hidden = F.relu(self.linear1(hidden))             # (B, 1024)
-        mu = self.linear2(hidden)                         # μ: (B, latent_dims)
+        hidden = F.relu(self.conv3(hidden))  # (B, 32, 31, 31)
+        hidden = torch.flatten(hidden, start_dim=1)  # (B, 32 * 31 * 31)
+        hidden = F.relu(self.linear1(hidden))  # (B, 1024)
+        mu = self.linear2(hidden)  # μ: (B, z_dim)
         # Bound only the exponential's numerical range, not the sampled z.
-        log_std = self.linear3(hidden).clamp(-12.0, 12.0) # log(σ): (B, latent_dims)
-        std = torch.exp(log_std)                          # σ: (B, latent_dims)
+        log_std = self.linear3(hidden).clamp(-12.0, 12.0)  # log(σ): (B, z_dim)
+        std = torch.exp(log_std)  # σ: (B, z_dim)
         return mu, std
 
     def forward(self, inputs):
         mu, std = self.statistics(inputs)
-        z = reparameterize(mu, std)  # (B, latent_dims)
+        z = reparameterize(mu, std)  # (B, z_dim)
         return mu, std, z
 
 
 class VAEDecoder(nn.Module):
-    def __init__(self, latent_dims=100):
+    """Decode latent vectors into 256x256 RGB Bernoulli means."""
+
+    def __init__(self, z_dim=100):
         super().__init__()
         self.linear = nn.Sequential(
-            nn.Linear(latent_dims, 1024),
-            nn.ReLU(True),
-            nn.Linear(1024, 32*31*31),
-            nn.ReLU(True))
-        self.unflatten = nn.Unflatten(dim=1,
-                  unflattened_size=(32,31,31))                 # (B, 32, 31, 31)
+            nn.Linear(z_dim, 1024),
+            nn.ReLU(inplace=True),
+            nn.Linear(1024, 32 * 31 * 31),
+            nn.ReLU(inplace=True),
+        )
+        self.unflatten = nn.Unflatten(
+            dim=1,
+            unflattened_size=(32, 31, 31),
+        )  # (B, 32, 31, 31)
         # padding: symmetric crop from output edges
         # 0 ≤ output_padding < stride:
         # extra rows/cols on right & bottom
@@ -77,30 +80,32 @@ class VAEDecoder(nn.Module):
             nn.ConvTranspose2d(32, 16, 3, stride=2,
                                 output_padding=1),             # (B, 16, 63, 63)
             nn.BatchNorm2d(16),
-            nn.ReLU(True),
+            nn.ReLU(inplace=True),
             nn.ConvTranspose2d(16, 8, 3, stride=2,
                                 padding=1, output_padding=1),  # (B, 8, 128, 128)
             nn.BatchNorm2d(8),
-            nn.ReLU(True),
+            nn.ReLU(inplace=True),
             nn.ConvTranspose2d(8, 3, 3, stride=2,
                                 padding=1, output_padding=1))  # (B, 3, 256, 256)
 
     def forward(self, z):
-        # latent vector z: (B, latent_dims)
+        # latent vector z: (B, z_dim)
         hidden = self.linear(z)               # (B, 32 * 31 * 31)
         hidden = self.unflatten(hidden)       # (B, 32, 31, 31)
         hidden = self.conv_transpose(hidden)  # (B, 3, 256, 256)
         # Pixel-wise Gaussian mean; the fixed likelihood scale is absorbed by
         # the reconstruction-loss coefficient in the lesson script.
-        hidden = torch.sigmoid(hidden)
-        return hidden
+        decoded_images = torch.sigmoid(hidden)
+        return decoded_images
 
 
 class VAE(nn.Module):
-    def __init__(self, latent_dims=100):
+    """Standard convolutional VAE for 256x256 RGB images."""
+
+    def __init__(self, z_dim=100):
         super().__init__()
-        self.encoder = VAEEncoder(latent_dims)
-        self.decoder = VAEDecoder(latent_dims)
+        self.encoder = VAEEncoder(z_dim)
+        self.decoder = VAEDecoder(z_dim)
 
     def reconstruct(self, inputs, *, sample=True):
         """Reconstruct from a posterior sample or deterministically from mu."""
@@ -116,7 +121,6 @@ __all__ = [
     "VAE",
     "VAEDecoder",
     "VAEEncoder",
-    "device",
     "diagonal_gaussian_kl",
     "reparameterize",
 ]

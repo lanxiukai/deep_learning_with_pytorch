@@ -5,20 +5,18 @@ import os
 from pathlib import Path
 from typing import Any
 
-from dl_utils.plot._backend import pyplot as _plt
-
-import numpy as np
 import torch
 import torchvision
 
 from dl_utils.gan.inference import generate_in_batches
+from dl_utils.plot._backend import pyplot as _plt
 
 
 def show_images(imgs, num_rows, num_cols, titles=None, scale=1.5, cmap=None):
     """Plot a list of images."""
     figsize = (num_cols * scale, num_rows * scale)
-    _, axes = _plt.subplots(num_rows, num_cols, figsize=figsize)
-    axes: Any = axes
+    _, raw_axes = _plt.subplots(num_rows, num_cols, figsize=figsize)
+    axes: Any = raw_axes
     axes = axes.flatten() if hasattr(axes, 'flatten') else [axes]
     for i, (ax, img) in enumerate(zip(axes, imgs)):
         if torch.is_tensor(img):
@@ -59,7 +57,7 @@ def save_grid(
                 raise ValueError(f"save_grid: hw={hw} implies V={H*W}, but got V={V}.")
             images = images.reshape(-1, 1, H, W)
         else:
-            side = int(math.isqrt(V))
+            side = math.isqrt(V)
             if side * side != V:
                 raise ValueError(f"save_grid: cannot infer square image shape from V={V}. Pass hw=(H,W).")
             images = images.reshape(-1, 1, side, side)
@@ -263,24 +261,3 @@ def save_training_samples(
         ],
         dpi=dpi,
     )
-
-
-def vae_sample_grid(
-    decoder: torch.nn.Module,
-    latent_dims: int,
-    device: torch.device,
-    output_path: str | Path,
-    show: bool = False,
-) -> None:
-    """Sample 18 vectors from N(0, 1) on ``device``, decode, render grid."""
-    with torch.no_grad():
-        noise = torch.randn(18, latent_dims).to(device)
-        imgs = decoder(noise).cpu()
-        grid = torchvision.utils.make_grid(imgs, 6, 3)
-        fig, ax = _plt.subplots(figsize=(6, 3), dpi=300)
-        _plt.imshow(np.transpose(grid.numpy(), (1, 2, 0)))
-        _plt.axis("off")
-        fig.savefig(output_path)
-        if show:
-            _plt.show()
-        _plt.close(fig)
