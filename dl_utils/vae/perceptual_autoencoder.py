@@ -1,4 +1,4 @@
-"""Shared network blocks for VAE-GAN, VQGAN, and KL-AE lessons.
+"""Shared network blocks for VQGAN and KL-autoencoder lessons.
 
 Only architectures and small loss primitives live here.  Each lesson keeps
 its optimizer phases and algorithm-specific reduction visible in the script.
@@ -7,7 +7,6 @@ its optimizer phases and algorithm-specific reduction visible in the script.
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 
 from dl_utils.vae.quantization import VectorQuantizer
@@ -80,7 +79,7 @@ class PerceptualDecoder32(nn.Module):
     def last_layer(self) -> nn.Parameter:
         layer = self.net[-2]
         if not isinstance(layer, nn.ConvTranspose2d):
-            raise RuntimeError("decoder final layer changed unexpectedly")
+            raise TypeError("decoder final layer changed unexpectedly")
         return layer.weight
 
     def forward(self, z: Tensor) -> Tensor:
@@ -190,15 +189,6 @@ class PatchDiscriminator32(nn.Module):
             nn.Conv2d(base_channels * 4, 1, 3, 1, 1),
         )
 
-    def extract_features(self, x: Tensor, *, layer: int = 1) -> Tensor:
-        if not 0 <= layer < len(self.features):
-            raise ValueError("feature layer is outside the discriminator")
-        for index, block in enumerate(self.features):
-            x = block(x)
-            if index == layer:
-                return x
-        raise RuntimeError("unreachable feature layer")
-
     def forward(self, x: Tensor) -> Tensor:
         for block in self.features:
             x = block(x)
@@ -210,7 +200,8 @@ class RandomFeaturePerceptualLoss(nn.Module):
 
     This is deliberately named *random* and must not be reported as LPIPS.
     It lets the algorithmic gradient path be tested without downloading
-    pretrained weights.  Real training should use ``VGGPerceptualLoss``.
+    pretrained weights. Real VQGAN training must use
+    ``LPIPSPerceptualLoss``.
     """
 
     def __init__(self, channels: int = 16) -> None:
@@ -279,8 +270,45 @@ class VGGPerceptualLoss(nn.Module):
         raise ValueError("reduction must be 'none' or 'mean'")
 
 
+class LPIPSPerceptualLoss(nn.Module):
+    """Frozen, learned LPIPS v0.1 distance for inputs in [-1, 1]."""
+
+    def __init__(self, *, net: str = "vgg") -> None:
+        super().__init__()
+        if net not in {"alex", "squeeze", "vgg"}:
+            raise ValueError("LPIPS net must be 'alex', 'squeeze', or 'vgg'")
+        # Keep the optional model construction lazy so offline smoke tests do
+        # not initialize pretrained feature networks.
+        import lpips
+
+        self.metric = lpips.LPIPS(
+            net=net,
+            version="0.1",
+            lpips=True,
+            pretrained=True,
+            pnet_rand=False,
+            pnet_tune=False,
+            eval_mode=True,
+            verbose=False,
+        )
+        self.eval().requires_grad_(False)
+
+    def forward(
+        self, prediction: Tensor, target: Tensor, *, reduction: str = "mean"
+    ) -> Tensor:
+        per_sample = self.metric(prediction, target, normalize=False).flatten(1)
+        per_sample = per_sample.mean(dim=1)
+        if reduction == "none":
+            return per_sample
+        if reduction == "mean":
+            return per_sample.mean()
+        raise ValueError("reduction must be 'none' or 'mean'")
+
+
 def build_perceptual_loss(name: str, device: torch.device) -> nn.Module:
     """Build a truthfully named frozen feature distance."""
+    if name == "lpips":
+        return LPIPSPerceptualLoss(net="vgg").to(device)
     if name == "vgg":
         return VGGPerceptualLoss().to(device)
     if name == "random":
@@ -313,6 +341,7 @@ def adaptive_adversarial_weight(
 
 __all__ = [
     "KLPerceptualAutoencoder32",
+    "LPIPSPerceptualLoss",
     "PatchDiscriminator32",
     "PerceptualDecoder32",
     "PerceptualEncoder32",

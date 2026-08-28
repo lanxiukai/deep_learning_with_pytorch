@@ -1,7 +1,7 @@
 """FSQ: replace learned vector lookup with fixed scalar quantization.
 
-This is a parallel tokenizer branch, not a successor to VQ-VAE-2.  Relative
-to ``6.0_vq_vae.py``, the encoder, decoder, straight-through gradient, frozen
+This is a matched tokenizer branch of VQ-VAE. Relative to
+``6.0_vq_vae.py``, the encoder, decoder, straight-through gradient, frozen
 tokenizer boundary, and second-stage PixelCNN remain.  The quantizer changes:
 
 * each low-dimensional channel is bounded and rounded to fixed levels;

@@ -1,12 +1,10 @@
-"""Compare IWAE bounds and IAF posterior families under one held-out protocol.
+"""Compare IWAE particle counts under one held-out protocol.
 
-Every available checkpoint is re-evaluated with the same large K, particle
-chunk size, test examples, and repeated random estimates.  This separates the
-training objective from the likelihood estimator.  Posterior-mean
-reconstruction from a deterministic posterior representative, Monte Carlo
-rate, active units, ESS/K, and prior samples are reported alongside the bound;
-none is treated as a substitute for the rest. For IAF, transforming the base
-Gaussian mean is not generally the exact transformed-posterior expectation.
+Every available K=1 or K>1 checkpoint is re-evaluated with the same large K,
+particle chunk size, test examples, and repeated random estimates. This keeps
+the training objective separate from the evaluation estimator. Posterior-mean
+reconstruction, Monte Carlo rate, active units, ESS/K, and prior samples are
+reported alongside the bound; none substitutes for the others.
 """
 
 from __future__ import annotations
@@ -24,7 +22,6 @@ from torchvision.utils import save_image
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.vae.inference import (
-    FlowGaussianVAE32,
     GaussianVAE32,
     importance_log_weights,
     log_mean_exp,
@@ -61,15 +58,9 @@ def load_model(
     checkpoint = torch.load(
         path, map_location=device, weights_only=True
     )
-    model_name = checkpoint.get("model_name")
-    if model_name == "iwae":
-        model: GaussianVAE32 = GaussianVAE32(
-            **checkpoint["model_config"]
-        )
-    elif model_name == "iaf_vae":
-        model = FlowGaussianVAE32(**checkpoint["model_config"])
-    else:
-        raise ValueError(f"{path} is not an IWAE/IAF checkpoint")
+    if checkpoint.get("model_name") != "iwae":
+        raise ValueError(f"{path} is not an IWAE checkpoint")
+    model = GaussianVAE32(**checkpoint["model_config"])
     model.load_state_dict(checkpoint["state_dict"])
     return model.to(device).eval()
 
@@ -91,7 +82,6 @@ def evaluate_model(
     all_ess_fractions = []
     all_weight_ranges = []
     all_rates = []
-    all_log_determinants = []
     posterior_codes = []
     distortion_total = 0.0
     distortion_examples = 0
@@ -125,26 +115,22 @@ def evaluate_model(
             all_ess_fractions.append(ess_fraction.cpu())
             all_weight_ranges.append(weight_range.cpu())
             all_rates.append(rate_samples.mean(dim=1).cpu())
-            all_log_determinants.append(
-                terms["log_determinant"].mean(dim=1).cpu()
-            )
             if repeat == 0:
-                representative = model.posterior_representative(x)
-                reconstruction = model.decode(representative)
+                posterior_mean, _ = model.encode(x)
+                reconstruction = model.decode(posterior_mean)
                 distortion_total += float(
                     F.binary_cross_entropy(
                         reconstruction, x, reduction="sum"
                     )
                 )
                 distortion_examples += x.shape[0]
-                posterior_codes.append(representative.cpu())
+                posterior_codes.append(posterior_mean.cpu())
             examples += x.shape[0]
         repeat_bounds.append(bound_total / examples)
 
     ess = torch.cat(all_ess_fractions)
     ranges = torch.cat(all_weight_ranges)
     rates = torch.cat(all_rates)
-    log_determinants = torch.cat(all_log_determinants)
     codes = torch.cat(posterior_codes)
     code_variance = codes.var(dim=0, unbiased=False)
     bounds = torch.tensor(repeat_bounds, dtype=torch.float64)
@@ -157,7 +143,7 @@ def evaluate_model(
             bounds.std(unbiased=False)
         ),
         "repeat_bounds": repeat_bounds,
-        "deterministic_posterior_representative_distortion": (
+        "posterior_mean_distortion": (
             distortion_total / distortion_examples
         ),
         "monte_carlo_rate": float(rates.mean()),
@@ -172,7 +158,6 @@ def evaluate_model(
             )
         ],
         "log_weight_range_mean": float(ranges.mean()),
-        "mean_log_determinant": float(log_determinants.mean()),
     }
 
 
@@ -199,7 +184,6 @@ def checkpoint_paths(args: argparse.Namespace) -> dict[str, Path]:
     return {
         "vae_elbo_k1": args.iwae_k1_checkpoint,
         "iwae_k5": args.iwae_k5_checkpoint,
-        "iaf_elbo": args.iaf_checkpoint,
     }
 
 
@@ -210,10 +194,9 @@ def evaluate(args: argparse.Namespace) -> None:
     available = {name: path for name, path in paths.items() if path.exists()}
     if not available:
         raise FileNotFoundError(
-            "no default checkpoint exists; run 3.0_iwae.py and/or "
-            "3.1_iaf_vae.py first"
+            "no default checkpoint exists; run 3.0_iwae.py first"
         )
-    out_dir = OUTPUT_ROOT / "inference_comparison"
+    out_dir = OUTPUT_ROOT / "iwae_evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, object] = {
         "protocol": {
@@ -274,32 +257,23 @@ def smoke_test() -> None:
         ),
         batch_size=4,
     )
-    for model in (
-        GaussianVAE32(
-            latent_dim=4, hidden_channels=32, context_dim=16
-        ),
-        FlowGaussianVAE32(
-            latent_dim=4,
-            hidden_channels=32,
-            context_dim=16,
-            flow_layers=2,
-            flow_hidden_dim=16,
-        ),
-    ):
-        metrics = evaluate_model(
-            model,
-            loader,
-            particles=5,
-            particle_chunk_size=2,
-            repeats=2,
-            max_examples=8,
-            active_variance_threshold=1e-3,
-            seed=7,
-            device=torch.device("cpu"),
-        )
-        assert metrics["examples_per_repeat"] == 8
-        assert 0.0 < metrics["ess_fraction_mean"] <= 1.0
-        assert torch.isfinite(torch.tensor(metrics["bound_mean"]))
+    model = GaussianVAE32(
+        latent_dim=4, hidden_channels=32, context_dim=16
+    )
+    metrics = evaluate_model(
+        model,
+        loader,
+        particles=5,
+        particle_chunk_size=2,
+        repeats=2,
+        max_examples=8,
+        active_variance_threshold=1e-3,
+        seed=7,
+        device=torch.device("cpu"),
+    )
+    assert metrics["examples_per_repeat"] == 8
+    assert 0.0 < metrics["ess_fraction_mean"] <= 1.0
+    assert torch.isfinite(torch.tensor(metrics["bound_mean"]))
     print("smoke test passed")
 
 
@@ -323,11 +297,6 @@ def parse_args() -> argparse.Namespace:
         "--iwae-k5-checkpoint",
         type=Path,
         default=OUTPUT_ROOT / "iwae" / "k5" / "model.pth",
-    )
-    parser.add_argument(
-        "--iaf-checkpoint",
-        type=Path,
-        default=OUTPUT_ROOT / "iaf_vae" / "model.pth",
     )
     return parser.parse_args()
 

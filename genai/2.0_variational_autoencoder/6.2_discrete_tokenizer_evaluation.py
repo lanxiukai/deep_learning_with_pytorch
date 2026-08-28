@@ -1,4 +1,4 @@
-"""Compare discrete tokenizers and their frozen priors on held-out CIFAR-10.
+"""Compare VQ-VAE and FSQ with their frozen priors on held-out CIFAR-10.
 
 Tokenizer evidence:
 
@@ -9,7 +9,6 @@ System evidence:
 
 * held-out prior cross-entropy and effective bits per image;
 * prior-sampled feature-distribution distance and sampling time;
-* VQ-VAE-2 fixed-top/resampled-bottom versus regenerated-top interventions.
 
 The feature metric uses torchvision Inception-v3 with an optional fixed random
 projection.  It is a consistent Fréchet proxy for this comparison, not the
@@ -44,7 +43,6 @@ from dl_utils.vae.image_quality import (
     frechet_distance,
 )
 from dl_utils.vae.quantization import (
-    VQVAE2,
     VQVAE32,
     FSQAutoencoder32,
     TokenUsageAccumulator,
@@ -58,13 +56,12 @@ OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 @dataclass
 class DiscreteSystem:
     name: str
-    tokenizer: VQVAE32 | VQVAE2 | FSQAutoencoder32
-    priors: tuple[PixelCNNPrior, ...]
+    tokenizer: VQVAE32 | FSQAutoencoder32
+    prior: PixelCNNPrior | None
 
     @property
     def has_complete_prior(self) -> bool:
-        required = 2 if isinstance(self.tokenizer, VQVAE2) else 1
-        return len(self.priors) == required
+        return self.prior is not None
 
     def reconstruct_and_tokens(
         self, x: Tensor
@@ -76,22 +73,11 @@ class DiscreteSystem:
             ], {
                 "quantization_mse": diagnostics["quantization_mse"]
             }
-        if isinstance(self.tokenizer, FSQAutoencoder32):
-            reconstruction, indices, diagnostics = self.tokenizer(x)
-            return reconstruction, [
-                ("tokens", indices, self.tokenizer.quantizer.codebook_size)
-            ], {
-                "quantization_mse": diagnostics["quantization_mse"]
-            }
-        reconstruction, top, bottom, _, diagnostics = self.tokenizer(x)
+        reconstruction, indices, diagnostics = self.tokenizer(x)
         return reconstruction, [
-            ("top", top, self.tokenizer.top_quantizer.codebook_size),
-            ("bottom", bottom, self.tokenizer.bottom_quantizer.codebook_size),
+            ("tokens", indices, self.tokenizer.quantizer.codebook_size)
         ], {
-            "top_quantization_mse": diagnostics["top_quantization_mse"],
-            "bottom_quantization_mse": diagnostics[
-                "bottom_quantization_mse"
-            ],
+            "quantization_mse": diagnostics["quantization_mse"]
         }
 
     def prior_losses(
@@ -99,20 +85,10 @@ class DiscreteSystem:
     ) -> dict[str, Tensor]:
         if not self.has_complete_prior:
             return {}
-        if isinstance(self.tokenizer, VQVAE2):
-            top = token_levels[0][1]
-            bottom = token_levels[1][1]
-            top_prior, bottom_prior = self.priors
-            condition = self.tokenizer.top_condition_from_indices(top)
-            return {
-                "top": F.cross_entropy(top_prior(top), top),
-                "bottom": F.cross_entropy(
-                    bottom_prior(bottom, condition), bottom
-                ),
-            }
+        assert self.prior is not None
         indices = token_levels[0][1]
         return {
-            "tokens": F.cross_entropy(self.priors[0](indices), indices)
+            "tokens": F.cross_entropy(self.prior(indices), indices)
         }
 
     @torch.inference_mode()
@@ -125,26 +101,8 @@ class DiscreteSystem:
     ) -> Tensor:
         if not self.has_complete_prior:
             raise RuntimeError("the system does not have its complete prior")
-        if isinstance(self.tokenizer, VQVAE2):
-            top_prior, bottom_prior = self.priors
-            top = top_prior.sample(
-                count,
-                4,
-                4,
-                device=device,
-                temperature=temperature,
-            )
-            condition = self.tokenizer.top_condition_from_indices(top)
-            bottom = bottom_prior.sample(
-                count,
-                8,
-                8,
-                device=device,
-                condition=condition,
-                temperature=temperature,
-            )
-            return self.tokenizer.decode_indices(top, bottom)
-        indices = self.priors[0].sample(
+        assert self.prior is not None
+        indices = self.prior.sample(
             count,
             8,
             8,
@@ -220,7 +178,7 @@ def load_single_level_system(
         raise ValueError(
             f"{tokenizer_path} has no valid tokenizer interface identity"
         )
-    priors: tuple[PixelCNNPrior, ...] = ()
+    prior = None
     if prior_path.exists():
         prior = _load_prior(
             prior_path,
@@ -228,56 +186,10 @@ def load_single_level_system(
             expected_model_name=expected_prior_name,
             tokenizer_interface_id=tokenizer_interface_id,
         )
-        priors = (prior,)
     return DiscreteSystem(
         name,
         tokenizer.to(device).eval().requires_grad_(False),
-        priors,
-    )
-
-
-def load_vq_vae_2_system(
-    args: argparse.Namespace, device: torch.device
-) -> DiscreteSystem | None:
-    if not args.vq_vae_2_tokenizer.exists():
-        return None
-    checkpoint = torch.load(
-        args.vq_vae_2_tokenizer,
-        map_location=device,
-        weights_only=True,
-    )
-    if checkpoint.get("model_name") != "vq_vae_2_tokenizer":
-        raise ValueError("VQ-VAE-2 tokenizer checkpoint has the wrong type")
-    tokenizer = VQVAE2(**checkpoint["model_config"]).to(device)
-    tokenizer.load_state_dict(checkpoint["state_dict"])
-    tokenizer_interface_id = model_state_fingerprint(tokenizer)
-    if checkpoint.get("interface_id") != tokenizer_interface_id:
-        raise ValueError(
-            "VQ-VAE-2 tokenizer has no valid interface identity"
-        )
-    priors = []
-    if args.vq_vae_2_top_prior.exists() and args.vq_vae_2_bottom_prior.exists():
-        for path, expected_model_name in (
-            (
-                args.vq_vae_2_top_prior,
-                "vq_vae_2_top_prior",
-            ),
-            (
-                args.vq_vae_2_bottom_prior,
-                "vq_vae_2_bottom_conditional_prior",
-            ),
-        ):
-            prior = _load_prior(
-                path,
-                device,
-                expected_model_name=expected_model_name,
-                tokenizer_interface_id=tokenizer_interface_id,
-            )
-            priors.append(prior)
-    return DiscreteSystem(
-        "vq_vae_2",
-        tokenizer.eval().requires_grad_(False),
-        tuple(priors),
+        prior,
     )
 
 
@@ -291,7 +203,6 @@ def load_systems(
             prior_path=args.vq_vae_prior,
             device=device,
         ),
-        load_vq_vae_2_system(args, device),
         load_single_level_system(
             name="fsq",
             tokenizer_path=args.fsq_tokenizer,
@@ -412,6 +323,7 @@ def evaluate_tokenizer(
 
     prior_metrics: dict[str, object] | None = None
     if prior_totals:
+        assert system.prior is not None
         per_level = {
             name: value / examples / math.log(2)
             for name, value in prior_totals.items()
@@ -425,8 +337,7 @@ def evaluate_tokenizer(
             "bits_per_image": prior_bits_per_image,
             "parameter_count": sum(
                 parameter.numel()
-                for prior in system.priors
-                for parameter in prior.parameters()
+                for parameter in system.prior.parameters()
             ),
         }
     assert comparison is not None
@@ -489,81 +400,6 @@ def evaluate_generation(
     }, torch.cat(batches)[:64]
 
 
-@torch.inference_mode()
-def save_vq_vae_2_interventions(
-    system: DiscreteSystem,
-    loader: DataLoader,
-    out_dir: Path,
-    *,
-    variants: int,
-    temperature: float,
-    device: torch.device,
-) -> dict[str, float]:
-    if not isinstance(system.tokenizer, VQVAE2):
-        return {}
-    if not system.has_complete_prior:
-        return {}
-    top_prior, bottom_prior = system.priors
-    x, _ = next(iter(loader))
-    x = x[:8].to(device)
-    _, _, real_top, _, _, _ = system.tokenizer.encode(x)
-    repeated_top = real_top[:, None, ...].expand(
-        -1, variants, -1, -1
-    ).reshape(-1, 4, 4)
-    condition = system.tokenizer.top_condition_from_indices(repeated_top)
-    bottom = bottom_prior.sample(
-        len(repeated_top),
-        8,
-        8,
-        device=device,
-        condition=condition,
-        temperature=temperature,
-    )
-    fixed_top_images = system.tokenizer.decode_indices(
-        repeated_top, bottom
-    ).reshape(8, variants, 3, 32, 32)
-    save_image(
-        fixed_top_images.flatten(0, 1).mul(0.5).add(0.5),
-        out_dir / "vq_vae_2_fixed_top_resampled_bottom.png",
-        nrow=variants,
-    )
-
-    changed_top = top_prior.sample(
-        8 * variants,
-        4,
-        4,
-        device=device,
-        temperature=temperature,
-    )
-    changed_condition = system.tokenizer.top_condition_from_indices(
-        changed_top
-    )
-    changed_bottom = bottom_prior.sample(
-        len(changed_top),
-        8,
-        8,
-        device=device,
-        condition=changed_condition,
-        temperature=temperature,
-    )
-    changed_top_images = system.tokenizer.decode_indices(
-        changed_top, changed_bottom
-    ).reshape(8, variants, 3, 32, 32)
-    save_image(
-        changed_top_images.flatten(0, 1).mul(0.5).add(0.5),
-        out_dir / "vq_vae_2_regenerated_top_and_bottom.png",
-        nrow=variants,
-    )
-    return {
-        "fixed_top_pixel_standard_deviation": float(
-            fixed_top_images.std(dim=1).mean()
-        ),
-        "changed_top_pixel_standard_deviation": float(
-            changed_top_images.std(dim=1).mean()
-        ),
-    }
-
-
 def evaluate(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -571,7 +407,7 @@ def evaluate(args: argparse.Namespace) -> None:
     systems = load_systems(args, device)
     if not systems:
         raise FileNotFoundError(
-            "no tokenizer checkpoint exists; run 6.0, 6.1, or 6.2 first"
+            "no tokenizer checkpoint exists; run 6.0 or 6.1 first"
         )
     projection_dim = (
         None if args.inception_projection_dim == 0
@@ -643,16 +479,6 @@ def evaluate(args: argparse.Namespace) -> None:
             )
         else:
             metrics["generation"] = None
-        metrics["hierarchy_intervention"] = (
-            save_vq_vae_2_interventions(
-                system,
-                loader,
-                out_dir,
-                variants=args.hierarchy_variants,
-                temperature=args.temperature,
-                device=device,
-            )
-        )
         model_results[system.name] = metrics
         print(
             f"{system.name}: MSE={metrics['mse']:.4f}, "
@@ -691,7 +517,7 @@ def smoke_test() -> None:
     system = DiscreteSystem(
         "smoke",
         tokenizer.eval(),
-        (prior.eval(),),
+        prior.eval(),
     )
     features = TinyFeatures()
     real, generated_reference = real_feature_moments(
@@ -738,7 +564,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generation-examples", type=int, default=256)
     parser.add_argument("--generation-batch-size", type=int, default=32)
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--hierarchy-variants", type=int, default=6)
     parser.add_argument(
         "--inception-projection-dim", type=int, default=256
     )
@@ -754,21 +579,6 @@ def parse_args() -> argparse.Namespace:
         "--vq-vae-prior",
         type=Path,
         default=OUTPUT_ROOT / "vq_vae" / "pixelcnn_prior.pth",
-    )
-    parser.add_argument(
-        "--vq-vae-2-tokenizer",
-        type=Path,
-        default=OUTPUT_ROOT / "vq_vae_2" / "tokenizer.pth",
-    )
-    parser.add_argument(
-        "--vq-vae-2-top-prior",
-        type=Path,
-        default=OUTPUT_ROOT / "vq_vae_2" / "top_prior.pth",
-    )
-    parser.add_argument(
-        "--vq-vae-2-bottom-prior",
-        type=Path,
-        default=OUTPUT_ROOT / "vq_vae_2" / "bottom_prior.pth",
     )
     parser.add_argument(
         "--fsq-tokenizer",

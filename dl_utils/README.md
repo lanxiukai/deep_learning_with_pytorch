@@ -593,9 +593,9 @@ mutual_information_matrix, quantile_bin_edges, train_factor_probe.
 
 Dependencies: math, torch, torch.nn.functional, torch.nn,
 dl_utils.vae.vae_common.
-Public entries (__all__): AffineIAFLayer, FlowGaussianVAE32, GaussianVAE32,
-bernoulli_log_density, importance_diagnostics, importance_log_weights,
-log_mean_exp, model_config, standard_normal_log_density.
+Public entries (__all__): GaussianVAE32, bernoulli_log_density,
+importance_diagnostics, importance_log_weights, log_mean_exp, model_config,
+standard_normal_log_density.
 
 ### dl_utils/vae/vae_hierarchy.py
 
@@ -633,13 +633,13 @@ CausalTransformerPrior.
 
 ### dl_utils/vae/perceptual_autoencoder.py
 
-Dependencies: torch, torch.nn.functional, torch.nn,
+Dependencies: lpips, torch, torch.nn.functional, torch.nn,
 dl_utils.vae.quantization, dl_utils.vae.vae_common;
 torchvision.models is imported lazily only for pretrained VGG features.
 Public entries (__all__): ResidualBlock, PerceptualEncoder32,
 PerceptualDecoder32, VQPerceptualAutoencoder32,
 KLPerceptualAutoencoder32, PatchDiscriminator32,
-RandomFeaturePerceptualLoss, VGGPerceptualLoss,
+LPIPSPerceptualLoss, RandomFeaturePerceptualLoss, VGGPerceptualLoss,
 adaptive_adversarial_weight, build_perceptual_loss.
 
 ### dl_utils/plot/__init__.py

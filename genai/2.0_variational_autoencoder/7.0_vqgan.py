@@ -1,17 +1,16 @@
-"""VQGAN: VQ-VAE tokenizer plus perceptual and patch-adversarial losses.
+"""VQGAN: VQ-VAE tokenizer plus LPIPS and patch-adversarial losses.
 
 The first stage adds three ideas to ``6.0_vq_vae.py``:
 
-* frozen pretrained VGG features as a compact perceptual-loss proxy;
+* frozen, learned LPIPS v0.1 distance with a VGG trunk;
 * a PatchGAN discriminator with hinge loss and delayed activation;
 * a fixed adversarial-weight baseline, then an opt-in stopped gradient-norm
   ratio on the decoder's last layer.
 
-The published VQGAN uses LPIPS; VGG features keep this repository dependency-
-light while preserving the perceptual-gradient path.  Do not label the logged
-value as LPIPS.  Stage 2 freezes the tokenizer and trains a compact causal
-Transformer, retaining VQGAN's token-prior interface without its large-scale
-sliding-window setup.
+The offline smoke test uses explicitly named frozen random features only to
+exercise the gradient path without loading pretrained weights. Stage 2 freezes
+the tokenizer and trains a compact causal Transformer, retaining VQGAN's
+token-prior interface without its large-scale sliding-window setup.
 
 The tokenizer file is a stage handoff, not a training-resume checkpoint. Each
 stage stores final weights, constructor metadata, and the tokenizer identity;
@@ -74,9 +73,11 @@ def vqgan_autoencoder_step(
 ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
     reconstruction, indices, vq_loss, diagnostics = model(x)
     pixel_l1 = F.l1_loss(reconstruction, x)
-    feature_loss = perceptual(reconstruction, x)
+    perceptual_loss = perceptual(reconstruction, x)
     # VQGAN's adaptive ratio uses the reconstruction scalar, not VQ loss.
-    reconstruction_objective = pixel_l1 + float(perceptual_weight) * feature_loss
+    reconstruction_objective = (
+        pixel_l1 + float(perceptual_weight) * perceptual_loss
+    )
 
     discriminator.requires_grad_(False)
     try:
@@ -109,7 +110,7 @@ def vqgan_autoencoder_step(
     return reconstruction.detach(), indices.detach(), {
         "autoencoder": loss.detach(),
         "pixel_l1": pixel_l1.detach(),
-        "frozen_feature": feature_loss.detach(),
+        "perceptual": perceptual_loss.detach(),
         "vq": vq_loss.detach(),
         "generator_adversarial": adversarial.detach(),
         "adversarial_scale": adversarial_scale.detach(),
@@ -302,7 +303,7 @@ def evaluate_tokenizer(
     )
     return {
         "pixel_l1": values[0],
-        "feature_distance": values[1],
+        "perceptual_distance": values[1],
         "quantization_mse": values[2],
         "real_logit": values[3],
         "reconstruction_logit": values[4],
@@ -361,7 +362,7 @@ def train_tokenizer(
     }
     model = VQPerceptualAutoencoder32(**config).to(device)
     discriminator = PatchDiscriminator32(args.discriminator_channels).to(device)
-    perceptual = build_perceptual_loss(args.perceptual, device)
+    perceptual = build_perceptual_loss("lpips", device)
     ae_optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, betas=(0.5, 0.9)
     )
@@ -403,7 +404,7 @@ def train_tokenizer(
             values = [
                 metrics["autoencoder"],
                 metrics["pixel_l1"],
-                metrics["frozen_feature"],
+                metrics["perceptual"],
                 metrics["vq"],
                 metrics["generator_adversarial"],
                 metrics["adversarial_scale"],
@@ -419,7 +420,7 @@ def train_tokenizer(
         epoch_usage = usage.statistics()
         print(
             f"tokenizer {epoch:03d}: AE={means[0]:.4f}, L1={means[1]:.4f}, "
-            f"feature={means[2]:.4f}, VQ={means[3]:.4f}, G={means[4]:.4f}, "
+            f"perceptual={means[2]:.4f}, VQ={means[3]:.4f}, G={means[4]:.4f}, "
             f"lambda={means[5]:.3f}, PPL/active="
             f"{epoch_usage['perplexity'].item():.1f}/"
             f"{epoch_usage['active_codes'].item()}, D={means[6]:.4f}, "
@@ -448,13 +449,14 @@ def train_tokenizer(
             "discriminator_config": {
                 "base_channels": args.discriminator_channels,
             },
+            "perceptual_loss": "lpips-v0.1-vgg",
             "model_config": config,
         },
         out_dir / "tokenizer.pth",
     )
     print(
         f"validation tokenizer: L1={validation['pixel_l1']:.4f}, "
-        f"feature={validation['feature_distance']:.4f}, "
+        f"LPIPS={validation['perceptual_distance']:.4f}, "
         f"entropy={validation['marginal_entropy_bits_per_token']:.3f} "
         f"bits/token, active={validation['active_codes']:.0f}/"
         f"{args.codebook_size}"
@@ -466,6 +468,10 @@ def load_tokenizer(path: Path, device: torch.device) -> VQPerceptualAutoencoder3
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     if checkpoint.get("model_name") != "vqgan_tokenizer":
         raise ValueError("checkpoint is not a VQGAN tokenizer")
+    if checkpoint.get("perceptual_loss") != "lpips-v0.1-vgg":
+        raise ValueError(
+            "tokenizer was not trained with frozen learned LPIPS; retrain stage 1"
+        )
     model = VQPerceptualAutoencoder32(**checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     if checkpoint.get("interface_id") != model_state_fingerprint(model):
@@ -593,7 +599,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codebook-size", type=int, default=512)
     parser.add_argument("--commitment", type=float, default=0.25)
     parser.add_argument("--discriminator-channels", type=int, default=64)
-    parser.add_argument("--perceptual", choices=("vgg", "random"), default="vgg")
     parser.add_argument("--perceptual-weight", type=float, default=1.0)
     parser.add_argument("--vq-weight", type=float, default=1.0)
     parser.add_argument("--discriminator-weight", type=float, default=1.0)

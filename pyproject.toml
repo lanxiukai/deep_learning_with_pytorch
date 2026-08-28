@@ -10,6 +10,7 @@ dependencies = [
     "einops==0.8.2",
     "imageio==2.37.4",
     "ipython==9.16.0",
+    "lpips==0.1.4",
     "matplotlib==3.11.1",
     "matplotlib-inline==0.2.2",
     "numpy==2.4.4",

@@ -124,6 +124,19 @@ def _next_batch(
     return iterator, batch
 
 
+def gradient_norm(*modules: torch.nn.Module) -> Tensor:
+    """Return the detached global L2 norm over available gradients."""
+    norms = [
+        parameter.grad.detach().norm()
+        for module in modules
+        for parameter in module.parameters()
+        if parameter.grad is not None
+    ]
+    if not norms:
+        raise RuntimeError("no gradients are available")
+    return torch.stack(norms).norm().detach()
+
+
 def train_one(
     args: argparse.Namespace,
     *,
@@ -169,10 +182,16 @@ def train_one(
         loss = -log_mean_exp(log_weights).mean()
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        optimizer.step()
 
         diagnostics = importance_diagnostics(log_weights, terms)
         diagnostics["loss"] = loss.detach()
+        diagnostics["posterior_gradient_norm"] = gradient_norm(
+            model.encoder, model.context, model.base_posterior
+        )
+        diagnostics["decoder_gradient_norm"] = gradient_norm(
+            model.decoder_input, model.decoder
+        )
+        optimizer.step()
         for name, value in diagnostics.items():
             running[name] = running.get(name, 0.0) + float(value) * x.shape[0]
         running_examples += x.shape[0]
@@ -186,7 +205,9 @@ def train_one(
                 f"loss={means['loss']:.3f}, "
                 f"bound={means['bound']:.3f}, "
                 f"ESS/K={means['ess_fraction']:.3f}, "
-                f"log-w range={means['log_weight_range']:.3f}"
+                f"log-w range={means['log_weight_range']:.3f}, "
+                f"grad(q/p)={means['posterior_gradient_norm']:.3f}/"
+                f"{means['decoder_gradient_norm']:.3f}"
             )
             running.clear()
             running_examples = 0
@@ -239,9 +260,15 @@ def smoke_test() -> None:
     loss = -log_mean_exp(log_weights_5).mean()
     loss.backward()
     diagnostics = importance_diagnostics(log_weights_5, terms_5)
+    posterior_gradient = gradient_norm(
+        model.encoder, model.context, model.base_posterior
+    )
+    decoder_gradient = gradient_norm(model.decoder_input, model.decoder)
     assert log_weights_5.shape == (4, 5)
     assert model.base_posterior.weight.grad is not None
     assert model.decoder[-2].weight.grad is not None
+    assert posterior_gradient.isfinite() and posterior_gradient > 0
+    assert decoder_gradient.isfinite() and decoder_gradient > 0
     assert all(torch.isfinite(value) for value in diagnostics.values())
     print(
         "smoke test passed: K=1 identity and chunked K=5 "

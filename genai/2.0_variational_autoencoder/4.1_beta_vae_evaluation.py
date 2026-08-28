@@ -1,8 +1,7 @@
-"""Evaluate KL-control and TC representation branches.
+"""Evaluate beta-VAE rate control and representation diagnostics.
 
-Beta-VAE and beta-TCVAE use actual per-sample KL and nearest-rate pairs. Both
-branches share active units, a fixed-capacity factor probe, MIG, and modularity
-on the same procedural split.
+Each beta checkpoint is evaluated on the same procedural split with actual
+per-sample KL, active units, a fixed-capacity factor probe, MIG, and modularity.
 
 The metrics use procedural ground-truth factors.  They describe this data and
 inductive bias, not a theorem that unsupervised semantic factors are
@@ -46,9 +45,7 @@ OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 
 
 def discover_checkpoints(args: argparse.Namespace) -> list[Path]:
-    paths = sorted(args.beta_vae_root.rglob("model.pth"))
-    paths.extend(sorted(args.beta_tc_vae_root.rglob("model.pth")))
-    return paths
+    return sorted(args.beta_vae_root.rglob("model.pth"))
 
 
 def load_checkpoint(
@@ -57,8 +54,8 @@ def load_checkpoint(
     checkpoint = torch.load(
         path, map_location=device, weights_only=True
     )
-    if checkpoint.get("model_name") not in {"beta_vae", "beta_tc_vae"}:
-        raise ValueError(f"{path} is not a beta-VAE family checkpoint")
+    if checkpoint.get("model_name") != "beta_vae":
+        raise ValueError(f"{path} is not a beta-VAE checkpoint")
     model = GaussianVAE32(**checkpoint["model_config"])
     model.load_state_dict(checkpoint["state_dict"])
     return model.to(device).eval(), checkpoint
@@ -97,7 +94,7 @@ def encode_dataset(
     examples = 0
     for x, batch_factors in loader:
         x = x.to(device, non_blocking=True)
-        mu, logvar, _ = model.encode(x)
+        mu, logvar = model.encode(x)
         per_dimension_rate = diagonal_gaussian_kl_from_logvar(mu, logvar)
         if calculate_reconstruction:
             reconstruction = model.decode(mu)
@@ -260,98 +257,23 @@ def aggregate_records(
     return aggregate
 
 
-def match_rates(
-    records: list[dict[str, object]]
-) -> list[dict[str, object]]:
-    beta_records = [
-        record for record in records if record["model_name"] == "beta_vae"
-    ]
-    tc_records = [
-        record
-        for record in records
-        if record["model_name"] == "beta_tc_vae"
-    ]
-    matches = []
-    for tc_record in tc_records:
-        candidates = [
-            record
-            for record in beta_records
-            if record["seed"] == tc_record["seed"]
-            and record["model_config"] == tc_record["model_config"]
-        ]
-        if not candidates:
-            continue
-        baseline = min(
-            candidates,
-            key=lambda record: abs(
-                float(record["rate"]) - float(tc_record["rate"])
-            ),
-        )
-        matches.append(
-            {
-                "seed": tc_record["seed"],
-                "beta_tc_beta": tc_record["control_value"],
-                "beta_vae_beta": baseline["control_value"],
-                "beta_tc_rate": tc_record["rate"],
-                "beta_vae_rate": baseline["rate"],
-                "absolute_rate_gap": abs(
-                    float(tc_record["rate"]) - float(baseline["rate"])
-                ),
-                "distortion_delta_tc_minus_beta": (
-                    float(tc_record["distortion"])
-                    - float(baseline["distortion"])
-                ),
-                "mig_delta_tc_minus_beta": (
-                    float(tc_record["mig"]) - float(baseline["mig"])
-                ),
-                "modularity_delta_tc_minus_beta": (
-                    float(tc_record["modularity"])
-                    - float(baseline["modularity"])
-                ),
-                "probe_accuracy_delta_tc_minus_beta": (
-                    float(tc_record["probe_mean_accuracy"])
-                    - float(baseline["probe_mean_accuracy"])
-                ),
-            }
-        )
-    return matches
-
-
 def save_summary_plot(
     records: list[dict[str, object]], path: Path
 ) -> None:
-    markers = {"beta_vae": "o", "beta_tc_vae": "^"}
-    colors = {
-        "beta_vae": "tab:blue",
-        "beta_tc_vae": "tab:orange",
-    }
     with plt.ioff():
         figure, axes = plt.subplots(1, 2, figsize=(10, 4.5))
-        for model_name in ("beta_vae", "beta_tc_vae"):
-            group = [
-                record
-                for record in records
-                if record["model_name"] == model_name
-            ]
-            if not group:
-                continue
-            label = "beta-VAE" if model_name == "beta_vae" else "beta-TCVAE"
-            axes[0].scatter(
-                [record["rate"] for record in group],
-                [record["distortion"] for record in group],
-                marker=markers[model_name],
-                color=colors[model_name],
-                label=label,
-                alpha=0.8,
-            )
-            axes[1].scatter(
-                [record["rate"] for record in group],
-                [record["mig"] for record in group],
-                marker=markers[model_name],
-                color=colors[model_name],
-                label=label,
-                alpha=0.8,
-            )
+        axes[0].scatter(
+            [record["rate"] for record in records],
+            [record["distortion"] for record in records],
+            color="tab:blue",
+            alpha=0.8,
+        )
+        axes[1].scatter(
+            [record["rate"] for record in records],
+            [record["mig"] for record in records],
+            color="tab:blue",
+            alpha=0.8,
+        )
         axes[0].set(
             xlabel="Rate (nats / image)",
             ylabel="Bernoulli distortion",
@@ -360,13 +282,10 @@ def save_summary_plot(
         axes[1].set(
             xlabel="Rate (nats / image)",
             ylabel="MIG",
-            title="Compactness must be compared at matched rate",
+            title="Representation score across rate",
         )
         for axis in axes:
             axis.grid(alpha=0.25)
-            handles, _ = axis.get_legend_handles_labels()
-            if handles:
-                axis.legend()
         figure.tight_layout()
         figure.savefig(path, dpi=200)
         plt.close(figure)
@@ -377,8 +296,7 @@ def evaluate(args: argparse.Namespace) -> None:
     paths = discover_checkpoints(args)
     if not paths:
         raise FileNotFoundError(
-            "no beta-VAE checkpoints found; run 4.0_beta_vae.py and "
-            "4.1_beta_tc_vae.py first"
+            "no beta-VAE checkpoints found; run 4.0_beta_vae.py first"
         )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     split_seeds = set()
@@ -387,7 +305,7 @@ def evaluate(args: argparse.Namespace) -> None:
         checkpoint = torch.load(
             path, map_location="cpu", weights_only=True
         )
-        if checkpoint.get("model_name") in {"beta_vae", "beta_tc_vae"}:
+        if checkpoint.get("model_name") == "beta_vae":
             split_seeds.add(int(checkpoint["split_seed"]))
             metadata.append(path)
     if len(split_seeds) != 1:
@@ -411,7 +329,7 @@ def evaluate(args: argparse.Namespace) -> None:
             f"probe={record['probe_mean_accuracy']:.3f}"
         )
 
-    out_dir = OUTPUT_ROOT / "disentanglement_evaluation"
+    out_dir = OUTPUT_ROOT / "beta_vae_evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
     results = {
         "protocol": {
@@ -421,9 +339,6 @@ def evaluate(args: argparse.Namespace) -> None:
             "split_seed": split_seed,
             "code_bins": args.code_bins,
             "probe_steps": args.probe_steps,
-            "comparison_contracts": {
-                "beta_tc_vae": "nearest per-sample KL rate",
-            },
             "identifiability_warning": (
                 "Controlled-factor scores do not establish unsupervised "
                 "semantic identifiability."
@@ -431,7 +346,6 @@ def evaluate(args: argparse.Namespace) -> None:
         },
         "runs": records,
         "aggregate_by_model_and_control": aggregate_records(records),
-        "nearest_rate_pairs": match_rates(records),
     }
     (out_dir / "metrics.json").write_text(
         json.dumps(results, indent=2) + "\n", encoding="utf-8"
@@ -494,11 +408,6 @@ def parse_args() -> argparse.Namespace:
         "--beta-vae-root",
         type=Path,
         default=OUTPUT_ROOT / "beta_vae",
-    )
-    parser.add_argument(
-        "--beta-tc-vae-root",
-        type=Path,
-        default=OUTPUT_ROOT / "beta_tc_vae",
     )
     return parser.parse_args()
 

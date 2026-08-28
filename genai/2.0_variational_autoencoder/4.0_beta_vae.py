@@ -126,7 +126,7 @@ def evaluate(
     per_dimension_rates = []
     for x, _ in loader:
         x = x.to(device, non_blocking=True)
-        mu, logvar, _ = model.encode(x)
+        mu, logvar = model.encode(x)
         reconstruction = model.decode(mu)
         distortion += float(
             F.binary_cross_entropy(reconstruction, x, reduction="sum")
@@ -174,7 +174,7 @@ def train_one(
         examples = 0
         for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
-            mu, logvar, _ = model.encode(x)
+            mu, logvar = model.encode(x)
             z = reparameterize_logvar(mu, logvar)
             reconstruction = model.decode(z)
             loss, terms = beta_vae_loss(
@@ -247,7 +247,7 @@ def smoke_test() -> None:
     model = GaussianVAE32(
         latent_dim=6, hidden_channels=32, context_dim=16
     )
-    mu, logvar, _ = model.encode(x)
+    mu, logvar = model.encode(x)
     reconstruction = model.decode(reparameterize_logvar(mu, logvar))
     loss, terms = beta_vae_loss(
         reconstruction, x, mu, logvar, beta=4.0

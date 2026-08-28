@@ -1,4 +1,4 @@
-"""Compact causal token priors shared by VQ-VAE, VQ-VAE-2, and FSQ."""
+"""Compact causal token priors shared by VQ-VAE, FSQ, and VQGAN."""
 
 from __future__ import annotations
 
