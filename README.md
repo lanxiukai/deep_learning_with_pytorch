@@ -33,7 +33,8 @@ the PyTorch framework.
 │   ├── 2.0_variational_autoencoder/
 │   └── 3.0_diffusion_model/
 │
-├── tool_scripts/                    # Dataset, cloud-GPU, and benchmark helpers
+├── tool_scripts/                    # Tools; see tool_scripts/README.md
+│   ├── README.md
 │   ├── benchmark_gan_training.py
 │   ├── benchmark_h100_precision.sh
 │   ├── benchmark_stylegan_gpu.sh
@@ -65,8 +66,8 @@ numbers do not correspond to book chapter numbers.
 
 `cloud_gan.sh` orchestrates short validation, benchmarks, detached training,
 monitoring, and result download on H100, B200, B300, RTX 5080, and RTX 5090
-hosts. After configuring an SSH host named `vast-dl`, provision it from WSL
-and connect to the checked-out project:
+hosts. It operates on an existing cloud instance; it does not create, stop, or
+destroy provider resources. After configuring an SSH host named `vast-dl`, run:
 
 ```bash
 # From WSL
@@ -78,18 +79,10 @@ cd /workspace/deep-learning-with-pytorch
 bash tool_scripts/cloud_gan.sh validate --mps
 ```
 
-For a manually cloned host, prepare only the environment with
-`bash tool_scripts/setup_cloud_gpu.sh --profile celeba`. Start selected full
-GAN lessons in separate tmux sessions with
-`bash tool_scripts/cloud_gan.sh train --models progan,stylegan --mps`; use
-`bash tool_scripts/cloud_gan.sh status` and
-`bash tool_scripts/cloud_gan.sh attach MODEL` on the cloud host to monitor and
-connect to a session. Back in WSL, run
-`bash tool_scripts/cloud_gan.sh download --apply` to merge remote results.
-
-Direct GAN lesson runs write to the ignored `output/` directory by default.
-The cloud workflow explicitly uses `output-vast-dl/`, keeping downloaded cloud
-artifacts separate from local runs.
+See [tool_scripts/README.md](tool_scripts/README.md) for the complete lifecycle,
+host requirements, provisioning effects, tmux and MPS operation, checkpoint
+resume, benchmark interpretation, result download, cost controls, and
+troubleshooting.
 
 #### GAN Benchmarks
 
@@ -104,7 +97,9 @@ compatible CUDA GPU:
   runs on supported cloud GPUs. `cloud_gan.sh validate` invokes it after the
   smoke checks.
 
-Use each script's `--help` option to inspect its workload and output options.
+Use each script's `--help` option for its current flags and the
+[tool scripts guide](tool_scripts/README.md#gan-benchmarks) for workflow and
+output details.
 
 ---
 
