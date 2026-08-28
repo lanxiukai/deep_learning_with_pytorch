@@ -14,12 +14,12 @@ import torch
 import torchvision
 
 from dl_utils.data.vision import image_folder_loader
-from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.filesystem.directories import reset_dir
-from dl_utils.vae.vae import VAE, device
+from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.plot.figures import Animator
 from dl_utils.plot.images import vae_sample_grid
 from dl_utils.training.timing import Timer, format_epoch_timing
+from dl_utils.vae.vae import VAE, device
 
 
 def train_epoch(epoch, vae, loader, optimizer, animator, num_samples):
