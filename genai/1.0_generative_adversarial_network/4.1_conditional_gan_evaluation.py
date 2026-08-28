@@ -1,22 +1,25 @@
 """
-Analyze a previously trained Conditional GAN (cGAN) checkpoint — sample
+Evaluate a previously trained Conditional GAN (cGAN) checkpoint — sample
 faces with/without glasses, then interpolate in latent (z) and label space.
 
 Requires output/gan/cgan/cgan.pth — run 4.0_conditional_gan.py first.
+
+Outputs:
+    output/gan/cgan/evaluation/, reset at the start of every run.
 """
+
+import torch
 
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.runtime.devices import try_gpu
 from dl_utils.gan.gan import Generator
-
 from dl_utils.plot._backend import pyplot as plt
-import torch
+from dl_utils.runtime.devices import try_gpu
 
 PROJECT_ROOT = infer_project_root()
-OUT_DIR = PROJECT_ROOT / 'output' / 'gan' / 'cgan'
+OUT_DIR = PROJECT_ROOT / 'output' / 'gan' / 'cgan' / 'evaluation'
 
-checkpoint_path = OUT_DIR / 'cgan.pth'
+checkpoint_path = OUT_DIR.parent / 'cgan.pth'
 if not checkpoint_path.exists():
     raise FileNotFoundError(
         f"Checkpoint not found at {checkpoint_path}. "
@@ -24,9 +27,9 @@ if not checkpoint_path.exists():
     )
 
 def main():
-    """Load a trained cGAN checkpoint and run the full analysis pipeline."""
+    """Load a trained cGAN checkpoint and run the full evaluation pipeline."""
     # ensure a clean output directory before each run
-    reset_dir(str(OUT_DIR / 'cgan_analysis'))
+    reset_dir(str(OUT_DIR))
 
     # determine the device automatically
     device = try_gpu()
@@ -42,13 +45,13 @@ def main():
 
     def _savefig(name):
         """Save current figure to OUT_DIR and close it."""
-        path = OUT_DIR / 'cgan_analysis' / f'{name}.png'
+        path = OUT_DIR / f'{name}.png'
         plt.savefig(path, dpi=300, bbox_inches='tight')
         plt.close()
         print(f'Saved: {path}')
 
     # ── Helper definitions ──────────────────────────────────────────
-    # One‑hot label constants used throughout the analysis.
+    # One‑hot label constants used throughout the evaluation.
     label_g  = torch.zeros(2, 1, 1); label_g[0, :, :]  = 1  # glasses
     label_ng = torch.zeros(2, 1, 1); label_ng[1, :, :] = 1  # no glasses
 

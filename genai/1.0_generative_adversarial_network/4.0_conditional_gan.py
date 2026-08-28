@@ -5,7 +5,7 @@ without glasses.
 Adapted from "Generative Deep Learning", 2nd ed.
 Data: data/glasses-256, prepared by tool_scripts/download_dataset.py.
 Outputs: output/gan/cgan/.
-Checkpoint analysis: 4.1_conditional_gan_analysis.py.
+Checkpoint evaluation: 4.1_conditional_gan_evaluation.py.
 
 Training data:
 With glasses (G):       2,543 images
