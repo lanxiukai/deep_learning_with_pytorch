@@ -9,6 +9,9 @@ TC is estimated from a [batch, batch, latent] log-density tensor.  The raw
 minibatch-weighted score and its parameter-independent centered form are both
 logged: centering makes values readable but does not turn the surrogate into
 an unbiased dataset-level TC estimate.
+
+Each run saves final model weights, constructor metadata, and only the controls
+needed for comparison. These short runs have no checkpoint resumption logic.
 """
 
 from __future__ import annotations
@@ -22,22 +25,16 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
-from dl_utils.data.factor_shapes import (
-    FACTOR_NAMES,
-    FACTOR_SIZES,
-    FactorShapes32,
-    render_factor_shapes,
-)
+from dl_utils.data.factor_shapes import FactorShapes32, render_factor_shapes
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import reproducibility_metadata
+from dl_utils.training.checkpoints import save_model_weights
 from dl_utils.vae.inference import GaussianVAE32, model_config
 from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
     diagonal_gaussian_log_density,
     reparameterize_logvar,
 )
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -318,43 +315,16 @@ def train_one(
         / f"seed_{seed}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "format_version": 2,
+    save_model_weights(
+        model,
+        out_dir / "model.pth",
+        metadata={
             "model_name": "beta_tc_vae",
-            "roadmap_role": "focused_branch",
-            "roadmap_step": "3X",
-            "direct_baseline": "beta-VAE at matched per-sample KL rate",
-            "visible_increment": "explicit aggregate-posterior TC weighting",
-            "state_dict": model.state_dict(),
             "model_config": model_config(model),
             "beta": beta,
             "seed": seed,
-            "dataset": "FactorShapes32",
-            "factor_names": FACTOR_NAMES,
-            "factor_sizes": FACTOR_SIZES,
             "split_seed": args.split_seed,
-            "image_size": 32,
-            "observation": "independent Bernoulli mean",
-            "loss_reduction": "sum pixels per sample, then mean batch",
-            "tc_estimator": "minibatch-weighted sampling, centered for logging",
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={"beta_tc_vae": model},
-                seed=seed,
-                training_budget={
-                    "epochs": args.epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.epochs * len(train_loader),
-                },
-                data_preprocessing={
-                    "renderer": "FactorShapes32 deterministic renderer",
-                    "value_range": [0.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
         },
-        out_dir / "model.pth",
     )
     model.eval()
     with torch.inference_mode():

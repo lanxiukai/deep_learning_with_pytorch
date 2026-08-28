@@ -28,7 +28,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
 from dl_utils.data.cifar10 import (
@@ -44,13 +44,12 @@ from dl_utils.vae.image_quality import (
     frechet_distance,
 )
 from dl_utils.vae.quantization import (
-    FSQAutoencoder32,
-    TokenUsageAccumulator,
     VQVAE2,
     VQVAE32,
+    FSQAutoencoder32,
+    TokenUsageAccumulator,
 )
 from dl_utils.vae.token_prior import PixelCNNPrior
-
 
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
@@ -60,9 +59,7 @@ OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 class DiscreteSystem:
     name: str
     tokenizer: VQVAE32 | VQVAE2 | FSQAutoencoder32
-    tokenizer_checkpoint: dict[str, object]
     priors: tuple[PixelCNNPrior, ...]
-    prior_checkpoints: tuple[dict[str, object], ...]
 
     @property
     def has_complete_prior(self) -> bool:
@@ -177,9 +174,8 @@ def _load_prior(
     device: torch.device,
     *,
     expected_model_name: str,
-) -> tuple[
-    PixelCNNPrior, dict[str, object]
-]:
+    tokenizer_interface_id: str,
+) -> PixelCNNPrior:
     checkpoint = torch.load(
         path, map_location=device, weights_only=True
     )
@@ -190,7 +186,9 @@ def _load_prior(
         )
     prior = PixelCNNPrior(**checkpoint["model_config"]).to(device)
     prior.load_state_dict(checkpoint["state_dict"])
-    return prior.eval().requires_grad_(False), checkpoint
+    if checkpoint.get("tokenizer_interface_id") != tokenizer_interface_id:
+        raise ValueError(f"{path} was trained for a different tokenizer")
+    return prior.eval().requires_grad_(False)
 
 
 def load_single_level_system(
@@ -223,28 +221,18 @@ def load_single_level_system(
             f"{tokenizer_path} has no valid tokenizer interface identity"
         )
     priors: tuple[PixelCNNPrior, ...] = ()
-    prior_checkpoints: tuple[dict[str, object], ...] = ()
     if prior_path.exists():
-        prior, prior_checkpoint = _load_prior(
+        prior = _load_prior(
             prior_path,
             device,
             expected_model_name=expected_prior_name,
+            tokenizer_interface_id=tokenizer_interface_id,
         )
-        if (
-            prior_checkpoint.get("tokenizer_interface_id")
-            != tokenizer_interface_id
-        ):
-            raise ValueError(
-                f"{prior_path} was trained for a different tokenizer"
-            )
         priors = (prior,)
-        prior_checkpoints = (prior_checkpoint,)
     return DiscreteSystem(
         name,
         tokenizer.to(device).eval().requires_grad_(False),
-        checkpoint,
         priors,
-        prior_checkpoints,
     )
 
 
@@ -268,7 +256,6 @@ def load_vq_vae_2_system(
             "VQ-VAE-2 tokenizer has no valid interface identity"
         )
     priors = []
-    prior_checkpoints = []
     if args.vq_vae_2_top_prior.exists() and args.vq_vae_2_bottom_prior.exists():
         for path, expected_model_name in (
             (
@@ -280,26 +267,17 @@ def load_vq_vae_2_system(
                 "vq_vae_2_bottom_conditional_prior",
             ),
         ):
-            prior, prior_checkpoint = _load_prior(
+            prior = _load_prior(
                 path,
                 device,
                 expected_model_name=expected_model_name,
+                tokenizer_interface_id=tokenizer_interface_id,
             )
-            if (
-                prior_checkpoint.get("tokenizer_interface_id")
-                != tokenizer_interface_id
-            ):
-                raise ValueError(
-                    f"{path} was trained for a different tokenizer"
-                )
             priors.append(prior)
-            prior_checkpoints.append(prior_checkpoint)
     return DiscreteSystem(
         "vq_vae_2",
         tokenizer.eval().requires_grad_(False),
-        checkpoint,
         tuple(priors),
-        tuple(prior_checkpoints),
     )
 
 
@@ -616,6 +594,7 @@ def evaluate(args: argparse.Namespace) -> None:
     )
     out_dir = OUTPUT_ROOT / "discrete_tokenizer_evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
+    model_results: dict[str, object] = {}
     results: dict[str, object] = {
         "protocol": {
             "dataset": "CIFAR-10 test",
@@ -628,7 +607,7 @@ def evaluate(args: argparse.Namespace) -> None:
                 "canonical TensorFlow FID values."
             ),
         },
-        "models": {},
+        "models": model_results,
     }
     for system in systems:
         metrics, comparison = evaluate_tokenizer(
@@ -674,7 +653,7 @@ def evaluate(args: argparse.Namespace) -> None:
                 device=device,
             )
         )
-        results["models"][system.name] = metrics
+        model_results[system.name] = metrics
         print(
             f"{system.name}: MSE={metrics['mse']:.4f}, "
             f"rFID-proxy="
@@ -699,11 +678,9 @@ def smoke_test() -> None:
     set_seed(7)
     device = torch.device("cpu")
     loader = DataLoader(
-        list(
-            zip(
-                torch.rand(12, 3, 32, 32).mul(2).sub(1),
-                torch.arange(12) % 10,
-            )
+        TensorDataset(
+            torch.rand(12, 3, 32, 32).mul(2).sub(1),
+            torch.arange(12) % 10,
         ),
         batch_size=4,
     )
@@ -714,9 +691,7 @@ def smoke_test() -> None:
     system = DiscreteSystem(
         "smoke",
         tokenizer.eval(),
-        {},
         (prior.eval(),),
-        ({},),
     )
     features = TinyFeatures()
     real, generated_reference = real_feature_moments(

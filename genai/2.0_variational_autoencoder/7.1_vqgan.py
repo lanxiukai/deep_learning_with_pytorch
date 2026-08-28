@@ -12,6 +12,10 @@ light while preserving the perceptual-gradient path.  Do not label the logged
 value as LPIPS.  Stage 2 freezes the tokenizer and trains a compact causal
 Transformer, retaining VQGAN's token-prior interface without its large-scale
 sliding-window setup.
+
+The tokenizer file is a stage handoff, not a training-resume checkpoint. Each
+stage stores final weights, constructor metadata, and the tokenizer identity;
+the tokenizer artifact also retains the trained discriminator weights.
 """
 
 from __future__ import annotations
@@ -37,8 +41,9 @@ from dl_utils.gan.sn_gan import (
 )
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
+    atomic_torch_save,
     model_state_fingerprint,
-    reproducibility_metadata,
+    save_model_weights,
 )
 from dl_utils.vae.perceptual_autoencoder import (
     PatchDiscriminator32,
@@ -49,7 +54,6 @@ from dl_utils.vae.perceptual_autoencoder import (
 )
 from dl_utils.vae.quantization import TokenUsageAccumulator
 from dl_utils.vae.token_prior import CausalTransformerPrior
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -435,16 +439,9 @@ def train_tokenizer(
         device=device,
     )
     interface_id = model_state_fingerprint(model)
-    torch.save(
+    atomic_torch_save(
         {
-            "format_version": 2,
             "model_name": "vqgan_tokenizer",
-            "roadmap_role": "historical_anchor",
-            "roadmap_step": 9,
-            "direct_baselines": ["VQ-VAE", "VAE-GAN", "hinge GAN"],
-            "visible_increment": (
-                "perceptual and patch-adversarial VQ tokenizer"
-            ),
             "interface_id": interface_id,
             "state_dict": model.state_dict(),
             "discriminator_state_dict": discriminator.state_dict(),
@@ -452,43 +449,6 @@ def train_tokenizer(
                 "base_channels": args.discriminator_channels,
             },
             "model_config": config,
-            "token_grid": (8, 8),
-            "index_order": "row-major",
-            "perceptual_network": args.perceptual,
-            "perceptual_metric_name": (
-                "frozen torchvision VGG16 feature L1"
-                if args.perceptual == "vgg"
-                else "random frozen feature debug distance"
-            ),
-            "discriminator_start": args.discriminator_start,
-            "adversarial_weighting": args.adversarial_weighting,
-            "global_step": global_step,
-            "loss_weights": {
-                "perceptual": args.perceptual_weight,
-                "vq": args.vq_weight,
-                "discriminator": args.discriminator_weight,
-            },
-            "dataset": "CIFAR-10",
-            "image_size": 32,
-            "value_range": [-1.0, 1.0],
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={
-                    "tokenizer": model,
-                    "discriminator": discriminator,
-                },
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.tokenizer_epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates_per_network": global_step,
-                },
-                data_preprocessing={
-                    "spatial": "native 32x32",
-                    "value_range": [-1.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
         },
         out_dir / "tokenizer.pth",
     )
@@ -569,45 +529,22 @@ def train_prior(
         tokenizer, prior, validation_loader, device=device
     )
     tokenizer_interface_id = model_state_fingerprint(tokenizer)
-    torch.save(
-        {
-            "format_version": 2,
-            "model_name": "vqgan_transformer_prior",
-            "roadmap_role": "historical_anchor_stage_two",
-            "roadmap_step": 9,
-            "direct_baseline": "frozen VQGAN tokenizer",
-            "visible_increment": "causal Transformer prior over frozen tokens",
-            "state_dict": prior.state_dict(),
-            "model_config": {
-                "vocabulary_size": vocabulary_size,
-                "sequence_length": 64,
-                "model_dim": args.prior_dim,
-                "heads": args.prior_heads,
-                "layers": args.prior_layers,
-                "dropout": args.prior_dropout,
-            },
-            "tokenizer_checkpoint": "tokenizer.pth",
-            "tokenizer_interface_id": tokenizer_interface_id,
-            "dataset": "CIFAR-10",
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={"vqgan_transformer_prior": prior},
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.prior_epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.prior_epochs
-                    * len(train_loader),
-                },
-                data_preprocessing={
-                    "tokenizer": "frozen VQGAN",
-                    "token_grid": [8, 8],
-                    "index_order": "row-major",
-                    "augmentation": "none",
-                },
-            ),
-        },
+    prior_config = {
+        "vocabulary_size": vocabulary_size,
+        "sequence_length": 64,
+        "model_dim": args.prior_dim,
+        "heads": args.prior_heads,
+        "layers": args.prior_layers,
+        "dropout": args.prior_dropout,
+    }
+    save_model_weights(
+        prior,
         out_dir / "transformer_prior.pth",
+        metadata={
+            "model_name": "vqgan_transformer_prior",
+            "model_config": prior_config,
+            "tokenizer_interface_id": tokenizer_interface_id,
+        },
     )
     print(
         f"validation prior: {validation['bits_per_token']:.3f} "

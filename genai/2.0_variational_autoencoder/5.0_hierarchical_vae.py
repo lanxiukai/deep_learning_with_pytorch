@@ -12,6 +12,9 @@ The negative ELBO therefore contains a top KL against N(0, I) and a lower KL
 between distributions conditioned on the same sampled z2.  KL warm-up and
 group-wise free bits are visible optimization controls, not guarantees that a
 layer is informative.  The next lesson changes only the lower posterior.
+
+The script saves final model weights and the small set of constructor and
+evaluation controls needed by the next lesson. It has no resume machinery.
 """
 
 from __future__ import annotations
@@ -20,11 +23,7 @@ import argparse
 
 import torch
 
-from dl_utils.data.factor_shapes import (
-    FACTOR_NAMES,
-    FACTOR_SIZES,
-    render_factor_shapes,
-)
+from dl_utils.data.factor_shapes import render_factor_shapes
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.vae.hierarchy_training import (
@@ -35,7 +34,6 @@ from dl_utils.vae.vae_hierarchy import (
     HierarchicalVAE32,
     hierarchical_vae_loss,
 )
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -131,7 +129,6 @@ def main() -> None:
         warmup_epochs=args.warmup_epochs,
         free_bits=args.free_bits,
         active_variance_threshold=args.active_variance_threshold,
-        seed=args.seed,
         out_dir=(
             PROJECT_ROOT
             / "output"
@@ -139,21 +136,8 @@ def main() -> None:
             / "hierarchical_vae"
             / args.run_name
         ),
-        checkpoint_metadata={
-            "model_name": "hierarchical_vae",
-            "roadmap_role": "teaching_transition",
-            "roadmap_step": 4,
-            "direct_baseline": "standard VAE",
-            "visible_increment": "second latent and conditional prior",
-            "seed": args.seed,
-            "dataset": "FactorShapes32",
-            "factor_names": FACTOR_NAMES,
-            "factor_sizes": FACTOR_SIZES,
-            "split_seed": args.split_seed,
-            "image_size": 32,
-            "observation": "independent Bernoulli mean",
-            "loss_reduction": "sum pixels per sample, then mean batch",
-        },
+        model_name="hierarchical_vae",
+        split_seed=args.split_seed,
     )
 
 

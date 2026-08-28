@@ -249,7 +249,19 @@ def analyze(args, device):
     )
     with (args.output / "metrics.json").open("w", encoding="utf-8") as metrics_file:
         json.dump(metrics, metrics_file, indent=2)
-    print(json.dumps(metrics, indent=2))
+    console_metrics = {
+        "posterior_mean_reconstruction": metrics["posterior_mean_reconstruction"],
+        "posterior": {
+            "examples": metrics["posterior"]["examples"],
+            "kl_nats_per_image": metrics["posterior"]["kl_nats_per_image"],
+            "active_variance_threshold": metrics["posterior"][
+                "active_variance_threshold"
+            ],
+            "active_dimensions": metrics["posterior"]["active_dimensions"],
+        },
+        "path_boundaries": metrics["path_boundaries"],
+    }
+    print(json.dumps(console_metrics, indent=2))
 
 
 def parse_args():

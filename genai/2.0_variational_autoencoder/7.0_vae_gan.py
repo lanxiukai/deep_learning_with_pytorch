@@ -14,6 +14,9 @@ boundaries above.  The scaffold is not a separate model or checkpoint.  This
 remains a compact mechanism experiment rather than a paper-scale reproduction;
 paired fidelity and prior generation stay separate because adversarial
 sharpness can invent plausible details.
+
+The final artifact stores only the trained autoencoder and discriminator
+weights plus their constructor metadata. This short run has no resume logic.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ from dl_utils.data.cifar10 import (
 )
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import reproducibility_metadata
+from dl_utils.training.checkpoints import atomic_torch_save
 from dl_utils.vae.perceptual_autoencoder import (
     KLPerceptualAutoencoder32,
     PatchDiscriminator32,
@@ -43,7 +46,6 @@ from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
     reparameterize_logvar,
 )
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -395,40 +397,6 @@ def evaluate(
     }, comparison
 
 
-@torch.inference_mode()
-def evaluate_fixed_features(
-    model: KLPerceptualAutoencoder32,
-    feature_network: torch.nn.Module,
-    loader: DataLoader,
-    *,
-    device: torch.device,
-) -> dict[str, float]:
-    model.eval()
-    feature_network.eval()
-    totals = torch.zeros(3, device=device)
-    examples = 0
-    for x, _ in loader:
-        x = x.to(device, non_blocking=True)
-        mu, logvar = model.encode(x)
-        reconstruction = model.decoder(mu)
-        totals += torch.stack(
-            (
-                F.l1_loss(reconstruction, x),
-                feature_network(reconstruction, x),
-                diagonal_gaussian_kl_from_logvar(
-                    mu, logvar
-                ).flatten(1).sum(dim=1).mean(),
-            )
-        ) * x.shape[0]
-        examples += x.shape[0]
-    values = (totals / examples).tolist()
-    return {
-        "pixel_l1": values[0],
-        "fixed_feature_distance": values[1],
-        "kl": values[2],
-    }
-
-
 def train(args: argparse.Namespace) -> None:
     if args.scaffold_epochs < 1:
         raise ValueError("scaffold_epochs must be positive")
@@ -436,9 +404,11 @@ def train(args: argparse.Namespace) -> None:
     out_dir = PROJECT_ROOT / "output" / "vae" / "vae_gan"
     out_dir.mkdir(parents=True, exist_ok=True)
     train_loader, validation_loader = make_loaders(args, device)
-    model = KLPerceptualAutoencoder32(
-        latent_channels=args.latent_channels, hidden_channels=args.hidden_channels
-    ).to(device)
+    model_config = {
+        "latent_channels": args.latent_channels,
+        "hidden_channels": args.hidden_channels,
+    }
+    model = KLPerceptualAutoencoder32(**model_config).to(device)
     feature_network = build_perceptual_loss(
         args.fixed_feature_network, device
     )
@@ -466,9 +436,6 @@ def train(args: argparse.Namespace) -> None:
             f"feature={values[1]:.4f}, KL={values[2]:.3f}, "
             f"pixel_L1={values[3]:.4f}"
         )
-    scaffold_validation = evaluate_fixed_features(
-        model, feature_network, validation_loader, device=device
-    )
     print("fixed-feature scaffold complete; switching to learned features")
     del feature_network, scaffold_optimizer
 
@@ -490,7 +457,7 @@ def train(args: argparse.Namespace) -> None:
         discriminator.train()
         for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
-            reconstruction, prior, metrics = vae_gan_iteration(
+            _, _, metrics = vae_gan_iteration(
                 model,
                 discriminator,
                 x,
@@ -517,55 +484,15 @@ def train(args: argparse.Namespace) -> None:
         nrow=8,
     )
 
-    torch.save(
+    atomic_torch_save(
         {
-            "format_version": 2,
             "model_name": "vae_gan",
-            "roadmap_role": "historical_anchor",
-            "roadmap_step": 8,
-            "direct_baselines": ["standard VAE", "non-saturating GAN"],
-            "visible_increment": "learned discriminator-feature similarity",
             "state_dict": model.state_dict(),
             "discriminator_state_dict": discriminator.state_dict(),
-            "model_config": {
-                "latent_channels": args.latent_channels,
-                "hidden_channels": args.hidden_channels,
+            "model_config": model_config,
+            "discriminator_config": {
+                "base_channels": args.discriminator_channels,
             },
-            "kl_weight": args.kl_weight,
-            "adversarial_weight": args.adversarial_weight,
-            "internal_stages": [
-                {
-                    "name": "fixed_feature_scaffold",
-                    "feature_network": args.fixed_feature_network,
-                },
-                {"name": "dynamic_discriminator_feature"},
-            ],
-            "dataset": "CIFAR-10",
-            "image_size": 32,
-            "value_range": [-1.0, 1.0],
-            "validation_metrics": validation,
-            "controlled_baseline_metrics": {
-                "fixed_feature_scaffold": scaffold_validation,
-            },
-            **reproducibility_metadata(
-                models={
-                    "autoencoder": model,
-                    "discriminator": discriminator,
-                },
-                seed=args.seed,
-                training_budget={
-                    "scaffold_epochs": args.scaffold_epochs,
-                    "learned_feature_epochs": args.epochs,
-                    "batch_size": args.batch_size,
-                    "learned_feature_updates": args.epochs
-                    * len(train_loader),
-                },
-                data_preprocessing={
-                    "spatial": "native 32x32",
-                    "value_range": [-1.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
         },
         out_dir / "vae_gan.pth",
     )

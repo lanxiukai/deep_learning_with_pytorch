@@ -11,22 +11,24 @@ budget, not the VAE model family.
 By default every K receives the same number of optimizer steps.  Add
 `--match-particle-budget` to divide the update count by K, making the total
 number of decoded particles approximately equal instead.
+
+Each run saves only final model weights and constructor metadata. These short
+runs intentionally have no checkpoint resumption machinery.
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import reproducibility_metadata
+from dl_utils.training.checkpoints import save_model_weights
 from dl_utils.vae.inference import (
     GaussianVAE32,
     importance_diagnostics,
@@ -34,7 +36,6 @@ from dl_utils.vae.inference import (
     log_mean_exp,
     model_config,
 )
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -79,42 +80,6 @@ def make_loaders(
         DataLoader(train_set, shuffle=True, drop_last=True, **common),
         DataLoader(validation_set, shuffle=False, drop_last=False, **common),
     )
-
-
-def gradient_l2(parameters: list[nn.Parameter]) -> Tensor:
-    terms = [
-        parameter.grad.detach().float().square().sum()
-        for parameter in parameters
-        if parameter.grad is not None
-    ]
-    if not terms:
-        return torch.tensor(0.0)
-    return torch.stack(terms).sum().sqrt()
-
-
-class RunningMoments:
-    """Scalar mean and standard deviation for lightweight gradient diagnostics."""
-
-    def __init__(self) -> None:
-        self.count = 0
-        self.total = 0.0
-        self.square_total = 0.0
-
-    def update(self, value: Tensor) -> None:
-        number = float(value)
-        self.count += 1
-        self.total += number
-        self.square_total += number * number
-
-    def summary(self) -> dict[str, float]:
-        if self.count == 0:
-            return {"mean": 0.0, "standard_deviation": 0.0}
-        mean = self.total / self.count
-        variance = max(0.0, self.square_total / self.count - mean * mean)
-        return {
-            "mean": mean,
-            "standard_deviation": variance**0.5,
-        }
 
 
 @torch.inference_mode()
@@ -181,11 +146,6 @@ def train_one(
         if args.match_particle_budget
         else base_updates
     )
-    budget_name = (
-        "matched_decoded_particle_budget"
-        if args.match_particle_budget
-        else "fixed_optimizer_steps"
-    )
     run_name = (
         f"matched_k{particles}"
         if args.match_particle_budget
@@ -194,17 +154,6 @@ def train_one(
     out_dir = PROJECT_ROOT / "output" / "vae" / "iwae" / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    inference_parameters = [
-        *model.encoder.parameters(),
-        *model.context.parameters(),
-        *model.base_posterior.parameters(),
-    ]
-    generative_parameters = [
-        *model.decoder_input.parameters(),
-        *model.decoder.parameters(),
-    ]
-    inference_gradients = RunningMoments()
-    generative_gradients = RunningMoments()
     iterator = iter(train_loader)
     report_interval = max(1, len(train_loader))
     running: dict[str, float] = {}
@@ -220,8 +169,6 @@ def train_one(
         loss = -log_mean_exp(log_weights).mean()
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        inference_gradients.update(gradient_l2(inference_parameters))
-        generative_gradients.update(gradient_l2(generative_parameters))
         optimizer.step()
 
         diagnostics = importance_diagnostics(log_weights, terms)
@@ -252,48 +199,14 @@ def train_one(
         max_examples=args.validation_examples,
         device=device,
     )
-    checkpoint = {
-        "format_version": 1,
-        "model_name": "iwae",
-        "roadmap_role": "historical_anchor",
-        "roadmap_step": 2,
-        "direct_baseline": "standard VAE with the same network",
-        "visible_increment": "K-sample importance-weighted bound",
-        "posterior_family": model.posterior_family,
-        "state_dict": model.state_dict(),
-        "model_config": model_config(model),
-        "training_particles": particles,
-        "training_updates": updates,
-        "particle_evaluations": updates * particles * args.batch_size,
-        "budget_protocol": budget_name,
-        "observation": "independent Bernoulli mean",
-        "image_size": 32,
-        "validation_particles": args.validation_particles,
-        "validation_metrics": validation,
-        "gradient_diagnostics": {
-            "inference": inference_gradients.summary(),
-            "generative": generative_gradients.summary(),
+    save_model_weights(
+        model,
+        out_dir / "model.pth",
+        metadata={
+            "model_name": "iwae",
+            "model_config": model_config(model),
         },
-        **reproducibility_metadata(
-            models={"iwae": model},
-            seed=args.seed,
-            training_budget={
-                "optimizer_updates": updates,
-                "batch_size": args.batch_size,
-                "particles_per_example": particles,
-                "particle_evaluations": updates
-                * particles
-                * args.batch_size,
-                "protocol": budget_name,
-            },
-            data_preprocessing={
-                "resize": [32, 32],
-                "value_range": [0.0, 1.0],
-                "augmentation": "none",
-            },
-        ),
-    }
-    torch.save(checkpoint, out_dir / "model.pth")
+    )
     model.eval()
     with torch.inference_mode():
         samples = model.sample(64, device=device)

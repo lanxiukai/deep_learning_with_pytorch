@@ -17,7 +17,6 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
@@ -30,7 +29,6 @@ from dl_utils.vae.inference import (
     importance_log_weights,
     log_mean_exp,
 )
-
 
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
@@ -59,7 +57,7 @@ def make_test_loader(
 
 def load_model(
     path: Path, device: torch.device
-) -> tuple[GaussianVAE32, dict[str, object]]:
+) -> GaussianVAE32:
     checkpoint = torch.load(
         path, map_location=device, weights_only=True
     )
@@ -73,7 +71,7 @@ def load_model(
     else:
         raise ValueError(f"{path} is not an IWAE/IAF checkpoint")
     model.load_state_dict(checkpoint["state_dict"])
-    return model.to(device).eval(), checkpoint
+    return model.to(device).eval()
 
 
 @torch.inference_mode()
@@ -233,7 +231,7 @@ def evaluate(args: argparse.Namespace) -> None:
         "models": {},
     }
     for name, path in available.items():
-        model, checkpoint = load_model(path, device)
+        model = load_model(path, device)
         metrics = evaluate_model(
             model,
             loader,
@@ -244,17 +242,6 @@ def evaluate(args: argparse.Namespace) -> None:
             active_variance_threshold=args.active_variance_threshold,
             seed=args.seed,
             device=device,
-        )
-        metrics["training_particles"] = checkpoint.get(
-            "training_particles"
-        )
-        metrics["training_updates"] = checkpoint.get("training_updates")
-        metrics["particle_evaluations"] = checkpoint.get(
-            "particle_evaluations"
-        )
-        metrics["budget_protocol"] = checkpoint.get("budget_protocol")
-        metrics["gradient_diagnostics"] = checkpoint.get(
-            "gradient_diagnostics"
         )
         results["models"][name] = metrics
         save_model_comparison(

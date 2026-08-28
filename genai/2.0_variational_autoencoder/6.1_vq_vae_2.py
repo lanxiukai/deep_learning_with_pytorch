@@ -13,6 +13,10 @@ algorithm while fitting comfortably on a 12 GB card.  A coarse/fine semantic
 split is an empirical outcome to inspect, not a structural guarantee.  To
 keep hierarchy as the visible increment, this lesson reuses 6.0's gradient-
 updated codebooks; the paper tokenizer used EMA codebook updates.
+
+The tokenizer file is a stage handoff, not a training-resume checkpoint. Each
+stage saves only final weights, constructor metadata, and the tokenizer identity
+needed to bind both priors to the exact tokenizer weights.
 """
 
 from __future__ import annotations
@@ -34,11 +38,10 @@ from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
     model_state_fingerprint,
-    reproducibility_metadata,
+    save_model_weights,
 )
-from dl_utils.vae.quantization import TokenUsageAccumulator, VQVAE2
+from dl_utils.vae.quantization import VQVAE2, TokenUsageAccumulator
 from dl_utils.vae.token_prior import PixelCNNPrior
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -267,45 +270,14 @@ def train_tokenizer(
         model, validation_loader, device=device
     )
     interface_id = model_state_fingerprint(model)
-    torch.save(
-        {
-            "format_version": 2,
-            "model_name": "vq_vae_2_tokenizer",
-            "roadmap_role": "historical_anchor",
-            "roadmap_step": 7,
-            "direct_baseline": "single-level VQ-VAE",
-            "visible_increment": "top and bottom discrete latent hierarchy",
-            "interface_id": interface_id,
-            "state_dict": model.state_dict(),
-            "model_config": config,
-            "top_grid": (4, 4),
-            "bottom_grid": (8, 8),
-            "index_order": "row-major",
-            "dataset": "CIFAR-10",
-            "image_size": 32,
-            "value_range": [-1.0, 1.0],
-            "uniform_prior_kl_nats_per_image": (
-                16 * math.log(args.top_codebook_size)
-                + 64 * math.log(args.bottom_codebook_size)
-            ),
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={"vq_vae_2_tokenizer": model},
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.tokenizer_epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.tokenizer_epochs
-                    * len(train_loader),
-                },
-                data_preprocessing={
-                    "spatial": "native 32x32",
-                    "value_range": [-1.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
-        },
+    save_model_weights(
+        model,
         out_dir / "tokenizer.pth",
+        metadata={
+            "model_name": "vq_vae_2_tokenizer",
+            "interface_id": interface_id,
+            "model_config": config,
+        },
     )
     print(
         f"validation tokenizer: MSE={validation['mse']:.4f}, "
@@ -415,79 +387,34 @@ def train_priors(
         device=device,
     )
     tokenizer_interface_id = model_state_fingerprint(tokenizer)
-    common = {
-        "format_version": 2,
-        "roadmap_role": "historical_anchor_stage_two",
-        "roadmap_step": 7,
-        "direct_baseline": "frozen hierarchical VQ-VAE-2 tokenizer",
-        "tokenizer_checkpoint": "tokenizer.pth",
-        "tokenizer_interface_id": tokenizer_interface_id,
-        "dataset": "CIFAR-10",
-        "validation_metrics": validation,
+    top_config = {
+        "vocabulary_size": top_vocabulary,
+        "hidden_channels": args.prior_hidden_channels,
+        "layers": args.prior_layers,
     }
-    torch.save(
-        {
-            **common,
-            "model_name": "vq_vae_2_top_prior",
-            "state_dict": top_prior.state_dict(),
-            "model_config": {
-                "vocabulary_size": top_vocabulary,
-                "hidden_channels": args.prior_hidden_channels,
-                "layers": args.prior_layers,
-            },
-            "visible_increment": "autoregressive top-token prior",
-            **reproducibility_metadata(
-                models={"vq_vae_2_top_prior": top_prior},
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.prior_epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.prior_epochs
-                    * len(train_loader),
-                },
-                data_preprocessing={
-                    "tokenizer": "frozen VQ-VAE-2",
-                    "token_grid": [4, 4],
-                    "index_order": "row-major",
-                    "augmentation": "none",
-                },
-            ),
-        },
+    save_model_weights(
+        top_prior,
         out_dir / "top_prior.pth",
-    )
-    torch.save(
-        {
-            **common,
-            "model_name": "vq_vae_2_bottom_conditional_prior",
-            "state_dict": bottom_prior.state_dict(),
-            "model_config": {
-                "vocabulary_size": bottom_vocabulary,
-                "hidden_channels": args.prior_hidden_channels,
-                "layers": args.prior_layers,
-                "condition_channels": tokenizer.hidden_channels,
-            },
-            "visible_increment": "bottom-token prior conditioned on top tokens",
-            **reproducibility_metadata(
-                models={
-                    "vq_vae_2_bottom_conditional_prior": bottom_prior
-                },
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.prior_epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.prior_epochs
-                    * len(train_loader),
-                },
-                data_preprocessing={
-                    "tokenizer": "frozen VQ-VAE-2",
-                    "token_grid": [8, 8],
-                    "top_condition_grid": [4, 4],
-                    "index_order": "row-major",
-                    "augmentation": "none",
-                },
-            ),
+        metadata={
+            "model_name": "vq_vae_2_top_prior",
+            "model_config": top_config,
+            "tokenizer_interface_id": tokenizer_interface_id,
         },
+    )
+    bottom_config = {
+        "vocabulary_size": bottom_vocabulary,
+        "hidden_channels": args.prior_hidden_channels,
+        "layers": args.prior_layers,
+        "condition_channels": tokenizer.hidden_channels,
+    }
+    save_model_weights(
+        bottom_prior,
         out_dir / "bottom_prior.pth",
+        metadata={
+            "model_name": "vq_vae_2_bottom_conditional_prior",
+            "model_config": bottom_config,
+            "tokenizer_interface_id": tokenizer_interface_id,
+        },
     )
     print(
         f"validation priors: top={validation['top_bits_per_token']:.3f}, "

@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
 from dl_utils.data.factor_shapes import FactorShapes32
-from dl_utils.training.checkpoints import reproducibility_metadata
+from dl_utils.training.checkpoints import save_model_weights
 from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
 from dl_utils.vae.vae_hierarchy import (
     ActiveUnitAccumulator,
@@ -109,12 +109,12 @@ def train_hierarchy(
     warmup_epochs: float,
     free_bits: float,
     active_variance_threshold: float,
-    seed: int,
     out_dir: Path,
-    checkpoint_metadata: dict[str, object],
+    model_name: str,
+    split_seed: int,
 ) -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    warmup_updates = int(round(warmup_epochs * len(train_loader)))
+    warmup_updates = round(warmup_epochs * len(train_loader))
     update = 0
     for epoch in range(1, epochs + 1):
         model.train()
@@ -168,33 +168,17 @@ def train_hierarchy(
         active_variance_threshold=active_variance_threshold,
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "format_version": 2,
-            "state_dict": model.state_dict(),
+    save_model_weights(
+        model,
+        out_dir / "model.pth",
+        metadata={
+            "model_name": model_name,
             "model_config": model_config(model),
             "posterior_family": model.posterior_family,
             "warmup_epochs": warmup_epochs,
             "free_bits_per_group": free_bits,
-            "active_variance_threshold": active_variance_threshold,
-            "validation_metrics": validation,
-            **checkpoint_metadata,
-            **reproducibility_metadata(
-                models={str(checkpoint_metadata["model_name"]): model},
-                seed=seed,
-                training_budget={
-                    "epochs": epochs,
-                    "batch_size": train_loader.batch_size,
-                    "optimizer_updates": epochs * len(train_loader),
-                },
-                data_preprocessing={
-                    "renderer": "FactorShapes32 deterministic renderer",
-                    "value_range": [0.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
+            "split_seed": split_seed,
         },
-        out_dir / "model.pth",
     )
     model.eval()
     with torch.inference_mode():

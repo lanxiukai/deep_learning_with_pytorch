@@ -7,6 +7,9 @@ so their precisions add and their means combine by precision weighting.
 
 The top q(z2 | x) remains bottom-up evidence compared against N(0, I); it is
 not fused with that fixed prior as though a third evidence source existed.
+
+The script saves final model weights and the small set of constructor and
+evaluation controls needed for comparison. It has no resume machinery.
 """
 
 from __future__ import annotations
@@ -15,11 +18,7 @@ import argparse
 
 import torch
 
-from dl_utils.data.factor_shapes import (
-    FACTOR_NAMES,
-    FACTOR_SIZES,
-    render_factor_shapes,
-)
+from dl_utils.data.factor_shapes import render_factor_shapes
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.vae.hierarchy_training import (
@@ -31,7 +30,6 @@ from dl_utils.vae.vae_hierarchy import (
     LadderVAE32,
     hierarchical_vae_loss,
 )
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -137,25 +135,11 @@ def main() -> None:
         warmup_epochs=args.warmup_epochs,
         free_bits=args.free_bits,
         active_variance_threshold=args.active_variance_threshold,
-        seed=args.seed,
         out_dir=(
             PROJECT_ROOT / "output" / "vae" / "ladder_vae" / args.run_name
         ),
-        checkpoint_metadata={
-            "model_name": "ladder_vae",
-            "roadmap_role": "historical_anchor",
-            "roadmap_step": 5,
-            "direct_baseline": "two-level hierarchical VAE",
-            "visible_increment": "prior-evidence Gaussian precision fusion",
-            "seed": args.seed,
-            "dataset": "FactorShapes32",
-            "factor_names": FACTOR_NAMES,
-            "factor_sizes": FACTOR_SIZES,
-            "split_seed": args.split_seed,
-            "image_size": 32,
-            "observation": "independent Bernoulli mean",
-            "loss_reduction": "sum pixels per sample, then mean batch",
-        },
+        model_name="ladder_vae",
+        split_seed=args.split_seed,
     )
 
 

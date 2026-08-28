@@ -10,6 +10,10 @@ tokenizer boundary, and second-stage PixelCNN remain.  The quantizer changes:
 
 Removing dead *entries* does not guarantee that the encoder visits every
 scalar combination, so usage entropy and reconstruction are still logged.
+
+The tokenizer file is a stage handoff, not a training-resume checkpoint. Each
+stage saves only final weights, constructor metadata, and the tokenizer identity
+needed to prevent pairing a prior with different tokenizer weights.
 """
 
 from __future__ import annotations
@@ -31,11 +35,10 @@ from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
     model_state_fingerprint,
-    reproducibility_metadata,
+    save_model_weights,
 )
 from dl_utils.vae.quantization import FSQAutoencoder32, TokenUsageAccumulator
 from dl_utils.vae.token_prior import PixelCNNPrior
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -220,41 +223,14 @@ def train_tokenizer(
         model, validation_loader, device=device
     )
     interface_id = model_state_fingerprint(model)
-    torch.save(
-        {
-            "format_version": 2,
-            "model_name": "fsq_tokenizer",
-            "roadmap_role": "focused_branch",
-            "roadmap_step": "7X",
-            "direct_baseline": "VQ-VAE tokenizer interface",
-            "visible_increment": "fixed scalar levels without a codebook loss",
-            "interface_id": interface_id,
-            "state_dict": model.state_dict(),
-            "model_config": config,
-            "vocabulary_size": vocabulary_size,
-            "token_grid": (8, 8),
-            "index_order": "row-major",
-            "dataset": "CIFAR-10",
-            "image_size": 32,
-            "value_range": [-1.0, 1.0],
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={"fsq_tokenizer": model},
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.tokenizer_epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.tokenizer_epochs
-                    * len(train_loader),
-                },
-                data_preprocessing={
-                    "spatial": "native 32x32",
-                    "value_range": [-1.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
-        },
+    save_model_weights(
+        model,
         out_dir / "tokenizer.pth",
+        metadata={
+            "model_name": "fsq_tokenizer",
+            "interface_id": interface_id,
+            "model_config": config,
+        },
     )
     print(
         f"validation tokenizer: MSE={validation['mse']:.4f}, "
@@ -332,42 +308,19 @@ def train_prior(
         tokenizer, prior, validation_loader, device=device
     )
     tokenizer_interface_id = model_state_fingerprint(tokenizer)
-    torch.save(
-        {
-            "format_version": 2,
-            "model_name": "fsq_pixelcnn_prior",
-            "roadmap_role": "focused_branch_stage_two",
-            "roadmap_step": "7X",
-            "direct_baseline": "frozen FSQ tokenizer",
-            "visible_increment": "autoregressive prior over frozen FSQ tokens",
-            "state_dict": prior.state_dict(),
-            "model_config": {
-                "vocabulary_size": vocabulary_size,
-                "hidden_channels": args.prior_hidden_channels,
-                "layers": args.prior_layers,
-            },
-            "tokenizer_checkpoint": "tokenizer.pth",
-            "tokenizer_interface_id": tokenizer_interface_id,
-            "dataset": "CIFAR-10",
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={"fsq_pixelcnn_prior": prior},
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.prior_epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.prior_epochs
-                    * len(train_loader),
-                },
-                data_preprocessing={
-                    "tokenizer": "frozen FSQ",
-                    "token_grid": [8, 8],
-                    "index_order": "row-major",
-                    "augmentation": "none",
-                },
-            ),
-        },
+    prior_config = {
+        "vocabulary_size": vocabulary_size,
+        "hidden_channels": args.prior_hidden_channels,
+        "layers": args.prior_layers,
+    }
+    save_model_weights(
+        prior,
         out_dir / "pixelcnn_prior.pth",
+        metadata={
+            "model_name": "fsq_pixelcnn_prior",
+            "model_config": prior_config,
+            "tokenizer_interface_id": tokenizer_interface_id,
+        },
     )
     print(
         f"validation prior: {validation['bits_per_token']:.3f} "

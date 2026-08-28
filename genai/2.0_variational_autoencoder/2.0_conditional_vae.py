@@ -14,6 +14,9 @@ conditional prior p(z | c) is a separate ablation after the posterior and
 decoder condition interfaces work.  A deterministic condition-to-image
 baseline is also separate, not a mislabelled zero-KL VAE.
 
+Each variant saves only final model weights and constructor metadata. These
+short runs intentionally have no checkpoint resumption machinery.
+
 Examples:
     python genai/2.0_variational_autoencoder/2.0_conditional_vae.py
     python genai/2.0_variational_autoencoder/2.0_conditional_vae.py \
@@ -37,13 +40,12 @@ from torchvision.utils import save_image
 
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import reproducibility_metadata
+from dl_utils.training.checkpoints import save_model_weights
 from dl_utils.vae.conditional import (
     ConditionalMeanDecoder32,
     ConditionalVAE32,
 )
 from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
-
 
 PROJECT_ROOT = infer_project_root()
 VARIANTS = ("standard-prior", "learned-prior", "deterministic")
@@ -163,9 +165,9 @@ def _save_conditional_samples(
     )
     model.eval()
     with torch.inference_mode():
-        if isinstance(model, ConditionalVAE32):
-            images = model.generate(labels)
-        elif isinstance(model, ConditionalMeanDecoder32):
+        if isinstance(
+            model, (ConditionalVAE32, ConditionalMeanDecoder32)
+        ):
             images = model.generate(labels)
         else:
             raise TypeError("unsupported conditional model")
@@ -183,12 +185,14 @@ def train_cvae(
     variant = "learned-prior" if learned_prior else "standard-prior"
     out_dir = PROJECT_ROOT / "output" / "vae" / "conditional_vae" / variant
     out_dir.mkdir(parents=True, exist_ok=True)
-    model = ConditionalVAE32(
-        latent_dim=args.latent_dim,
-        condition_dim=args.condition_dim,
-        hidden_channels=args.hidden_channels,
-        learned_prior=learned_prior,
-    ).to(device)
+    model_config = {
+        "num_classes": 10,
+        "latent_dim": args.latent_dim,
+        "condition_dim": args.condition_dim,
+        "hidden_channels": args.hidden_channels,
+        "learned_prior": learned_prior,
+    }
+    model = ConditionalVAE32(**model_config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     for epoch in range(1, args.epochs + 1):
@@ -226,49 +230,14 @@ def train_cvae(
             f"R={validation_metrics['rate']:.3f}"
         )
 
-    checkpoint = {
-        "format_version": 2,
-        "model_name": "conditional_vae",
-        "roadmap_role": "historical_anchor",
-        "roadmap_step": 1,
-        "direct_baseline": "standard VAE",
-        "visible_increment": (
-            "conditional-prior ablation after conditioning the posterior "
-            "and decoder"
-            if learned_prior
-            else "condition the posterior and decoder"
-        ),
-        "conditional_prior_ablation": learned_prior,
-        "variant": variant,
-        "state_dict": model.state_dict(),
-        "model_config": {
-            "num_classes": 10,
-            "latent_dim": args.latent_dim,
-            "condition_dim": args.condition_dim,
-            "hidden_channels": args.hidden_channels,
-            "learned_prior": learned_prior,
+    save_model_weights(
+        model,
+        out_dir / "model.pth",
+        metadata={
+            "model_name": "conditional_vae",
+            "model_config": model_config,
         },
-        "dataset": "MNIST",
-        "image_size": 32,
-        "observation": "independent Bernoulli mean",
-        "loss_reduction": "sum pixels per sample, then mean batch",
-        "validation_metrics": validation_metrics,
-        **reproducibility_metadata(
-            models={"conditional_vae": model},
-            seed=args.seed,
-            training_budget={
-                "epochs": args.epochs,
-                "batch_size": args.batch_size,
-                "optimizer_updates": args.epochs * len(train_loader),
-            },
-            data_preprocessing={
-                "resize": [32, 32],
-                "value_range": [0.0, 1.0],
-                "augmentation": "none",
-            },
-        ),
-    }
-    torch.save(checkpoint, out_dir / "model.pth")
+    )
     _save_conditional_samples(
         model, out_dir / "conditional_samples.png", device=device
     )
@@ -283,10 +252,12 @@ def train_deterministic(
 ) -> None:
     out_dir = PROJECT_ROOT / "output" / "vae" / "conditional_vae" / "deterministic"
     out_dir.mkdir(parents=True, exist_ok=True)
-    model = ConditionalMeanDecoder32(
-        condition_dim=args.condition_dim,
-        hidden_channels=args.hidden_channels,
-    ).to(device)
+    model_config = {
+        "num_classes": 10,
+        "condition_dim": args.condition_dim,
+        "hidden_channels": args.hidden_channels,
+    }
+    model = ConditionalMeanDecoder32(**model_config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     for epoch in range(1, args.epochs + 1):
@@ -314,39 +285,13 @@ def train_deterministic(
             f"validation D={validation['distortion']:.3f}"
         )
 
-    torch.save(
-        {
-            "format_version": 2,
-            "model_name": "conditional_mean_decoder",
-            "roadmap_role": "controlled_baseline",
-            "direct_baseline": "deterministic conditional decoder",
-            "variant": "deterministic",
-            "state_dict": model.state_dict(),
-            "model_config": {
-                "num_classes": 10,
-                "condition_dim": args.condition_dim,
-                "hidden_channels": args.hidden_channels,
-            },
-            "dataset": "MNIST",
-            "image_size": 32,
-            "observation": "independent Bernoulli mean",
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={"conditional_mean_decoder": model},
-                seed=args.seed,
-                training_budget={
-                    "epochs": args.epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.epochs * len(train_loader),
-                },
-                data_preprocessing={
-                    "resize": [32, 32],
-                    "value_range": [0.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
-        },
+    save_model_weights(
+        model,
         out_dir / "model.pth",
+        metadata={
+            "model_name": "conditional_mean_decoder",
+            "model_config": model_config,
+        },
     )
     _save_conditional_samples(
         model, out_dir / "conditional_samples.png", device=device

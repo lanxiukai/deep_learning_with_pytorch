@@ -41,7 +41,6 @@ from dl_utils.vae.disentanglement import (
 from dl_utils.vae.inference import GaussianVAE32
 from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
 
-
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 
@@ -178,14 +177,6 @@ def evaluate_checkpoint(
         device=device,
     )
     model_name = str(checkpoint["model_name"])
-    training_budget = checkpoint.get("training_budget")
-    data_preprocessing = checkpoint.get("data_preprocessing")
-    if not isinstance(training_budget, dict) or not isinstance(
-        data_preprocessing, dict
-    ):
-        raise ValueError(
-            "checkpoint predates the reproducibility contract; retrain it"
-        )
     rate = metrics.pop("gaussian_reference_kl")
     metrics.update(
         {
@@ -195,8 +186,6 @@ def evaluate_checkpoint(
             "rate": rate,
             "seed": int(checkpoint["seed"]),
             "model_config": checkpoint["model_config"],
-            "training_budget": training_budget,
-            "data_preprocessing": data_preprocessing,
             "checkpoint": str(path.relative_to(PROJECT_ROOT)),
             "mig": float(representation["mig"]),
             "mig_per_factor": {
@@ -289,9 +278,6 @@ def match_rates(
             for record in beta_records
             if record["seed"] == tc_record["seed"]
             and record["model_config"] == tc_record["model_config"]
-            and record["training_budget"] == tc_record["training_budget"]
-            and record["data_preprocessing"]
-            == tc_record["data_preprocessing"]
         ]
         if not candidates:
             continue

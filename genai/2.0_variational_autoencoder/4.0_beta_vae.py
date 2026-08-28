@@ -8,13 +8,13 @@ the complete per-sample Gaussian KL:
 The 32x32 procedural dataset independently varies shape, scale, rotation, and
 two positions.  Defaults train several beta values and random seeds so the
 later evaluation can separate method effects from seed variation.  A final
-artifact is saved for analysis; this short lesson has no resume machinery.
+weight artifact keeps only model construction and comparison controls; this
+short lesson has no checkpoint resumption machinery.
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -22,21 +22,15 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
-from dl_utils.data.factor_shapes import (
-    FACTOR_NAMES,
-    FACTOR_SIZES,
-    FactorShapes32,
-    render_factor_shapes,
-)
+from dl_utils.data.factor_shapes import FactorShapes32, render_factor_shapes
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.training.checkpoints import reproducibility_metadata
+from dl_utils.training.checkpoints import save_model_weights
 from dl_utils.vae.inference import GaussianVAE32, model_config
 from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
     reparameterize_logvar,
 )
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -217,42 +211,16 @@ def train_one(
         / f"seed_{seed}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "format_version": 2,
+    save_model_weights(
+        model,
+        out_dir / "model.pth",
+        metadata={
             "model_name": "beta_vae",
-            "roadmap_role": "historical_anchor",
-            "roadmap_step": 3,
-            "direct_baseline": "standard VAE with beta=1",
-            "visible_increment": "weight the complete per-sample KL by beta",
-            "state_dict": model.state_dict(),
             "model_config": model_config(model),
             "beta": beta,
             "seed": seed,
-            "dataset": "FactorShapes32",
-            "factor_names": FACTOR_NAMES,
-            "factor_sizes": FACTOR_SIZES,
             "split_seed": args.split_seed,
-            "image_size": 32,
-            "observation": "independent Bernoulli mean",
-            "loss_reduction": "sum pixels per sample, then mean batch",
-            "validation_metrics": validation,
-            **reproducibility_metadata(
-                models={"beta_vae": model},
-                seed=seed,
-                training_budget={
-                    "epochs": args.epochs,
-                    "batch_size": args.batch_size,
-                    "optimizer_updates": args.epochs * len(train_loader),
-                },
-                data_preprocessing={
-                    "renderer": "FactorShapes32 deterministic renderer",
-                    "value_range": [0.0, 1.0],
-                    "augmentation": "none",
-                },
-            ),
         },
-        out_dir / "model.pth",
     )
     model.eval()
     with torch.inference_mode():
