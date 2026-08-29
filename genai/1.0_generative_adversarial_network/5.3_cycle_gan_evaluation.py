@@ -23,12 +23,11 @@ import torch
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import DataLoader
 
-from dl_utils.runtime.devices import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.cyclegan import Generator, LoadData
 from dl_utils.plot.images import save_image_row_grid
-
+from dl_utils.runtime.devices import try_gpu
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data"
@@ -39,15 +38,16 @@ BLACK_DIR = DATA_DIR / "celeba" / "black"
 BLOND_DIR = DATA_DIR / "celeba" / "blond"
 GEN_BLACK_PATH = CHECKPOINT_DIR / "gen_black.pth"
 GEN_BLOND_PATH = CHECKPOINT_DIR / "gen_blond.pth"
+NUM_SAMPLES = 10
+IMAGE_SIZE = 256
+NUM_RESIDUAL_BLOCKS = 9
 
 
 def main():
     """Translate ten black/blond image pairs and reconstruct each input."""
     reset_dir(str(OUT_DIR))
 
-    missing_data_dirs = [
-        path for path in (BLACK_DIR, BLOND_DIR) if not path.is_dir()
-    ]
+    missing_data_dirs = [path for path in (BLACK_DIR, BLOND_DIR) if not path.is_dir()]
     if missing_data_dirs:
         missing = ", ".join(str(path) for path in missing_data_dirs)
         raise FileNotFoundError(
@@ -56,20 +56,17 @@ def main():
         )
 
     missing_checkpoints = [
-        path
-        for path in (GEN_BLACK_PATH, GEN_BLOND_PATH)
-        if not path.is_file()
+        path for path in (GEN_BLACK_PATH, GEN_BLOND_PATH) if not path.is_file()
     ]
     if missing_checkpoints:
         missing = ", ".join(str(path) for path in missing_checkpoints)
         raise FileNotFoundError(
-            f"CycleGAN checkpoints not found: {missing}. "
-            "Run 5.2_cycle_gan.py first."
+            f"CycleGAN checkpoints not found: {missing}. Run 5.2_cycle_gan.py first."
         )
 
     transforms = albumentations.Compose(
         [
-            albumentations.Resize(width=256, height=256),
+            albumentations.Resize(width=IMAGE_SIZE, height=IMAGE_SIZE),
             albumentations.Normalize(
                 mean=[0.5, 0.5, 0.5],
                 std=[0.5, 0.5, 0.5],
@@ -77,26 +74,33 @@ def main():
             ),
             ToTensorV2(),  # numpy H×W×C → torch C×H×W
         ],
-        additional_targets={"image0": "image"}
+        additional_targets={"image0": "image"},
     )
     dataset = LoadData(
-        root_A=[str(BLACK_DIR)],
-        root_B=[str(BLOND_DIR)],
-        transform=transforms
+        root_A=[str(BLACK_DIR)], root_B=[str(BLOND_DIR)], transform=transforms
     )
 
     device = try_gpu()
     loader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
-        pin_memory=device.type == "cuda"
+        dataset, batch_size=1, shuffle=False, pin_memory=device.type == "cuda"
     )
 
-    gen_black = Generator(img_channels=3, num_residuals=9).to(device)
-    gen_blond = Generator(img_channels=3, num_residuals=9).to(device)
-    gen_black.load_state_dict(torch.load(GEN_BLACK_PATH, map_location=device))
-    gen_blond.load_state_dict(torch.load(GEN_BLOND_PATH, map_location=device))
+    gen_black = Generator(img_channels=3, num_residuals=NUM_RESIDUAL_BLOCKS).to(device)
+    gen_blond = Generator(img_channels=3, num_residuals=NUM_RESIDUAL_BLOCKS).to(device)
+    gen_black.load_state_dict(
+        torch.load(
+            GEN_BLACK_PATH,
+            map_location=device,
+            weights_only=True,
+        )
+    )
+    gen_blond.load_state_dict(
+        torch.load(
+            GEN_BLOND_PATH,
+            map_location=device,
+            weights_only=True,
+        )
+    )
     gen_black.eval()
     gen_blond.eval()
 
@@ -124,7 +128,7 @@ def main():
             fake_black_images.append(fake_black[0].cpu())
             fake2blond_images.append(fake2blond[0].cpu())
 
-            if index == 10:
+            if index == NUM_SAMPLES:
                 break
 
     save_image_row_grid(

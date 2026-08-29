@@ -36,27 +36,26 @@ Total (2 of each):     28.3 M params
 import random
 
 import albumentations
-from dl_utils.plot._backend import pyplot as plt
 import torch
-import torch.nn as nn
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
+from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dl_utils.runtime.devices import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.cyclegan import (
+    LAMBDA_CYCLE,
     Discriminator,
     Generator,
-    LAMBDA_CYCLE,
     LoadData,
     train_epoch,
     weights_init,
 )
+from dl_utils.plot._backend import pyplot as plt
 from dl_utils.plot.figures import save_loss_curves
-from dl_utils.training.timing import Timer, format_epoch_timing
+from dl_utils.runtime.devices import try_gpu
 
 # installation
 # !pip install pandas albumentations
@@ -65,14 +64,22 @@ from dl_utils.training.timing import Timer, format_epoch_timing
 # Data lives under <project_root>/data; generated images and checkpoints
 # are written under <project_root>/output/gan/cyclegan/training
 PROJECT_ROOT = infer_project_root()
-DATA_DIR = PROJECT_ROOT / 'data'
-OUT_DIR = PROJECT_ROOT / 'output' / 'gan' / 'cyclegan' / 'training'
+DATA_DIR = PROJECT_ROOT / "data"
+OUT_DIR = PROJECT_ROOT / "output" / "gan" / "cyclegan" / "training"
 CYCLEGAN_OUT_DIR = OUT_DIR.parent
-
-
 CELEBA_DIR = DATA_DIR / "celeba"
 BLACK_DIR = CELEBA_DIR / "black"
 BLOND_DIR = CELEBA_DIR / "blond"
+GEN_BLACK_PATH = CYCLEGAN_OUT_DIR / "gen_black.pth"
+GEN_BLOND_PATH = CYCLEGAN_OUT_DIR / "gen_blond.pth"
+
+NUM_EPOCHS = 3
+BATCH_SIZE = 1
+LEARNING_RATE = 1e-5
+IMAGE_SIZE = 256
+NUM_RESIDUAL_BLOCKS = 9
+LOSS_UPDATES_PER_EPOCH = 20
+SNAPSHOT_UPDATES_PER_EPOCH = 10
 
 
 def save_dataset_samples(image_dirs, output_path, samples_per_dir=8, seed=42):
@@ -124,7 +131,7 @@ def main():
 
     transforms = albumentations.Compose(
         [
-            albumentations.Resize(width=256, height=256),
+            albumentations.Resize(width=IMAGE_SIZE, height=IMAGE_SIZE),
             albumentations.HorizontalFlip(p=0.5),
             albumentations.Normalize(
                 mean=[0.5, 0.5, 0.5],
@@ -142,7 +149,7 @@ def main():
     )
     loader = DataLoader(
         dataset,
-        batch_size=1,
+        batch_size=BATCH_SIZE,
         shuffle=True,
         pin_memory=True,
     )
@@ -153,8 +160,8 @@ def main():
     weights_init(disc_A)
     weights_init(disc_B)
 
-    gen_A = Generator(img_channels=3, num_residuals=9).to(device)
-    gen_B = Generator(img_channels=3, num_residuals=9).to(device)
+    gen_A = Generator(img_channels=3, num_residuals=NUM_RESIDUAL_BLOCKS).to(device)
+    gen_B = Generator(img_channels=3, num_residuals=NUM_RESIDUAL_BLOCKS).to(device)
     weights_init(gen_A)
     weights_init(gen_B)
 
@@ -165,19 +172,17 @@ def main():
     g_scaler = torch.amp.GradScaler(device.type)
     d_scaler = torch.amp.GradScaler(device.type)
 
-    lr = 0.00001
     opt_disc = torch.optim.Adam(
         list(disc_A.parameters()) + list(disc_B.parameters()),
-        lr=lr,
+        lr=LEARNING_RATE,
         betas=(0.5, 0.999),
     )
     opt_gen = torch.optim.Adam(
         list(gen_A.parameters()) + list(gen_B.parameters()),
-        lr=lr,
+        lr=LEARNING_RATE,
         betas=(0.5, 0.999),
     )
 
-    num_epochs = 3
     loss_steps = []
     discriminator_losses = []
     generator_losses = []
@@ -189,17 +194,16 @@ def main():
         f"Black → Blond → Black ({LAMBDA_CYCLE} × cycle)": [],
         f"Blond → Black → Blond ({LAMBDA_CYCLE} × cycle)": [],
     }
-    timer = Timer()
     with tqdm(
-        total=num_epochs * len(loader),
-        desc=f"Epoch 1/{num_epochs}",
+        total=NUM_EPOCHS * len(loader),
+        desc=f"Epoch 1/{NUM_EPOCHS}",
         unit="batch",
         dynamic_ncols=True,
         mininterval=1.0,
     ) as progress_bar:
-        for epoch in range(1, num_epochs + 1):
+        for epoch in range(1, NUM_EPOCHS + 1):
             progress_bar.set_description(
-                f"Epoch {epoch}/{num_epochs}",
+                f"Epoch {epoch}/{NUM_EPOCHS}",
                 refresh=False,
             )
 
@@ -211,16 +215,13 @@ def main():
                 window_loss_G_B,
                 window_cycle_A_loss,
                 window_cycle_B_loss,
+                epoch=epoch,
             ):
                 loss_steps.append(epoch - 1 + progress)
                 discriminator_losses.append(window_loss_D)
                 generator_losses.append(window_loss_G)
-                generator_adversarial_losses["Blond → Black"].append(
-                    window_loss_G_A
-                )
-                generator_adversarial_losses["Black → Blond"].append(
-                    window_loss_G_B
-                )
+                generator_adversarial_losses["Blond → Black"].append(window_loss_G_A)
+                generator_adversarial_losses["Black → Blond"].append(window_loss_G_B)
                 generator_reconstruction_losses[
                     f"Black → Blond → Black ({LAMBDA_CYCLE} × cycle)"
                 ].append(window_cycle_A_loss)
@@ -244,21 +245,17 @@ def main():
                 OUT_DIR,
                 epoch=epoch,
                 loss_callback=update_loss_curve,
-                loss_updates_per_epoch=20,
-                snapshot_updates_per_epoch=10,
+                loss_updates_per_epoch=LOSS_UPDATES_PER_EPOCH,
+                snapshot_updates_per_epoch=SNAPSHOT_UPDATES_PER_EPOCH,
                 domain_A_label="Black hair",
                 domain_B_label="Blond hair",
                 progress_bar=progress_bar,
             )
 
-    timing = format_epoch_timing(timer.stop(), num_epochs)
-    print(
-        f"loss_D {loss_D:.3f}, loss_G {loss_G:.3f}, "
-        f"{timing} on {device}"
-    )
+    print(f"loss_D {loss_D:.3f}, loss_G {loss_G:.3f} on {device}")
 
-    torch.save(gen_A.state_dict(), CYCLEGAN_OUT_DIR / "gen_black.pth")
-    torch.save(gen_B.state_dict(), CYCLEGAN_OUT_DIR / "gen_blond.pth")
+    torch.save(gen_A.state_dict(), GEN_BLACK_PATH)
+    torch.save(gen_B.state_dict(), GEN_BLOND_PATH)
     save_loss_curves(
         loss_steps,
         discriminator_losses,

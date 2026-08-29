@@ -41,13 +41,11 @@ Discriminator:           2.8 M params
 Total:                  57.2 M params
 """
 
-from dl_utils.plot._backend import pyplot as plt
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dl_utils.runtime.devices import try_gpu
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.pix2pix import (
@@ -58,14 +56,15 @@ from dl_utils.gan.pix2pix import (
     denormalize,
     initialize_weights,
 )
+from dl_utils.plot._backend import pyplot as plt
 from dl_utils.plot.figures import save_loss_curves
-from dl_utils.training.timing import Timer, format_epoch_timing
-
+from dl_utils.runtime.devices import try_gpu
 
 PROJECT_ROOT = infer_project_root()
 CELEBA_DIR = PROJECT_ROOT / "data" / "celeba"
 OUT_DIR = PROJECT_ROOT / "output" / "gan" / "pix2pix" / "training"
 PIX2PIX_OUT_DIR = OUT_DIR.parent
+GENERATOR_PATH = PIX2PIX_OUT_DIR / "pix2pix_generator.pth"
 
 NUM_EPOCHS = 20
 DECAY_START_EPOCH = 10
@@ -74,6 +73,7 @@ NUM_WORKERS = 8
 LEARNING_RATE = 2e-4
 LAMBDA_L1 = 100
 LOSS_UPDATES_PER_EPOCH = 1
+SAMPLES_TO_DISPLAY = 4
 
 
 def train_epoch(
@@ -112,8 +112,7 @@ def train_epoch(
     num_batches = len(loader)
     update_interval = max(
         1,
-        (num_batches + loss_updates_per_epoch - 1)
-        // loss_updates_per_epoch,
+        (num_batches + loss_updates_per_epoch - 1) // loss_updates_per_epoch,
     )
 
     for batch_idx, (source, target) in enumerate(loop, start=1):
@@ -173,8 +172,7 @@ def train_epoch(
             window_examples += batch_size
             if batch_idx % update_interval == 0 or batch_idx == num_batches:
                 window_losses = [
-                    loss_sum / window_examples
-                    for loss_sum in window_loss_sums
+                    loss_sum / window_examples for loss_sum in window_loss_sums
                 ]
                 window_loss_D, *window_generator_components = window_losses
                 loss_callback(
@@ -276,7 +274,13 @@ def main():
         persistent_workers=NUM_WORKERS > 0,
     )
     sample_source, sample_target = next(
-        iter(DataLoader(validation_dataset, batch_size=4, shuffle=False))
+        iter(
+            DataLoader(
+                validation_dataset,
+                batch_size=SAMPLES_TO_DISPLAY,
+                shuffle=False,
+            )
+        )
     )
 
     generator = UNetGenerator().to(device)
@@ -310,7 +314,6 @@ def main():
         f"{LAMBDA_L1} × G L1 loss": [],
     }
 
-    timer = Timer()
     with tqdm(
         total=NUM_EPOCHS * len(loader),
         desc=f"Epoch 1/{NUM_EPOCHS}",
@@ -330,16 +333,15 @@ def main():
                 window_loss_G,
                 window_loss_G_GAN,
                 window_weighted_loss_G_L1,
+                epoch=epoch,
             ):
                 loss_steps.append(epoch - 1 + progress)
                 discriminator_losses.append(window_loss_D)
                 generator_losses.append(window_loss_G)
-                generator_adversarial_losses["G GAN loss"].append(
-                    window_loss_G_GAN
+                generator_adversarial_losses["G GAN loss"].append(window_loss_G_GAN)
+                generator_reconstruction_losses[f"{LAMBDA_L1} × G L1 loss"].append(
+                    window_weighted_loss_G_L1
                 )
-                generator_reconstruction_losses[
-                    f"{LAMBDA_L1} × G L1 loss"
-                ].append(window_weighted_loss_G_L1)
 
             loss_D, loss_G, loss_G_GAN, weighted_loss_G_L1 = train_epoch(
                 generator,
@@ -372,11 +374,7 @@ def main():
             scheduler_G.step()
             scheduler_D.step()
 
-    print(f"{format_epoch_timing(timer.stop(), NUM_EPOCHS)} on {device}")
-    torch.save(
-        generator.state_dict(),
-        PIX2PIX_OUT_DIR / "pix2pix_generator.pth",
-    )
+    torch.save(generator.state_dict(), GENERATOR_PATH)
     save_loss_curves(
         loss_steps,
         discriminator_losses,
