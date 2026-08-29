@@ -3,12 +3,12 @@
 import torch
 
 
-def update_D(
+def update_discriminator(
     real_samples,
     noise,
     discriminator,
     generator,
-    loss,
+    loss_function,
     optimizer,
     real_label: float = 1.0,
 ):
@@ -26,8 +26,8 @@ def update_D(
     generated_samples = generator(noise)
     generated_outputs = discriminator(generated_samples.detach())
     discriminator_loss = (
-        loss(real_outputs, real_labels.reshape(real_outputs.shape))
-        + loss(
+        loss_function(real_outputs, real_labels.reshape(real_outputs.shape))
+        + loss_function(
             generated_outputs,
             generated_labels.reshape(generated_outputs.shape),
         )
@@ -37,7 +37,7 @@ def update_D(
     return discriminator_loss
 
 
-def update_G(noise, discriminator, generator, loss, optimizer):
+def update_generator(noise, discriminator, generator, loss_function, optimizer):
     """Update the generator to make generated samples score as real."""
     batch_size = noise.shape[0]
     real_labels = torch.ones(batch_size, device=noise.device)
@@ -45,7 +45,7 @@ def update_G(noise, discriminator, generator, loss, optimizer):
     optimizer.zero_grad()
     generated_samples = generator(noise)
     generated_outputs = discriminator(generated_samples)
-    generator_loss = loss(
+    generator_loss = loss_function(
         generated_outputs,
         real_labels.reshape(generated_outputs.shape),
     )
@@ -54,4 +54,4 @@ def update_G(noise, discriminator, generator, loss, optimizer):
     return generator_loss
 
 
-__all__ = ["update_D", "update_G"]
+__all__ = ["update_discriminator", "update_generator"]

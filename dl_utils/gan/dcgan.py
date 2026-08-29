@@ -7,14 +7,14 @@ from torch import nn
 from tqdm import tqdm
 
 from dl_utils.filesystem.directories import reset_dir
-from dl_utils.gan.gan import update_D, update_G
+from dl_utils.gan.gan import update_discriminator, update_generator
 from dl_utils.plot._backend import pyplot as plt
 from dl_utils.plot.figures import plot, save_loss_panels
 from dl_utils.runtime.devices import try_gpu
 from dl_utils.training.metrics import MetricAccumulator
 
 
-class GeneratorBlock(nn.Module):
+class DCGANGeneratorBlock(nn.Module):
     """Upsample with transposed convolution, BatchNorm, and ReLU."""
 
     def __init__(
@@ -43,7 +43,7 @@ class GeneratorBlock(nn.Module):
         return self.activation(self.batch_norm(hidden))
 
 
-class DiscriminatorBlock(nn.Module):
+class DCGANDiscriminatorBlock(nn.Module):
     """Downsample with convolution, BatchNorm, and LeakyReLU."""
 
     def __init__(
@@ -78,21 +78,21 @@ class DCGANGenerator(nn.Sequential):
 
     def __init__(self, z_dim=100, image_channels=3, base_channels=64):
         super().__init__(
-            GeneratorBlock(
+            DCGANGeneratorBlock(
                 in_channels=z_dim,
                 out_channels=base_channels * 8,
                 stride=1,
                 padding=0,
             ),
-            GeneratorBlock(
+            DCGANGeneratorBlock(
                 in_channels=base_channels * 8,
                 out_channels=base_channels * 4,
             ),
-            GeneratorBlock(
+            DCGANGeneratorBlock(
                 in_channels=base_channels * 4,
                 out_channels=base_channels * 2,
             ),
-            GeneratorBlock(
+            DCGANGeneratorBlock(
                 in_channels=base_channels * 2,
                 out_channels=base_channels,
             ),
@@ -113,19 +113,19 @@ class DCGANDiscriminator(nn.Sequential):
 
     def __init__(self, image_channels=3, base_channels=64):
         super().__init__(
-            DiscriminatorBlock(
+            DCGANDiscriminatorBlock(
                 in_channels=image_channels,
                 out_channels=base_channels,
             ),
-            DiscriminatorBlock(
+            DCGANDiscriminatorBlock(
                 in_channels=base_channels,
                 out_channels=base_channels * 2,
             ),
-            DiscriminatorBlock(
+            DCGANDiscriminatorBlock(
                 in_channels=base_channels * 2,
                 out_channels=base_channels * 4,
             ),
-            DiscriminatorBlock(
+            DCGANDiscriminatorBlock(
                 in_channels=base_channels * 4,
                 out_channels=base_channels * 8,
             ),
@@ -138,7 +138,7 @@ class DCGANDiscriminator(nn.Sequential):
         )
 
 
-def initialize_dcgan(model):
+def initialize_dcgan_weights(model):
     """Initialize every trainable parameter from N(0, 0.02)."""
     for parameter in model.parameters():
         nn.init.normal_(parameter, 0, 0.02)
@@ -215,12 +215,12 @@ def train_dcgan(
     training_dir = output_dir / "training"
     reset_dir(str(training_dir))
     device = try_gpu() if device is None else device
-    initialize_dcgan(generator)
-    initialize_dcgan(discriminator)
+    initialize_dcgan_weights(generator)
+    initialize_dcgan_weights(discriminator)
     generator = generator.to(device)
     discriminator = discriminator.to(device)
 
-    loss = nn.BCEWithLogitsLoss(reduction="sum")
+    loss_function = nn.BCEWithLogitsLoss(reduction="sum")
     generator_optimizer = torch.optim.Adam(
         generator.parameters(),
         lr=generator_lr,
@@ -255,20 +255,20 @@ def train_dcgan(
                 batch_size = real_images.shape[0]
                 noise = torch.randn(batch_size, z_dim, 1, 1, device=device)
 
-                discriminator_loss = update_D(
+                discriminator_loss = update_discriminator(
                     real_images,
                     noise,
                     discriminator,
                     generator,
-                    loss,
+                    loss_function,
                     discriminator_optimizer,
                     real_label=0.9,
                 )
-                generator_loss = update_G(
+                generator_loss = update_generator(
                     noise,
                     discriminator,
                     generator,
-                    loss,
+                    loss_function,
                     generator_optimizer,
                 )
                 metrics.update(
@@ -314,10 +314,10 @@ def train_dcgan(
 
 __all__ = [
     "DCGANDiscriminator",
+    "DCGANDiscriminatorBlock",
     "DCGANGenerator",
-    "DiscriminatorBlock",
-    "GeneratorBlock",
-    "initialize_dcgan",
+    "DCGANGeneratorBlock",
+    "initialize_dcgan_weights",
     "save_dcgan_sample_grid",
     "save_leaky_relu_curves",
     "train_dcgan",

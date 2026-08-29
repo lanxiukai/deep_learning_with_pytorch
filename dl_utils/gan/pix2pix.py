@@ -15,15 +15,14 @@ from torch.utils.data import Dataset
 
 from dl_utils.data.images import load_rgb_image
 
-
 PARTITIONS = {"train": 0, "validation": 1, "test": 2}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def build_paired_transform(
     training: bool,
-    image_size: int = 256,
-    load_size: int = 286,
+    image_size: int = 128,
+    load_size: int = 143,
 ):
     """Apply identical geometry to both images in each aligned pair."""
     if training:
@@ -93,19 +92,17 @@ class CelebAColorizationDataset(Dataset[tuple[Tensor, Tensor]]):
         # pair stays pixel-aligned, then convert back to RGB (replicated
         # luminance) to match the generator's expected input channels.
         source = ImageOps.grayscale(target).convert("RGB")
-        pair = self.transform(
+        transformed_pair = self.transform(
             image=np.array(target),
             source=np.array(source),
         )
-        return pair["source"], pair["image"]
+        return transformed_pair["source"], transformed_pair["image"]
 
 
-class DownBlock(nn.Module):
+class UNetDownBlock(nn.Module):
     def __init__(self, in_channels, out_channels, normalize=True):
         super().__init__()
-        layers = [
-            nn.Conv2d(in_channels, out_channels, 4, 2, 1, bias=not normalize)
-        ]
+        layers = [nn.Conv2d(in_channels, out_channels, 4, 2, 1, bias=not normalize)]
         if normalize:
             layers.append(nn.BatchNorm2d(out_channels))
         layers.append(nn.LeakyReLU(0.2, inplace=True))
@@ -115,7 +112,7 @@ class DownBlock(nn.Module):
         return self.net(inputs)
 
 
-class UpBlock(nn.Module):
+class UNetUpBlock(nn.Module):
     def __init__(self, in_channels, out_channels, dropout=False):
         super().__init__()
         layers = [
@@ -127,37 +124,78 @@ class UpBlock(nn.Module):
             layers.append(nn.Dropout(0.5))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, inputs, skip):
-        return torch.cat([self.net(inputs), skip], dim=1)
+    def forward(self, inputs, skip_features):
+        return torch.cat([self.net(inputs), skip_features], dim=1)
 
 
 class UNetGenerator(nn.Module):
-    """Eight-level U-Net used by the original 256x256 pix2pix model."""
+    """Seven-level U-Net for 128x128 pix2pix generation."""
 
-    def __init__(self, input_channels=3, output_channels=3, features=64):
+    def __init__(self, input_channels=3, output_channels=3, base_channels=64):
         super().__init__()
-        c = features
-        self.down1 = DownBlock(input_channels, c, normalize=False)  # (B, 64, 128, 128)
-        self.down2 = DownBlock(c, c * 2)      # (B, 128, 64, 64)
-        self.down3 = DownBlock(c * 2, c * 4)  # (B, 256, 32, 32)
-        self.down4 = DownBlock(c * 4, c * 8)  # (B, 512, 16, 16)
-        self.down5 = DownBlock(c * 8, c * 8)  # (B, 512, 8, 8)
-        self.down6 = DownBlock(c * 8, c * 8)  # (B, 512, 4, 4)
-        self.down7 = DownBlock(c * 8, c * 8)  # (B, 512, 2, 2)
+        self.down1 = UNetDownBlock(
+            input_channels,
+            base_channels,
+            normalize=False,
+        )  # (B, 64, 64, 64)
+        self.down2 = UNetDownBlock(
+            base_channels,
+            base_channels * 2,
+        )  # (B, 128, 32, 32)
+        self.down3 = UNetDownBlock(
+            base_channels * 2,
+            base_channels * 4,
+        )  # (B, 256, 16, 16)
+        self.down4 = UNetDownBlock(
+            base_channels * 4,
+            base_channels * 8,
+        )  # (B, 512, 8, 8)
+        self.down5 = UNetDownBlock(
+            base_channels * 8,
+            base_channels * 8,
+        )  # (B, 512, 4, 4)
+        self.down6 = UNetDownBlock(
+            base_channels * 8,
+            base_channels * 8,
+        )  # (B, 512, 2, 2)
         # PyTorch BatchNorm cannot train on a 1x1 tensor with batch size 1.
-        self.down8 = DownBlock(c * 8, c * 8, normalize=False)  # (B, 512, 1, 1)
+        self.down7 = UNetDownBlock(
+            base_channels * 8,
+            base_channels * 8,
+            normalize=False,
+        )  # (B, 512, 1, 1)
 
-        self.up1 = UpBlock(c * 8, c * 8, dropout=True)   # (B, 1024, 2, 2)
-        self.up2 = UpBlock(c * 16, c * 8, dropout=True)  # (B, 1024, 4, 4)
-        self.up3 = UpBlock(c * 16, c * 8, dropout=True)  # (B, 1024, 8, 8)
-        self.up4 = UpBlock(c * 16, c * 8)  # (B, 1024, 16, 16)
-        self.up5 = UpBlock(c * 16, c * 4)  # (B, 512, 32, 32)
-        self.up6 = UpBlock(c * 8, c * 2)   # (B, 256, 64, 64)
-        self.up7 = UpBlock(c * 4, c)       # (B, 128, 128, 128)
+        self.up1 = UNetUpBlock(
+            base_channels * 8,
+            base_channels * 8,
+            dropout=True,
+        )  # (B, 1024, 2, 2)
+        self.up2 = UNetUpBlock(
+            base_channels * 16,
+            base_channels * 8,
+            dropout=True,
+        )  # (B, 1024, 4, 4)
+        self.up3 = UNetUpBlock(
+            base_channels * 16,
+            base_channels * 8,
+            dropout=True,
+        )  # (B, 1024, 8, 8)
+        self.up4 = UNetUpBlock(
+            base_channels * 16,
+            base_channels * 4,
+        )  # (B, 512, 16, 16)
+        self.up5 = UNetUpBlock(
+            base_channels * 8,
+            base_channels * 2,
+        )  # (B, 256, 32, 32)
+        self.up6 = UNetUpBlock(
+            base_channels * 4,
+            base_channels,
+        )  # (B, 128, 64, 64)
         self.final = nn.Sequential(
-            nn.ConvTranspose2d(c * 2, output_channels, 4, 2, 1),
+            nn.ConvTranspose2d(base_channels * 2, output_channels, 4, 2, 1),
             nn.Tanh(),
-        )                                  # (B, 3, 256, 256)
+        )  # (B, 3, 128, 128)
 
     def forward(self, inputs):
         down1 = self.down1(inputs)
@@ -166,48 +204,50 @@ class UNetGenerator(nn.Module):
         down4 = self.down4(down3)
         down5 = self.down5(down4)
         down6 = self.down6(down5)
-        down7 = self.down7(down6)
-        bottleneck = self.down8(down7)
+        bottleneck = self.down7(down6)
 
-        up1 = self.up1(bottleneck, down7)
-        up2 = self.up2(up1, down6)
-        up3 = self.up3(up2, down5)
-        up4 = self.up4(up3, down4)
-        up5 = self.up5(up4, down3)
-        up6 = self.up6(up5, down2)
-        up7 = self.up7(up6, down1)
-        return self.final(up7)
+        up1 = self.up1(bottleneck, down6)
+        up2 = self.up2(up1, down5)
+        up3 = self.up3(up2, down4)
+        up4 = self.up4(up3, down3)
+        up5 = self.up5(up4, down2)
+        up6 = self.up6(up5, down1)
+        return self.final(up6)
 
 
 class ConditionalPatchDiscriminator(nn.Module):
-    """70x70 PatchGAN producing a 30x30 prediction map for 256x256 inputs."""
+    """70x70 PatchGAN producing a 14x14 map for 128x128 inputs."""
 
-    def __init__(self, source_channels=3, target_channels=3, features=64):
+    def __init__(self, source_channels=3, target_channels=3, base_channels=64):
         super().__init__()
 
-        def block(in_channels, out_channels, stride, normalize=True):
-            layers = [nn.Conv2d(in_channels, out_channels, 4, stride, 1,
-                                bias=not normalize)]
+        def make_block(in_channels, out_channels, stride, normalize=True):
+            layers = [
+                nn.Conv2d(in_channels, out_channels, 4, stride, 1, bias=not normalize)
+            ]
             if normalize:
                 layers.append(nn.BatchNorm2d(out_channels))
             layers.append(nn.LeakyReLU(0.2, inplace=True))
             return layers
 
-        c = features
         self.net = nn.Sequential(
-            *block(source_channels + target_channels,
-                   c, 2, normalize=False),  # (B, 64, 128, 128)
-            *block(c, c * 2, 2),            # (B, 128, 64, 64)
-            *block(c * 2, c * 4, 2),        # (B, 256, 32, 32)
-            *block(c * 4, c * 8, 1),        # (B, 512, 31, 31)
-            nn.Conv2d(c * 8, 1, 4, 1, 1),   # (B, 1, 30, 30)
+            *make_block(
+                source_channels + target_channels,
+                base_channels,
+                2,
+                normalize=False,
+            ),  # (B, 64, 64, 64)
+            *make_block(base_channels, base_channels * 2, 2),
+            *make_block(base_channels * 2, base_channels * 4, 2),
+            *make_block(base_channels * 4, base_channels * 8, 1),
+            nn.Conv2d(base_channels * 8, 1, 4, 1, 1),
         )
 
     def forward(self, source, target):
         return self.net(torch.cat([source, target], dim=1))
 
 
-def initialize_weights(module):
+def initialize_pix2pix_weights(module):
     """Use the normal initialization from the standard pix2pix implementation."""
     if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
         nn.init.normal_(module.weight, 0.0, 0.02)
@@ -218,5 +258,5 @@ def initialize_weights(module):
         nn.init.zeros_(module.bias)
 
 
-def denormalize(images):
+def denormalize_images(images):
     return images.mul(0.5).add(0.5).clamp(0, 1)

@@ -9,7 +9,7 @@ from tqdm import tqdm
 from dl_utils.data.vision import load_array
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.gan.gan import update_D, update_G
+from dl_utils.gan.gan import update_discriminator, update_generator
 from dl_utils.plot._backend import pyplot as plt
 from dl_utils.plot.figures import save_loss_panels, set_figsize
 from dl_utils.training.metrics import MetricAccumulator
@@ -65,7 +65,7 @@ def train(
             for (real_batch,) in data_loader:
                 batch_size = real_batch.shape[0]
                 noise = torch.normal(0, 1, size=(batch_size, z_dim))
-                discriminator_loss = update_D(
+                discriminator_loss = update_discriminator(
                     real_batch,
                     noise,
                     discriminator,
@@ -73,7 +73,7 @@ def train(
                     loss,
                     discriminator_optimizer,
                 )
-                generator_loss = update_G(
+                generator_loss = update_generator(
                     noise,
                     discriminator,
                     generator,

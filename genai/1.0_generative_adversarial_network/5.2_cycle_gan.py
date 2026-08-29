@@ -25,8 +25,8 @@ Black hair:              48,472 images
 Blond hair:              29,980 images
 Available total:         78,452 unique images
 Samples per epoch:       48,472 unpaired image pairs
-Note: LoadData uses the larger domain as its length, so the smaller blond-hair
-domain cycles and 18,492 of its images are reused once per epoch.
+Note: The unpaired dataset uses the larger domain as its length, so the smaller
+blond-hair domain cycles and 18,492 of its images are reused once per epoch.
 
 Generator (each):      11.4 M params
 Discriminator (each):   2.8 M params
@@ -47,11 +47,11 @@ from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.cyclegan import (
     LAMBDA_CYCLE,
-    Discriminator,
-    Generator,
-    LoadData,
-    train_epoch,
-    weights_init,
+    CycleGANDiscriminator,
+    CycleGANGenerator,
+    UnpairedImageDataset,
+    initialize_cyclegan_weights,
+    train_cyclegan_epoch,
 )
 from dl_utils.plot._backend import pyplot as plt
 from dl_utils.plot.figures import save_loss_curves
@@ -76,7 +76,7 @@ GEN_BLOND_PATH = CYCLEGAN_OUT_DIR / "gen_blond.pth"
 NUM_EPOCHS = 3
 BATCH_SIZE = 1
 LEARNING_RATE = 1e-5
-IMAGE_SIZE = 256
+IMAGE_SIZE = 128
 NUM_RESIDUAL_BLOCKS = 9
 LOSS_UPDATES_PER_EPOCH = 20
 SNAPSHOT_UPDATES_PER_EPOCH = 10
@@ -142,9 +142,9 @@ def main():
         ],
         additional_targets={"image0": "image"},
     )  # Apply the same transforms to image0.
-    dataset = LoadData(
-        root_A=[str(BLACK_DIR)],
-        root_B=[str(BLOND_DIR)],
+    dataset = UnpairedImageDataset(
+        domain_a_roots=[str(BLACK_DIR)],
+        domain_b_roots=[str(BLOND_DIR)],
         transform=transforms,
     )
     loader = DataLoader(
@@ -155,30 +155,36 @@ def main():
     )
 
     device = try_gpu()
-    disc_A = Discriminator().to(device)
-    disc_B = Discriminator().to(device)
-    weights_init(disc_A)
-    weights_init(disc_B)
+    discriminator_black = CycleGANDiscriminator().to(device)
+    discriminator_blond = CycleGANDiscriminator().to(device)
+    discriminator_black.apply(initialize_cyclegan_weights)
+    discriminator_blond.apply(initialize_cyclegan_weights)
 
-    gen_A = Generator(img_channels=3, num_residuals=NUM_RESIDUAL_BLOCKS).to(device)
-    gen_B = Generator(img_channels=3, num_residuals=NUM_RESIDUAL_BLOCKS).to(device)
-    weights_init(gen_A)
-    weights_init(gen_B)
+    generator_black = CycleGANGenerator(
+        image_channels=3,
+        num_residual_blocks=NUM_RESIDUAL_BLOCKS,
+    ).to(device)
+    generator_blond = CycleGANGenerator(
+        image_channels=3,
+        num_residual_blocks=NUM_RESIDUAL_BLOCKS,
+    ).to(device)
+    generator_black.apply(initialize_cyclegan_weights)
+    generator_blond.apply(initialize_cyclegan_weights)
 
-    l1 = nn.L1Loss()
-    mse = nn.MSELoss()
+    reconstruction_loss = nn.L1Loss()
+    adversarial_loss = nn.MSELoss()
     # Mixed-precision (AMP) gradient scalers prevent FP16 gradient underflow.
     # One scaler is used per optimizer because their update patterns differ.
-    g_scaler = torch.amp.GradScaler(device.type)
-    d_scaler = torch.amp.GradScaler(device.type)
+    generator_scaler = torch.amp.GradScaler(device.type)
+    discriminator_scaler = torch.amp.GradScaler(device.type)
 
-    opt_disc = torch.optim.Adam(
-        list(disc_A.parameters()) + list(disc_B.parameters()),
+    discriminator_optimizer = torch.optim.Adam(
+        list(discriminator_black.parameters()) + list(discriminator_blond.parameters()),
         lr=LEARNING_RATE,
         betas=(0.5, 0.999),
     )
-    opt_gen = torch.optim.Adam(
-        list(gen_A.parameters()) + list(gen_B.parameters()),
+    generator_optimizer = torch.optim.Adam(
+        list(generator_black.parameters()) + list(generator_blond.parameters()),
         lr=LEARNING_RATE,
         betas=(0.5, 0.999),
     )
@@ -209,53 +215,57 @@ def main():
 
             def update_loss_curve(
                 progress,
-                window_loss_D,
-                window_loss_G,
-                window_loss_G_A,
-                window_loss_G_B,
-                window_cycle_A_loss,
-                window_cycle_B_loss,
+                window_discriminator_loss,
+                window_generator_loss,
+                window_generator_black_loss,
+                window_generator_blond_loss,
+                window_black_cycle_loss,
+                window_blond_cycle_loss,
                 epoch=epoch,
             ):
                 loss_steps.append(epoch - 1 + progress)
-                discriminator_losses.append(window_loss_D)
-                generator_losses.append(window_loss_G)
-                generator_adversarial_losses["Blond → Black"].append(window_loss_G_A)
-                generator_adversarial_losses["Black → Blond"].append(window_loss_G_B)
+                discriminator_losses.append(window_discriminator_loss)
+                generator_losses.append(window_generator_loss)
+                generator_adversarial_losses["Blond → Black"].append(
+                    window_generator_black_loss
+                )
+                generator_adversarial_losses["Black → Blond"].append(
+                    window_generator_blond_loss
+                )
                 generator_reconstruction_losses[
                     f"Black → Blond → Black ({LAMBDA_CYCLE} × cycle)"
-                ].append(window_cycle_A_loss)
+                ].append(window_black_cycle_loss)
                 generator_reconstruction_losses[
                     f"Blond → Black → Blond ({LAMBDA_CYCLE} × cycle)"
-                ].append(window_cycle_B_loss)
+                ].append(window_blond_cycle_loss)
 
-            loss_D, loss_G = train_epoch(
-                disc_A,
-                disc_B,
-                gen_A,
-                gen_B,
+            discriminator_loss, generator_loss = train_cyclegan_epoch(
+                discriminator_black,
+                discriminator_blond,
+                generator_black,
+                generator_blond,
                 loader,
-                opt_disc,
-                opt_gen,
-                l1,
-                mse,
-                d_scaler,
-                g_scaler,
+                discriminator_optimizer,
+                generator_optimizer,
+                reconstruction_loss,
+                adversarial_loss,
+                discriminator_scaler,
+                generator_scaler,
                 device,
                 OUT_DIR,
                 epoch=epoch,
                 loss_callback=update_loss_curve,
                 loss_updates_per_epoch=LOSS_UPDATES_PER_EPOCH,
                 snapshot_updates_per_epoch=SNAPSHOT_UPDATES_PER_EPOCH,
-                domain_A_label="Black hair",
-                domain_B_label="Blond hair",
+                domain_a_label="Black hair",
+                domain_b_label="Blond hair",
                 progress_bar=progress_bar,
             )
 
-    print(f"loss_D {loss_D:.3f}, loss_G {loss_G:.3f} on {device}")
+    print(f"loss_D {discriminator_loss:.3f}, loss_G {generator_loss:.3f} on {device}")
 
-    torch.save(gen_A.state_dict(), GEN_BLACK_PATH)
-    torch.save(gen_B.state_dict(), GEN_BLOND_PATH)
+    torch.save(generator_black.state_dict(), GEN_BLACK_PATH)
+    torch.save(generator_blond.state_dict(), GEN_BLOND_PATH)
     save_loss_curves(
         loss_steps,
         discriminator_losses,

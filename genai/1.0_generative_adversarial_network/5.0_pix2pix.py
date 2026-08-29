@@ -7,7 +7,7 @@ Compared with 5.2_cycle_gan.py:
     - No reverse generator or cycle-consistency loss is needed.
 
 The reusable dataset and complete model definitions live in
-dl_utils/gan/pix2pix.py.  The configuration uses a 256x256 U-Net, 70x70
+dl_utils/gan/pix2pix.py.  The configuration uses a 128x128 U-Net, 70x70
 PatchGAN, batch size 8, Adam(lr=2e-4, beta1=0.5), and 20 epochs with linear
 learning-rate decay after epoch 10.
 
@@ -36,9 +36,9 @@ Samples per epoch:       63,171 aligned grayscale/RGB pairs
 Note: The grayscale source is derived from the same RGB target in memory, so
 each training image contributes one pixel-aligned pair per epoch.
 
-Generator:              54.4 M params
+Generator:              41.8 M params
 Discriminator:           2.8 M params
-Total:                  57.2 M params
+Total:                  44.6 M params
 """
 
 import torch
@@ -53,8 +53,8 @@ from dl_utils.gan.pix2pix import (
     ConditionalPatchDiscriminator,
     UNetGenerator,
     build_paired_transform,
-    denormalize,
-    initialize_weights,
+    denormalize_images,
+    initialize_pix2pix_weights,
 )
 from dl_utils.plot._backend import pyplot as plt
 from dl_utils.plot.figures import save_loss_curves
@@ -70,6 +70,8 @@ NUM_EPOCHS = 20
 DECAY_START_EPOCH = 10
 BATCH_SIZE = 8
 NUM_WORKERS = 8
+IMAGE_SIZE = 128
+LOAD_SIZE = 143
 LEARNING_RATE = 2e-4
 LAMBDA_L1 = 100
 LOSS_UPDATES_PER_EPOCH = 1
@@ -219,9 +221,9 @@ def save_training_samples(
     generator.train()
 
     image_rows = (
-        denormalize(source),
-        denormalize(generated),
-        denormalize(target),
+        denormalize_images(source),
+        denormalize_images(generated),
+        denormalize_images(target),
     )
     row_labels = ("Grayscale input", "Generated color", "Ground truth")
     num_samples = source.shape[0]
@@ -258,12 +260,19 @@ def main():
     train_dataset = CelebAColorizationDataset(
         CELEBA_DIR,
         "train",
-        build_paired_transform(training=True),
+        build_paired_transform(
+            training=True,
+            image_size=IMAGE_SIZE,
+            load_size=LOAD_SIZE,
+        ),
     )
     validation_dataset = CelebAColorizationDataset(
         CELEBA_DIR,
         "validation",
-        build_paired_transform(training=False),
+        build_paired_transform(
+            training=False,
+            image_size=IMAGE_SIZE,
+        ),
     )
     loader = DataLoader(
         train_dataset,
@@ -285,8 +294,8 @@ def main():
 
     generator = UNetGenerator().to(device)
     discriminator = ConditionalPatchDiscriminator().to(device)
-    generator.apply(initialize_weights)
-    discriminator.apply(initialize_weights)
+    generator.apply(initialize_pix2pix_weights)
+    discriminator.apply(initialize_pix2pix_weights)
 
     opt_G = torch.optim.Adam(
         generator.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999)

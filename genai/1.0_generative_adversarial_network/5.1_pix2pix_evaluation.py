@@ -28,6 +28,7 @@ PROJECT_ROOT = infer_project_root()
 CELEBA_DIR = PROJECT_ROOT / "data" / "celeba"
 OUT_DIR = PROJECT_ROOT / "output" / "gan" / "pix2pix" / "evaluation"
 GENERATOR_PATH = OUT_DIR.parent / "pix2pix_generator.pth"
+IMAGE_SIZE = 128
 NUM_SAMPLES = 10
 
 
@@ -41,7 +42,10 @@ def main():
     dataset = CelebAColorizationDataset(
         CELEBA_DIR,
         "test",
-        build_paired_transform(training=False),
+        build_paired_transform(
+            training=False,
+            image_size=IMAGE_SIZE,
+        ),
     )
     device = try_gpu()
     loader = DataLoader(

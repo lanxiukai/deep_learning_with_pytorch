@@ -103,7 +103,7 @@ class ConditionalCritic(nn.Module):
         return self.net(inputs)
 
 
-def _initialize_conditional_gan(module):
+def initialize_conditional_gan_weights(module):
     if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
         nn.init.normal_(module.weight, 0.0, 0.02)
     elif isinstance(module, nn.BatchNorm2d):
@@ -139,29 +139,30 @@ def save_conditional_sample_grids(
             )
             labels[:, class_index] = 1
             conditioned_noise = torch.cat([noise, labels], dim=1)
-            generated_images = generator(conditioned_noise).cpu().mul(0.5).add(0.5)
-
-            fig, axes = plt.subplots(
-                rows,
-                columns,
-                figsize=(20, 10),
-                dpi=100,
-                squeeze=False,
+            generated_images = (
+                generator(conditioned_noise).permute(0, 2, 3, 1).cpu().mul(0.5).add(0.5)
             )
-            try:
-                for axis, image in zip(axes.flat, generated_images, strict=True):
-                    axis.imshow(image.permute(1, 2, 0).clamp(0, 1).numpy())
-                    axis.set_xticks([])
-                    axis.set_yticks([])
-                fig.subplots_adjust(hspace=-0.6)
-                prefix = (
-                    ("G", "NoG")[class_index]
-                    if num_classes == 2
-                    else f"class_{class_index}"
-                )
-                fig.savefig(training_dir / f"{prefix}{epoch}.png")
-            finally:
-                plt.close(fig)
+            image_grid = torch.cat(
+                [
+                    torch.cat(
+                        generated_images[
+                            row_index * columns : (row_index + 1) * columns
+                        ].unbind(),
+                        dim=1,
+                    )
+                    for row_index in range(rows)
+                ],
+                dim=0,
+            )
+            prefix = (
+                ("G", "NoG")[class_index]
+                if num_classes == 2
+                else f"class_{class_index}"
+            )
+            plt.imsave(
+                training_dir / f"{prefix}{epoch}.png",
+                image_grid.clamp(0, 1).numpy(),
+            )
     finally:
         generator.train(was_training)
 
@@ -262,8 +263,8 @@ def train_conditional_gan(
     training_dir = output_dir / "training"
     reset_dir(str(training_dir))
     device = try_gpu() if device is None else device
-    generator.apply(_initialize_conditional_gan)
-    critic.apply(_initialize_conditional_gan)
+    generator.apply(initialize_conditional_gan_weights)
+    critic.apply(initialize_conditional_gan_weights)
     generator = generator.to(device)
     critic = critic.to(device)
     generator_optimizer = torch.optim.Adam(
@@ -404,6 +405,7 @@ def train_conditional_gan(
 __all__ = [
     "ConditionalCritic",
     "ConditionalGenerator",
+    "initialize_conditional_gan_weights",
     "save_conditional_sample_grids",
     "train_conditional_gan",
     "update_conditional_critic",

@@ -9,7 +9,7 @@ from tqdm import tqdm
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.gan.dcgan import (
     DCGANGenerator,
-    initialize_dcgan,
+    initialize_dcgan_weights,
     save_dcgan_sample_grid,
 )
 from dl_utils.plot.figures import save_loss_panels
@@ -21,7 +21,7 @@ class WGANGenerator(DCGANGenerator):
     """Generate 64x64 RGB images with the DCGAN generator topology."""
 
 
-class CriticBlock(nn.Module):
+class WGANCriticBlock(nn.Module):
     """Downsample without normalization for the Wasserstein critic."""
 
     def __init__(
@@ -55,19 +55,19 @@ class WGANCritic(nn.Sequential):
 
     def __init__(self, image_channels=3, base_channels=64):
         super().__init__(
-            CriticBlock(
+            WGANCriticBlock(
                 in_channels=image_channels,
                 out_channels=base_channels,
             ),
-            CriticBlock(
+            WGANCriticBlock(
                 in_channels=base_channels,
                 out_channels=base_channels * 2,
             ),
-            CriticBlock(
+            WGANCriticBlock(
                 in_channels=base_channels * 2,
                 out_channels=base_channels * 4,
             ),
-            CriticBlock(
+            WGANCriticBlock(
                 in_channels=base_channels * 4,
                 out_channels=base_channels * 8,
             ),
@@ -156,7 +156,7 @@ def update_wgan_generator(noise, critic, generator, optimizer):
     return generator_loss.detach()
 
 
-def _make_optimizers(critic, generator, lipschitz, learning_rate):
+def _create_wgan_optimizers(critic, generator, lipschitz, learning_rate):
     if lipschitz == "clip":
         learning_rate = 5e-5 if learning_rate is None else learning_rate
         critic_optimizer = torch.optim.RMSprop(
@@ -210,11 +210,11 @@ def train_wgan(
     training_dir = output_dir / "training"
     reset_dir(str(training_dir))
     device = try_gpu() if device is None else device
-    initialize_dcgan(generator)
-    initialize_dcgan(critic)
+    initialize_dcgan_weights(generator)
+    initialize_dcgan_weights(critic)
     generator = generator.to(device)
     critic = critic.to(device)
-    critic_optimizer, generator_optimizer = _make_optimizers(
+    critic_optimizer, generator_optimizer = _create_wgan_optimizers(
         critic,
         generator,
         lipschitz,
@@ -327,8 +327,8 @@ def train_wgan(
 
 
 __all__ = [
-    "CriticBlock",
     "WGANCritic",
+    "WGANCriticBlock",
     "WGANGenerator",
     "gradient_penalty",
     "train_wgan",

@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.gan.cyclegan import Generator, LoadData
+from dl_utils.gan.cyclegan import CycleGANGenerator, UnpairedImageDataset
 from dl_utils.plot.images import save_image_row_grid
 from dl_utils.runtime.devices import try_gpu
 
@@ -39,7 +39,7 @@ BLOND_DIR = DATA_DIR / "celeba" / "blond"
 GEN_BLACK_PATH = CHECKPOINT_DIR / "gen_black.pth"
 GEN_BLOND_PATH = CHECKPOINT_DIR / "gen_blond.pth"
 NUM_SAMPLES = 10
-IMAGE_SIZE = 256
+IMAGE_SIZE = 128
 NUM_RESIDUAL_BLOCKS = 9
 
 
@@ -76,8 +76,10 @@ def main():
         ],
         additional_targets={"image0": "image"},
     )
-    dataset = LoadData(
-        root_A=[str(BLACK_DIR)], root_B=[str(BLOND_DIR)], transform=transforms
+    dataset = UnpairedImageDataset(
+        domain_a_roots=[str(BLACK_DIR)],
+        domain_b_roots=[str(BLOND_DIR)],
+        transform=transforms,
     )
 
     device = try_gpu()
@@ -85,24 +87,30 @@ def main():
         dataset, batch_size=1, shuffle=False, pin_memory=device.type == "cuda"
     )
 
-    gen_black = Generator(img_channels=3, num_residuals=NUM_RESIDUAL_BLOCKS).to(device)
-    gen_blond = Generator(img_channels=3, num_residuals=NUM_RESIDUAL_BLOCKS).to(device)
-    gen_black.load_state_dict(
+    black_generator = CycleGANGenerator(
+        image_channels=3,
+        num_residual_blocks=NUM_RESIDUAL_BLOCKS,
+    ).to(device)
+    blond_generator = CycleGANGenerator(
+        image_channels=3,
+        num_residual_blocks=NUM_RESIDUAL_BLOCKS,
+    ).to(device)
+    black_generator.load_state_dict(
         torch.load(
             GEN_BLACK_PATH,
             map_location=device,
             weights_only=True,
         )
     )
-    gen_blond.load_state_dict(
+    blond_generator.load_state_dict(
         torch.load(
             GEN_BLOND_PATH,
             map_location=device,
             weights_only=True,
         )
     )
-    gen_black.eval()
-    gen_blond.eval()
+    black_generator.eval()
+    blond_generator.eval()
 
     black_images = []
     fake_blond_images = []
@@ -116,10 +124,10 @@ def main():
             black = black.to(device)
             blond = blond.to(device)
 
-            fake_blond = gen_blond(black)
-            fake2black = gen_black(fake_blond)
-            fake_black = gen_black(blond)
-            fake2blond = gen_blond(fake_black)
+            fake_blond = blond_generator(black)
+            fake2black = black_generator(fake_blond)
+            fake_black = black_generator(blond)
+            fake2blond = blond_generator(fake_black)
 
             black_images.append(black[0].cpu())
             fake_blond_images.append(fake_blond[0].cpu())

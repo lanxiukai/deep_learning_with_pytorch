@@ -1,383 +1,532 @@
-"""CycleGAN models and training helpers.
-
-Adapted from the companion code of "Generative Deep Learning", 2nd edition
-(book_repos/DGAI/utils/ch06util.py): unpaired image-to-image translation
-with two generators and two discriminators, trained with adversarial +
-cycle-consistency losses. Snapshot and training paths are parameterized so
-outputs land under the project's output/gan/ directory.
-"""
+"""CycleGAN models and training helpers for unpaired image translation."""
 
 import os
-import torch
+
 import numpy as np
-import torch.nn as nn
+import torch
+from torch import nn
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from dl_utils.plot._backend import pyplot as plt
-
 from dl_utils.data.images import load_rgb_image
-
+from dl_utils.plot._backend import pyplot as plt
 
 LAMBDA_CYCLE = 10
 
 
-def save_translation_snapshot(
+def save_cyclegan_translation_snapshot(
     epoch,
-    batch_idx,
-    A,
-    B,
-    fake_A,
-    fake_B,
-    out_dir,
-    domain_A_label,
-    domain_B_label,
+    batch_index,
+    domain_a_images,
+    domain_b_images,
+    generated_a_images,
+    generated_b_images,
+    output_dir,
+    domain_a_label,
+    domain_b_label,
 ):
     """Save a titled 2x2 grid for both CycleGAN translation directions."""
-    images = [A[0], fake_B[0], B[0], fake_A[0]]
-    titles = [
-        f"Real: {domain_A_label}",
-        f"Generated: {domain_B_label}",
-        f"Real: {domain_B_label}",
-        f"Generated: {domain_A_label}",
+    comparison_images = [
+        domain_a_images[0],
+        generated_b_images[0],
+        domain_b_images[0],
+        generated_a_images[0],
     ]
-    fig, axes = plt.subplots(2, 2, figsize=(7, 7), dpi=150)
-    for axis, image, title in zip(axes.flat, images, titles):
-        image = image.detach().float().mul(0.5).add(0.5).clamp(0, 1)
-        axis.imshow(image.permute(1, 2, 0).cpu().numpy())
+    titles = [
+        f"Real: {domain_a_label}",
+        f"Generated: {domain_b_label}",
+        f"Real: {domain_b_label}",
+        f"Generated: {domain_a_label}",
+    ]
+    figure, axes = plt.subplots(2, 2, figsize=(7, 7), dpi=150)
+    for axis, image, title in zip(
+        axes.flat,
+        comparison_images,
+        titles,
+        strict=True,
+    ):
+        display_image = image.detach().float().mul(0.5).add(0.5).clamp(0, 1)
+        axis.imshow(display_image.permute(1, 2, 0).cpu().numpy())
         axis.set_title(title)
         axis.axis("off")
-    fig.suptitle(f"CycleGAN translations — epoch {epoch}, step {batch_idx}")
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig.savefig(
-        out_dir / f"comparison_epoch_{epoch:02d}_step_{batch_idx:05d}.png",
+    figure.suptitle(f"CycleGAN translations — epoch {epoch}, step {batch_index}")
+    figure.tight_layout(rect=(0, 0, 1, 0.96))
+    figure.savefig(
+        output_dir / f"comparison_epoch_{epoch:02d}_step_{batch_index:05d}.png",
         bbox_inches="tight",
     )
-    plt.close(fig)
+    plt.close(figure)
 
 
-def train_epoch(disc_A, disc_B, gen_A, gen_B, loader, opt_disc,
-        opt_gen, l1, mse, d_scaler, g_scaler, device, out_dir,
-        epoch=1, loss_callback=None, loss_updates_per_epoch=20,
-        snapshot_updates_per_epoch=10, domain_A_label="Domain A",
-        domain_B_label="Domain B", progress_bar=None):
-    """Train one epoch and report weighted generator-loss components.
-
-    The optional callback receives progress, total D, total G, both
-    directional adversarial terms, and both LAMBDA_CYCLE-weighted cycle terms.
-    """
+def train_cyclegan_epoch(
+    discriminator_a,
+    discriminator_b,
+    generator_a,
+    generator_b,
+    data_loader,
+    discriminator_optimizer,
+    generator_optimizer,
+    reconstruction_loss,
+    adversarial_loss,
+    discriminator_scaler,
+    generator_scaler,
+    device,
+    output_dir,
+    *,
+    epoch=1,
+    loss_callback=None,
+    loss_updates_per_epoch=20,
+    snapshot_updates_per_epoch=10,
+    domain_a_label="Domain A",
+    domain_b_label="Domain B",
+    progress_bar=None,
+):
+    """Train one epoch and report weighted generator-loss components."""
     if loss_updates_per_epoch <= 0:
         raise ValueError("loss_updates_per_epoch must be positive.")
     if snapshot_updates_per_epoch <= 0:
         raise ValueError("snapshot_updates_per_epoch must be positive.")
 
-    loop = (
-        loader
+    batches = (
+        data_loader
         if progress_bar is not None
-        else tqdm(loader, leave=True, mininterval=1.0)
+        else tqdm(data_loader, leave=True, mininterval=1.0)
     )
-    loss_sums = torch.zeros(2, device=device)
-    # D, G_A adversarial, G_B adversarial, weighted cycle_A, weighted cycle_B.
+    accumulated_losses = torch.zeros(2, device=device)
     window_loss_sums = [0.0] * 5
     num_examples = 0
     window_examples = 0
-    num_batches = len(loader)
-    update_interval = max(
+    num_batches = len(data_loader)
+    loss_update_interval = max(
         1,
-        (num_batches + loss_updates_per_epoch - 1)
-        // loss_updates_per_epoch,
+        (num_batches + loss_updates_per_epoch - 1) // loss_updates_per_epoch,
     )
     snapshot_interval = max(
         1,
-        (num_batches + snapshot_updates_per_epoch - 1)
-        // snapshot_updates_per_epoch,
+        (num_batches + snapshot_updates_per_epoch - 1) // snapshot_updates_per_epoch,
     )
 
-    for i, (A, B) in enumerate(loop):
-        batch_idx = i + 1
-        A = A.to(device)
-        B = B.to(device)
-        batch_size = A.shape[0]
+    for batch_index, (domain_a_images, domain_b_images) in enumerate(
+        batches,
+        start=1,
+    ):
+        domain_a_images = domain_a_images.to(device)
+        domain_b_images = domain_b_images.to(device)
+        batch_size = domain_a_images.shape[0]
 
-        # Train Discriminators A and B
         with torch.amp.autocast(device.type):
-            fake_A = gen_A(B)
-            D_A_real = disc_A(A)
-            D_A_fake = disc_A(fake_A.detach())
-            D_A_real_loss = mse(D_A_real, torch.ones_like(D_A_real))
-            D_A_fake_loss = mse(D_A_fake, torch.zeros_like(D_A_fake))
-            D_A_loss = D_A_real_loss + D_A_fake_loss
-
-            fake_B = gen_B(A)
-            D_B_real = disc_B(B)
-            D_B_fake = disc_B(fake_B.detach())
-            D_B_real_loss = mse(D_B_real, torch.ones_like(D_B_real))
-            D_B_fake_loss = mse(D_B_fake, torch.zeros_like(D_B_fake))
-            D_B_loss = D_B_real_loss + D_B_fake_loss
-
-            # Average loss of the two discriminators
-            D_loss = (D_A_loss + D_B_loss) / 2
-
-        opt_disc.zero_grad()
-        d_scaler.scale(D_loss).backward()
-        d_scaler.step(opt_disc)
-        d_scaler.update()
-
-        # Train the two generators
-        with torch.amp.autocast(device.type):
-            D_A_fake = disc_A(fake_A)
-            D_B_fake = disc_B(fake_B)
-            loss_G_A = mse(D_A_fake, torch.ones_like(D_A_fake))
-            loss_G_B = mse(D_B_fake, torch.ones_like(D_B_fake))
-
-            # NEW in Cycle GANs: cycle consistency loss
-            cycle_B = gen_B(fake_A)
-            cycle_A = gen_A(fake_B)
-            cycle_B_loss = l1(B, cycle_B)
-            cycle_A_loss = l1(A, cycle_A)
-            weighted_cycle_A_loss = cycle_A_loss * LAMBDA_CYCLE
-            weighted_cycle_B_loss = cycle_B_loss * LAMBDA_CYCLE
-
-            # Total generator loss
-            G_loss = (
-                loss_G_A
-                + loss_G_B
-                + weighted_cycle_A_loss
-                + weighted_cycle_B_loss
+            generated_a_images = generator_a(domain_b_images)
+            real_a_outputs = discriminator_a(domain_a_images)
+            generated_a_outputs = discriminator_a(generated_a_images.detach())
+            discriminator_a_loss = adversarial_loss(
+                real_a_outputs,
+                torch.ones_like(real_a_outputs),
+            ) + adversarial_loss(
+                generated_a_outputs,
+                torch.zeros_like(generated_a_outputs),
             )
 
-        opt_gen.zero_grad()
-        g_scaler.scale(G_loss).backward()
-        g_scaler.step(opt_gen)
-        g_scaler.update()
+            generated_b_images = generator_b(domain_a_images)
+            real_b_outputs = discriminator_b(domain_b_images)
+            generated_b_outputs = discriminator_b(generated_b_images.detach())
+            discriminator_b_loss = adversarial_loss(
+                real_b_outputs,
+                torch.ones_like(real_b_outputs),
+            ) + adversarial_loss(
+                generated_b_outputs,
+                torch.zeros_like(generated_b_outputs),
+            )
+            discriminator_loss = (discriminator_a_loss + discriminator_b_loss) / 2
 
-        if batch_idx % snapshot_interval == 0 or batch_idx == num_batches:
-            save_translation_snapshot(
+        discriminator_optimizer.zero_grad()
+        discriminator_scaler.scale(discriminator_loss).backward()
+        discriminator_scaler.step(discriminator_optimizer)
+        discriminator_scaler.update()
+
+        with torch.amp.autocast(device.type):
+            generated_a_outputs = discriminator_a(generated_a_images)
+            generated_b_outputs = discriminator_b(generated_b_images)
+            generator_a_adversarial_loss = adversarial_loss(
+                generated_a_outputs,
+                torch.ones_like(generated_a_outputs),
+            )
+            generator_b_adversarial_loss = adversarial_loss(
+                generated_b_outputs,
+                torch.ones_like(generated_b_outputs),
+            )
+
+            reconstructed_b_images = generator_b(generated_a_images)
+            reconstructed_a_images = generator_a(generated_b_images)
+            weighted_cycle_a_loss = LAMBDA_CYCLE * reconstruction_loss(
+                domain_a_images,
+                reconstructed_a_images,
+            )
+            weighted_cycle_b_loss = LAMBDA_CYCLE * reconstruction_loss(
+                domain_b_images,
+                reconstructed_b_images,
+            )
+            generator_loss = (
+                generator_a_adversarial_loss
+                + generator_b_adversarial_loss
+                + weighted_cycle_a_loss
+                + weighted_cycle_b_loss
+            )
+
+        generator_optimizer.zero_grad()
+        generator_scaler.scale(generator_loss).backward()
+        generator_scaler.step(generator_optimizer)
+        generator_scaler.update()
+
+        if batch_index % snapshot_interval == 0 or batch_index == num_batches:
+            save_cyclegan_translation_snapshot(
                 epoch,
-                batch_idx,
-                A,
-                B,
-                fake_A,
-                fake_B,
-                out_dir,
-                domain_A_label,
-                domain_B_label,
+                batch_index,
+                domain_a_images,
+                domain_b_images,
+                generated_a_images,
+                generated_b_images,
+                output_dir,
+                domain_a_label,
+                domain_b_label,
             )
 
         batch_losses = torch.stack(
             [
-                D_loss,
-                G_loss,
-                loss_G_A,
-                loss_G_B,
-                weighted_cycle_A_loss,
-                weighted_cycle_B_loss,
+                discriminator_loss,
+                generator_loss,
+                generator_a_adversarial_loss,
+                generator_b_adversarial_loss,
+                weighted_cycle_a_loss,
+                weighted_cycle_b_loss,
             ]
         ).detach()
-        loss_sums += batch_losses[:2] * batch_size
+        accumulated_losses += batch_losses[:2] * batch_size
         num_examples += batch_size
         (
-            D_loss_value,
-            G_loss_value,
-            loss_G_A_value,
-            loss_G_B_value,
-            weighted_cycle_A_loss_value,
-            weighted_cycle_B_loss_value,
+            discriminator_loss_value,
+            generator_loss_value,
+            generator_a_loss_value,
+            generator_b_loss_value,
+            weighted_cycle_a_loss_value,
+            weighted_cycle_b_loss_value,
         ) = batch_losses.tolist()
+
         if loss_callback is not None:
             loss_values = (
-                D_loss_value,
-                loss_G_A_value,
-                loss_G_B_value,
-                weighted_cycle_A_loss_value,
-                weighted_cycle_B_loss_value,
+                discriminator_loss_value,
+                generator_a_loss_value,
+                generator_b_loss_value,
+                weighted_cycle_a_loss_value,
+                weighted_cycle_b_loss_value,
             )
-            for index, loss_value in enumerate(loss_values):
-                window_loss_sums[index] += loss_value * batch_size
+            for loss_index, loss_value in enumerate(loss_values):
+                window_loss_sums[loss_index] += loss_value * batch_size
             window_examples += batch_size
-            if batch_idx % update_interval == 0 or batch_idx == num_batches:
+            if batch_index % loss_update_interval == 0 or batch_index == num_batches:
                 window_losses = [
-                    loss_sum / window_examples
-                    for loss_sum in window_loss_sums
+                    loss_sum / window_examples for loss_sum in window_loss_sums
                 ]
-                window_loss_D, *window_generator_components = window_losses
+                window_discriminator_loss, *window_generator_components = window_losses
                 loss_callback(
-                    batch_idx / num_batches,
-                    window_loss_D,
+                    batch_index / num_batches,
+                    window_discriminator_loss,
                     sum(window_generator_components),
                     *window_generator_components,
                 )
                 window_loss_sums = [0.0] * 5
                 window_examples = 0
+
+        loss_postfix = {
+            "loss_D": discriminator_loss_value,
+            "loss_G": generator_loss_value,
+        }
         if progress_bar is None:
-            loop.set_postfix(
-                D_loss=D_loss_value,
-                G_loss=G_loss_value,
-                refresh=False,
-            )
+            batches.set_postfix(**loss_postfix, refresh=False)
         else:
-            progress_bar.set_postfix(
-                D_loss=D_loss_value,
-                G_loss=G_loss_value,
-                refresh=False,
-            )
+            progress_bar.set_postfix(**loss_postfix, refresh=False)
             progress_bar.update(1)
 
     if num_examples == 0:
         raise ValueError("Cannot train CycleGAN with an empty data loader.")
-    loss_D_sum, loss_G_sum = loss_sums.tolist()
-    return loss_D_sum / num_examples, loss_G_sum / num_examples
+    discriminator_loss_sum, generator_loss_sum = accumulated_losses.tolist()
+    return (
+        discriminator_loss_sum / num_examples,
+        generator_loss_sum / num_examples,
+    )
 
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels,
-                 down=True, use_act=True, **kwargs):
+class CycleGANConvBlock(nn.Module):
+    """Convolution, instance normalization, and optional activation."""
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        *,
+        downsample=True,
+        use_activation=True,
+        **convolution_kwargs,
+    ):
         super().__init__()
+        convolution = (
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                padding_mode="reflect",
+                **convolution_kwargs,
+            )
+            if downsample
+            else nn.ConvTranspose2d(
+                in_channels,
+                out_channels,
+                **convolution_kwargs,
+            )
+        )
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels,
-                      padding_mode="reflect", **kwargs)
-            if down
-            else nn.ConvTranspose2d(in_channels,
-                                    out_channels, **kwargs),
+            convolution,
             nn.InstanceNorm2d(out_channels),
-            nn.ReLU(inplace=True) if use_act else nn.Identity())
+            nn.ReLU(inplace=True) if use_activation else nn.Identity(),
+        )
 
-    def forward(self, x):
-        return self.conv(x)
+    def forward(self, inputs):
+        return self.conv(inputs)
 
-class ResidualBlock(nn.Module):
+
+class CycleGANResidualBlock(nn.Module):
+    """Two-convolution residual block used by the CycleGAN generator."""
+
     def __init__(self, channels):
         super().__init__()
         self.block = nn.Sequential(
-            ConvBlock(channels, channels, kernel_size=3, padding=1),
-            ConvBlock(channels, channels,
-                      use_act=False, kernel_size=3, padding=1))
+            CycleGANConvBlock(channels, channels, kernel_size=3, padding=1),
+            CycleGANConvBlock(
+                channels,
+                channels,
+                use_activation=False,
+                kernel_size=3,
+                padding=1,
+            ),
+        )
 
-    def forward(self, x):
-        return x + self.block(x)
+    def forward(self, inputs):
+        return inputs + self.block(inputs)
 
-class Generator(nn.Module):
-    def __init__(self, img_channels, num_features=64,
-                 num_residuals=9):
+
+class CycleGANGenerator(nn.Module):
+    """ResNet generator for one CycleGAN translation direction."""
+
+    def __init__(
+        self,
+        image_channels,
+        base_channels=64,
+        num_residual_blocks=9,
+    ):
         super().__init__()
         self.initial = nn.Sequential(
-            nn.Conv2d(img_channels, num_features, kernel_size=7,
-                stride=1, padding=3, padding_mode="reflect"),
-            nn.InstanceNorm2d(num_features),
-            nn.ReLU(inplace=True))
-
+            nn.Conv2d(
+                image_channels,
+                base_channels,
+                kernel_size=7,
+                stride=1,
+                padding=3,
+                padding_mode="reflect",
+            ),
+            nn.InstanceNorm2d(base_channels),
+            nn.ReLU(inplace=True),
+        )
         self.down_blocks = nn.ModuleList(
-            [ConvBlock(num_features, num_features*2, kernel_size=3,
-                       stride=2, padding=1),
-            ConvBlock(num_features*2, num_features*4, kernel_size=3,
-                stride=2, padding=1)])
-
+            [
+                CycleGANConvBlock(
+                    base_channels,
+                    base_channels * 2,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                ),
+                CycleGANConvBlock(
+                    base_channels * 2,
+                    base_channels * 4,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                ),
+            ]
+        )
         self.res_blocks = nn.Sequential(
-            *[ResidualBlock(num_features * 4)
-            for _ in range(num_residuals)])
-
+            *[
+                CycleGANResidualBlock(base_channels * 4)
+                for _ in range(num_residual_blocks)
+            ]
+        )
         self.up_blocks = nn.ModuleList(
-            [ConvBlock(num_features * 4, num_features * 2,
-                    down=False, kernel_size=3, stride=2,
-                    padding=1, output_padding=1),
-            ConvBlock(num_features * 2, num_features * 1,
-                    down=False, kernel_size=3, stride=2,
-                    padding=1, output_padding=1)])
+            [
+                CycleGANConvBlock(
+                    base_channels * 4,
+                    base_channels * 2,
+                    downsample=False,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    output_padding=1,
+                ),
+                CycleGANConvBlock(
+                    base_channels * 2,
+                    base_channels,
+                    downsample=False,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    output_padding=1,
+                ),
+            ]
+        )
+        self.last = nn.Conv2d(
+            base_channels,
+            image_channels,
+            kernel_size=7,
+            stride=1,
+            padding=3,
+            padding_mode="reflect",
+        )
 
-        self.last = nn.Conv2d(num_features * 1, img_channels,
-            kernel_size=7, stride=1,
-            padding=3, padding_mode="reflect")
-
-    def forward(self, x):
-        x = self.initial(x)
-        for layer in self.down_blocks:
-            x = layer(x)
-        x = self.res_blocks(x)
-        for layer in self.up_blocks:
-            x = layer(x)
-        return torch.tanh(self.last(x))
+    def forward(self, inputs):
+        hidden = self.initial(inputs)
+        for down_block in self.down_blocks:
+            hidden = down_block(hidden)
+        hidden = self.res_blocks(hidden)
+        for up_block in self.up_blocks:
+            hidden = up_block(hidden)
+        return torch.tanh(self.last(hidden))
 
 
-class Block(nn.Module):
+class CycleGANDiscriminatorBlock(nn.Module):
+    """PatchGAN downsampling block."""
+
     def __init__(self, in_channels, out_channels, stride):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 4, stride, 1,
-                padding_mode="reflect"),
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                4,
+                stride,
+                1,
+                padding_mode="reflect",
+            ),
             nn.InstanceNorm2d(out_channels),
-            nn.LeakyReLU(0.2, inplace=True))
+            nn.LeakyReLU(0.2, inplace=True),
+        )
 
-    def forward(self, x):
-        return self.conv(x)
+    def forward(self, inputs):
+        return self.conv(inputs)
 
-class Discriminator(nn.Module):
-    def __init__(self, in_channels=3, features=[64, 128, 256, 512]):
+
+class CycleGANDiscriminator(nn.Module):
+    """PatchGAN discriminator for one CycleGAN image domain."""
+
+    def __init__(
+        self,
+        in_channels=3,
+        feature_channels=(64, 128, 256, 512),
+    ):
         super().__init__()
         self.initial = nn.Sequential(
-            nn.Conv2d(in_channels, features[0],
-                kernel_size=4, stride=2, padding=1,
-                padding_mode="reflect"),
-            nn.LeakyReLU(0.2, inplace=True))
+            nn.Conv2d(
+                in_channels,
+                feature_channels[0],
+                kernel_size=4,
+                stride=2,
+                padding=1,
+                padding_mode="reflect",
+            ),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
         layers = []
-        in_channels = features[0]
-        for feature in features[1:]:
-            layers.append(Block(in_channels, feature,
-                stride=1 if feature == features[-1] else 2))
-            in_channels = feature
-        layers.append(nn.Conv2d(in_channels, 1, kernel_size=4,
-                stride=1, padding=1, padding_mode="reflect"))
-        self.model = nn.Sequential(*layers)  # PatchGAN
+        previous_channels = feature_channels[0]
+        for channels in feature_channels[1:]:
+            layers.append(
+                CycleGANDiscriminatorBlock(
+                    previous_channels,
+                    channels,
+                    stride=1 if channels == feature_channels[-1] else 2,
+                )
+            )
+            previous_channels = channels
+        layers.append(
+            nn.Conv2d(
+                previous_channels,
+                1,
+                kernel_size=4,
+                stride=1,
+                padding=1,
+                padding_mode="reflect",
+            )
+        )
+        self.model = nn.Sequential(*layers)
 
-    def forward(self, x):
-        out = self.model(self.initial(x))
-        return torch.sigmoid(out)
+    def forward(self, inputs):
+        outputs = self.model(self.initial(inputs))
+        return torch.sigmoid(outputs)
 
-class LoadData(Dataset):
-    """Unpaired dataset: samples domain A and domain B independently."""
-    def __init__(self, root_A, root_B, transform=None):
+
+class UnpairedImageDataset(Dataset):
+    """Sample two image domains independently for unpaired translation."""
+
+    def __init__(self, domain_a_roots, domain_b_roots, transform=None):
         super().__init__()
-        self.root_A = root_A
-        self.root_B = root_B
         self.transform = transform
-
-        # Collect file paths for all images in domain A.
-        self.A_images = []
-        for r in root_A:
-            # List the filenames in the current domain-A directory.
-            files = os.listdir(r)
-            # Safely combine the directory path with each filename.
-            self.A_images += [os.path.join(r, i) for i in files]
-        self.B_images = []
-        for r in root_B:
-            files = os.listdir(r)
-            self.B_images += [os.path.join(r, i) for i in files]
-
-        self.len_data = max(len(self.A_images),
-                            len(self.B_images))
-        self.A_len = len(self.A_images)
-        self.B_len = len(self.B_images)
+        self.domain_a_paths = [
+            os.path.join(root, filename)
+            for root in domain_a_roots
+            for filename in os.listdir(root)
+        ]
+        self.domain_b_paths = [
+            os.path.join(root, filename)
+            for root in domain_b_roots
+            for filename in os.listdir(root)
+        ]
+        self.dataset_length = max(
+            len(self.domain_a_paths),
+            len(self.domain_b_paths),
+        )
+        self.domain_a_length = len(self.domain_a_paths)
+        self.domain_b_length = len(self.domain_b_paths)
 
     def __len__(self):
-        return self.len_data
+        return self.dataset_length
 
     def __getitem__(self, index):
-        A_img = self.A_images[index % self.A_len]
-        B_img = self.B_images[index % self.B_len]
-        A_img = np.array(load_rgb_image(A_img))
-        B_img = np.array(load_rgb_image(B_img))
+        domain_a_path = self.domain_a_paths[index % self.domain_a_length]
+        domain_b_path = self.domain_b_paths[index % self.domain_b_length]
+        domain_a_image = np.array(load_rgb_image(domain_a_path))
+        domain_b_image = np.array(load_rgb_image(domain_b_path))
         if self.transform:
-            augmentations = self.transform(image=B_img,
-                                           image0=A_img)
-            B_img = augmentations["image"]
-            A_img = augmentations["image0"]
-        return A_img, B_img
+            transformed = self.transform(
+                image=domain_b_image,
+                image0=domain_a_image,
+            )
+            domain_b_image = transformed["image"]
+            domain_a_image = transformed["image0"]
+        return domain_a_image, domain_b_image
 
 
-def weights_init(m):
-    name = m.__class__.__name__
-    if name.find('Conv') != -1 or name.find('Linear') != -1:
-        nn.init.normal_(m.weight.data, 0.0, 0.02)
-        nn.init.constant_(m.bias.data, 0)
-    elif name.find('Norm2d') != -1:
-        nn.init.constant_(m.weight.data, 1)
-        nn.init.constant_(m.bias.data, 0)
+def initialize_cyclegan_weights(module):
+    """Apply the CycleGAN normal initialization to learned affine layers."""
+    if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
+        nn.init.normal_(module.weight, 0.0, 0.02)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+
+__all__ = [
+    "LAMBDA_CYCLE",
+    "CycleGANConvBlock",
+    "CycleGANDiscriminator",
+    "CycleGANDiscriminatorBlock",
+    "CycleGANGenerator",
+    "CycleGANResidualBlock",
+    "UnpairedImageDataset",
+    "initialize_cyclegan_weights",
+    "save_cyclegan_translation_snapshot",
+    "train_cyclegan_epoch",
+]
