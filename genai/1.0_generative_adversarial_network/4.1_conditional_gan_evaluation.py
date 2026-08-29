@@ -12,7 +12,7 @@ import torch
 
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.gan.gan import Generator
+from dl_utils.gan.conditional_gan import ConditionalGenerator
 from dl_utils.plot._backend import pyplot as plt
 from dl_utils.runtime.devices import try_gpu
 
@@ -45,7 +45,7 @@ def main():
 
     torch.manual_seed(SEED)
 
-    generator = Generator(Z_DIM + 2, IMAGE_CHANNELS, FEATURES).to(device)
+    generator = ConditionalGenerator(Z_DIM + 2, IMAGE_CHANNELS, FEATURES).to(device)
     generator.load_state_dict(
         torch.load(
             CHECKPOINT_PATH,
