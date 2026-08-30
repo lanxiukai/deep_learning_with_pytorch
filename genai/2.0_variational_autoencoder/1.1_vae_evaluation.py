@@ -45,48 +45,6 @@ NUM_INTERPOLATION_STEPS = 7
 MINIMUM_PSNR_ERROR = 1e-12
 
 
-class PosteriorAccumulator:
-    """Accumulate standard-VAE posterior diagnostics without storing samples."""
-
-    def __init__(self, z_dim):
-        self.mu_total = torch.zeros(z_dim, dtype=torch.float64)
-        self.mu_square_total = torch.zeros_like(self.mu_total)
-        self.std_square_total = torch.zeros_like(self.mu_total)
-        self.kl_total = torch.zeros_like(self.mu_total)
-        self.examples = 0
-
-    def update(self, mu, std):
-        self.mu_total += mu.detach().double().sum(dim=0).cpu()
-        self.mu_square_total += mu.detach().double().square().sum(dim=0).cpu()
-        self.std_square_total += std.detach().double().square().sum(dim=0).cpu()
-        self.kl_total += (
-            diagonal_gaussian_kl(mu, std).detach().double().sum(dim=0).cpu()
-        )
-        self.examples += mu.shape[0]
-
-    def metrics(self, *, active_variance_threshold):
-        if self.examples == 0:
-            raise ValueError("no posterior values were accumulated")
-        posterior_mean = self.mu_total / self.examples
-        variance_of_mu = (
-            self.mu_square_total / self.examples - posterior_mean.square()
-        ).clamp_min(0.0)
-        posterior_variance = self.std_square_total / self.examples
-        kl_per_dimension = self.kl_total / self.examples
-        return {
-            "examples": self.examples,
-            "posterior_mean_by_dimension": posterior_mean.tolist(),
-            "posterior_mean_std_by_dimension": variance_of_mu.sqrt().tolist(),
-            "posterior_std_by_dimension": posterior_variance.sqrt().tolist(),
-            "kl_nats_per_dimension": kl_per_dimension.tolist(),
-            "kl_nats_per_image": float(kl_per_dimension.sum()),
-            "active_variance_threshold": active_variance_threshold,
-            "active_dimensions": int(
-                (variance_of_mu > active_variance_threshold).sum()
-            ),
-        }
-
-
 @torch.inference_mode()
 def evaluate(
     model,
@@ -102,9 +60,11 @@ def evaluate(
         raise ValueError("maximum_batches must be positive")
 
     model.eval()
-    accumulator = PosteriorAccumulator(z_dim)
+    mu_total = torch.zeros(z_dim, dtype=torch.float64)
+    mu_square_total = torch.zeros_like(mu_total)
+    kl_total = 0.0
+    examples = 0
     squared_error_total = 0.0
-    absolute_error_total = 0.0
     evaluated_elements = 0
     comparison = None
     interpolation = None
@@ -123,9 +83,11 @@ def evaluate(
         mean_reconstructions = model.decoder(mu)
         sample_reconstructions = model.decoder(reparameterize(mu, std))
         squared_error_total += float((mean_reconstructions - images).square().sum())
-        absolute_error_total += float((mean_reconstructions - images).abs().sum())
         evaluated_elements += images.numel()
-        accumulator.update(mu, std)
+        mu_total += mu.detach().double().sum(dim=0).cpu()
+        mu_square_total += mu.detach().double().square().sum(dim=0).cpu()
+        kl_total += float(diagonal_gaussian_kl(mu, std).sum())
+        examples += images.shape[0]
 
         if comparison is None:
             comparison_count = min(NUM_COMPARISON_IMAGES, images.shape[0])
@@ -154,21 +116,23 @@ def evaluate(
         raise ValueError("at least two images are required for interpolation")
 
     mean_squared_error = squared_error_total / evaluated_elements
+    posterior_mean = mu_total / examples
+    variance_of_mu = (
+        mu_square_total / examples - posterior_mean.square()
+    ).clamp_min(0.0)
     metrics = {
         "posterior_mean_reconstruction": {
-            "pixel_l1": absolute_error_total / evaluated_elements,
             "pixel_mse": mean_squared_error,
             "psnr_for_zero_to_one_range": -10.0
             * math.log10(max(mean_squared_error, MINIMUM_PSNR_ERROR)),
         },
-        "posterior": accumulator.metrics(
-            active_variance_threshold=active_variance_threshold
-        ),
-        "path_boundaries": {
-            "posterior_mean_reconstruction": "reads a real image",
-            "posterior_sample_reconstruction": "reads a real image",
-            "prior_generation": "decodes an independent standard-normal draw",
-            "interpolation": "local decoder diagnostic, not unconditional generation",
+        "posterior": {
+            "examples": examples,
+            "kl_nats_per_image": kl_total / examples,
+            "active_variance_threshold": active_variance_threshold,
+            "active_dimensions": int(
+                (variance_of_mu > active_variance_threshold).sum()
+            ),
         },
     }
     prior_samples = model.decoder(
@@ -188,12 +152,9 @@ def smoke_test(device):
         mean_reconstructions = model.decoder(mu)
         sample_reconstructions = model.decoder(reparameterize(mu, std))
         prior_samples = model.decoder(torch.randn(2, z_dim, device=device))
-    accumulator = PosteriorAccumulator(z_dim)
-    accumulator.update(mu, std)
-    metrics = accumulator.metrics(active_variance_threshold=1e-2)
-    kl_nats_per_image = metrics["kl_nats_per_image"]
-    if not isinstance(kl_nats_per_image, int | float):
-        raise TypeError("KL metric must be numeric")
+    kl_nats_per_image = float(
+        diagonal_gaussian_kl(mu, std).sum(dim=1).mean()
+    )
     assert mean_reconstructions.shape == sample_reconstructions.shape == images.shape
     assert prior_samples.shape == images.shape
     assert kl_nats_per_image >= 0
@@ -259,7 +220,6 @@ def analyze(args, device):
             ],
             "active_dimensions": metrics["posterior"]["active_dimensions"],
         },
-        "path_boundaries": metrics["path_boundaries"],
     }
     print(json.dumps(console_metrics, indent=2))
 

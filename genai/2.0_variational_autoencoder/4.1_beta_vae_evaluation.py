@@ -1,414 +1,335 @@
-"""Evaluate beta-VAE rate control and representation diagnostics.
+"""Compare the core rate-distortion behavior of VAE and beta-VAE.
 
-Each beta checkpoint is evaluated on the same procedural split with actual
-per-sample KL, active units, a fixed-capacity factor probe, MIG, and modularity.
-
-The metrics use procedural ground-truth factors.  They describe this data and
-inductive bias, not a theorem that unsupervised semantic factors are
-identifiable.
+Both checkpoints use the same glasses-256 images, model architecture, and
+fixed prior samples. The evaluation focuses on reconstruction distortion,
+KL rate, beta-weighted rate, and per-dimension latent use. These capacity
+diagnostics do not establish semantic disentanglement.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from itertools import islice
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
+from torchvision.utils import save_image
 
-from dl_utils.data.factor_shapes import (
-    FACTOR_NAMES,
-    FACTOR_SIZES,
-    FactorShapes32,
-    all_factor_combinations,
-    render_factor_shapes,
-)
+from dl_utils.data.vision import image_folder_dataset
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.plot._backend import pyplot as plt
+from dl_utils.runtime.devices import try_gpu
 from dl_utils.runtime.randomness import set_seed
-from dl_utils.vae.disentanglement import (
-    discretize_codes,
-    mig_and_modularity,
-    mutual_information_matrix,
-    quantile_bin_edges,
-    train_factor_probe,
-)
-from dl_utils.vae.inference import GaussianVAE32
-from dl_utils.vae.vae_common import diagonal_gaussian_kl_from_logvar
+from dl_utils.vae.vae import VAE, diagonal_gaussian_kl
 
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "glasses-256"
+DEFAULT_STANDARD_CHECKPOINT = OUTPUT_ROOT / "vae" / "vae.pth"
+DEFAULT_BETA_CHECKPOINT = OUTPUT_ROOT / "beta_vae" / "beta_vae.pth"
+DEFAULT_OUTPUT_DIR = OUTPUT_ROOT / "beta_vae_evaluation"
+
+NUM_COMPARISON_IMAGES = 8
+NUM_PRIOR_SAMPLES = 18
+PRIOR_GRID_COLUMNS = 6
 
 
-def discover_checkpoints(args: argparse.Namespace) -> list[Path]:
-    return sorted(args.beta_vae_root.rglob("model.pth"))
+@dataclass(frozen=True)
+class CheckpointInfo:
+    model_name: str
+    beta: float
+    z_dim: int
+    model_config: dict[str, object]
+    checkpoint: str
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    model_name: str
+    beta: float
+    distortion: float
+    rate: float
+    weighted_rate: float
+    active_kl_dimensions: int
+    inactive_kl_dimensions: int
+    kl_per_dimension: list[float]
+    checkpoint: str
 
 
 def load_checkpoint(
     path: Path, device: torch.device
-) -> tuple[GaussianVAE32, dict[str, object]]:
-    checkpoint = torch.load(
-        path, map_location=device, weights_only=True
+) -> tuple[VAE, CheckpointInfo]:
+    if not path.is_file():
+        raise FileNotFoundError(f"checkpoint not found: {path}")
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if not isinstance(checkpoint, Mapping):
+        raise TypeError(f"checkpoint must contain a mapping: {path}")
+    model_name = checkpoint.get("model_name")
+    if model_name not in {"vae", "beta_vae"}:
+        raise ValueError(f"unsupported model_name: {model_name!r}")
+    if checkpoint.get("dataset") != "glasses-256":
+        raise ValueError(f"checkpoint does not use glasses-256: {path}")
+    model_config = checkpoint.get("model_config")
+    state_dict = checkpoint.get("state_dict")
+    if not isinstance(model_config, Mapping) or not isinstance(
+        state_dict, Mapping
+    ):
+        raise TypeError(f"checkpoint is missing model construction data: {path}")
+    z_dim = model_config.get("z_dim")
+    if isinstance(z_dim, bool) or not isinstance(z_dim, int) or z_dim < 1:
+        raise ValueError(f"checkpoint has an invalid z_dim: {path}")
+    beta = 1.0 if model_name == "vae" else checkpoint.get("beta")
+    if isinstance(beta, bool) or not isinstance(beta, int | float) or beta < 0:
+        raise ValueError(f"checkpoint has an invalid beta: {path}")
+
+    saved_config = dict(model_config)
+    model = VAE(**saved_config).to(device)
+    model.load_state_dict(state_dict, strict=True)
+    return model.eval(), CheckpointInfo(
+        model_name=model_name,
+        beta=float(beta),
+        z_dim=z_dim,
+        model_config=saved_config,
+        checkpoint=str(path),
     )
-    if checkpoint.get("model_name") != "beta_vae":
-        raise ValueError(f"{path} is not a beta-VAE checkpoint")
-    model = GaussianVAE32(**checkpoint["model_config"])
-    model.load_state_dict(checkpoint["state_dict"])
-    return model.to(device).eval(), checkpoint
 
 
-def make_loaders(
-    args: argparse.Namespace,
+def summarize_kl(
+    kl_total: Tensor,
     *,
-    split_seed: int,
-    device: torch.device,
-) -> tuple[DataLoader, DataLoader]:
-    train_set = FactorShapes32(split="train", split_seed=split_seed)
-    test_set = FactorShapes32(split="test", split_seed=split_seed)
-    common = {
-        "batch_size": args.batch_size,
-        "shuffle": False,
-        "num_workers": args.workers,
-        "pin_memory": device.type == "cuda",
-        "persistent_workers": args.workers > 0,
-    }
-    return DataLoader(train_set, **common), DataLoader(test_set, **common)
+    examples: int,
+    active_kl_threshold: float,
+) -> tuple[float, list[float], int]:
+    if examples < 1:
+        raise ValueError("examples must be positive")
+    kl_per_dimension = kl_total / examples
+    return (
+        float(kl_per_dimension.sum()),
+        kl_per_dimension.tolist(),
+        int((kl_per_dimension > active_kl_threshold).sum()),
+    )
 
 
 @torch.inference_mode()
-def encode_dataset(
-    model: GaussianVAE32,
+def evaluate_model(
+    model: VAE,
     loader: DataLoader,
     *,
-    calculate_reconstruction: bool,
+    info: CheckpointInfo,
+    maximum_batches: int,
+    active_kl_threshold: float,
+    fixed_z: Tensor,
     device: torch.device,
-) -> tuple[Tensor, Tensor, dict[str, object]]:
-    codes = []
-    factors = []
-    rates = []
-    distortion = 0.0
+) -> tuple[EvaluationResult, Tensor, Tensor]:
+    if maximum_batches < 1:
+        raise ValueError("maximum_batches must be positive")
+    squared_error_total = 0.0
+    kl_total = torch.zeros(info.z_dim, dtype=torch.float64)
     examples = 0
-    for x, batch_factors in loader:
-        x = x.to(device, non_blocking=True)
-        mu, logvar = model.encode(x)
-        per_dimension_rate = diagonal_gaussian_kl_from_logvar(mu, logvar)
-        if calculate_reconstruction:
-            reconstruction = model.decode(mu)
-            distortion += float(
-                F.binary_cross_entropy(
-                    reconstruction, x, reduction="sum"
-                )
-            )
-        codes.append(mu.cpu())
-        rates.append(per_dimension_rate.cpu())
-        factors.append(batch_factors)
-        examples += x.shape[0]
-    all_codes = torch.cat(codes)
-    all_rates = torch.cat(rates)
-    return all_codes, torch.cat(factors), {
-        "distortion": (
-            distortion / examples if calculate_reconstruction else None
-        ),
-        "gaussian_reference_kl": float(all_rates.sum(dim=1).mean()),
-        "mean_rate_per_dimension": all_rates.mean(dim=0).tolist(),
-        "active_units": int(
-            (
-                all_codes.var(dim=0, unbiased=False)
-                > 1e-2
-            ).sum()
-        ),
-        "active_kl_dimensions": int(
-            (all_rates.mean(dim=0) > 0.05).sum()
-        ),
-    }
-
-
-def evaluate_checkpoint(
-    path: Path,
-    *,
-    args: argparse.Namespace,
-    loaders: tuple[DataLoader, DataLoader],
-    device: torch.device,
-) -> dict[str, object]:
-    model, checkpoint = load_checkpoint(path, device)
-    train_loader, test_loader = loaders
-    train_codes, train_factors, _ = encode_dataset(
-        model,
-        train_loader,
-        calculate_reconstruction=False,
-        device=device,
-    )
-    test_codes, test_factors, metrics = encode_dataset(
-        model,
-        test_loader,
-        calculate_reconstruction=True,
-        device=device,
-    )
-    edges = quantile_bin_edges(train_codes, args.code_bins)
-    discrete_test_codes = discretize_codes(test_codes, edges)
-    mutual_information = mutual_information_matrix(
-        discrete_test_codes,
-        test_factors,
-        code_bins=args.code_bins,
-        factor_sizes=FACTOR_SIZES,
-    )
-    representation = mig_and_modularity(
-        mutual_information,
-        test_factors,
-        factor_sizes=FACTOR_SIZES,
-    )
-    probe = train_factor_probe(
-        train_codes,
-        train_factors,
-        test_codes,
-        test_factors,
-        factor_sizes=FACTOR_SIZES,
-        hidden_dim=args.probe_hidden_dim,
-        steps=args.probe_steps,
-        learning_rate=args.probe_lr,
-        seed=args.probe_seed,
-        device=device,
-    )
-    model_name = str(checkpoint["model_name"])
-    rate = metrics.pop("gaussian_reference_kl")
-    metrics.update(
-        {
-            "model_name": model_name,
-            "control_name": "beta",
-            "control_value": float(checkpoint["beta"]),
-            "rate": rate,
-            "seed": int(checkpoint["seed"]),
-            "model_config": checkpoint["model_config"],
-            "checkpoint": str(path.relative_to(PROJECT_ROOT)),
-            "mig": float(representation["mig"]),
-            "mig_per_factor": {
-                name: float(value)
-                for name, value in zip(
-                    FACTOR_NAMES, representation["mig_per_factor"]
-                )
-            },
-            "modularity": float(representation["modularity"]),
-            "probe_mean_accuracy": float(probe["mean_accuracy"]),
-            "probe_accuracy_per_factor": {
-                name: float(value)
-                for name, value in zip(
-                    FACTOR_NAMES, probe["per_factor_accuracy"]
-                )
-            },
-            "mutual_information_matrix": mutual_information.tolist(),
-        }
-    )
-    return metrics
-
-
-def aggregate_records(
-    records: list[dict[str, object]]
-) -> list[dict[str, object]]:
-    groups: dict[
-        tuple[str, str, float], list[dict[str, object]]
-    ] = defaultdict(list)
-    for record in records:
-        groups[
-            (
-                str(record["model_name"]),
-                str(record["control_name"]),
-                float(record["control_value"]),
-            )
-        ].append(record)
-    aggregate = []
-    numeric_keys = (
-        "distortion",
-        "active_units",
-        "mig",
-        "modularity",
-        "probe_mean_accuracy",
-    )
-    for (model_name, control_name, control_value), group in sorted(
-        groups.items()
-    ):
-        summary: dict[str, object] = {
-            "model_name": model_name,
-            "control_name": control_name,
-            "control_value": control_value,
-            "seeds": [int(record["seed"]) for record in group],
-        }
-        for key in numeric_keys:
-            values = torch.tensor(
-                [float(record[key]) for record in group],
-                dtype=torch.float64,
-            )
-            summary[f"{key}_mean"] = float(values.mean())
-            summary[f"{key}_standard_deviation"] = float(
-                values.std(unbiased=False)
-            )
-        values = torch.tensor(
-            [float(record["rate"]) for record in group],
-            dtype=torch.float64,
+    comparison = None
+    for images, _ in islice(loader, maximum_batches):
+        images = images.to(device, non_blocking=True)
+        mu, std = model.encoder.statistics(images)
+        reconstructions = model.decoder(mu)
+        squared_error_total += float(
+            (reconstructions - images).square().sum()
         )
-        summary["rate_mean"] = float(values.mean())
-        summary["rate_standard_deviation"] = float(
-            values.std(unbiased=False)
+        kl_total += (
+            diagonal_gaussian_kl(mu, std)
+            .detach()
+            .double()
+            .sum(dim=0)
+            .cpu()
         )
-        aggregate.append(summary)
-    return aggregate
+        examples += images.shape[0]
+        if comparison is None:
+            count = min(NUM_COMPARISON_IMAGES, images.shape[0])
+            comparison = torch.cat(
+                (images[:count], reconstructions[:count])
+            ).cpu()
+
+    if comparison is None or examples == 0:
+        raise ValueError("cannot evaluate an empty loader")
+    rate, kl_per_dimension, active_dimensions = summarize_kl(
+        kl_total,
+        examples=examples,
+        active_kl_threshold=active_kl_threshold,
+    )
+    result = EvaluationResult(
+        model_name=info.model_name,
+        beta=info.beta,
+        distortion=squared_error_total / examples,
+        rate=rate,
+        weighted_rate=info.beta * rate,
+        active_kl_dimensions=active_dimensions,
+        inactive_kl_dimensions=info.z_dim - active_dimensions,
+        kl_per_dimension=kl_per_dimension,
+        checkpoint=info.checkpoint,
+    )
+    prior_samples = model.decoder(fixed_z).cpu()
+    return result, comparison, prior_samples
 
 
 def save_summary_plot(
-    records: list[dict[str, object]], path: Path
+    results: list[EvaluationResult], output_path: Path
 ) -> None:
+    ordered = sorted(results, key=lambda result: result.beta)
     with plt.ioff():
-        figure, axes = plt.subplots(1, 2, figsize=(10, 4.5))
-        axes[0].scatter(
-            [record["rate"] for record in records],
-            [record["distortion"] for record in records],
-            color="tab:blue",
-            alpha=0.8,
-        )
-        axes[1].scatter(
-            [record["rate"] for record in records],
-            [record["mig"] for record in records],
-            color="tab:blue",
-            alpha=0.8,
-        )
+        figure, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+        for index, result in enumerate(ordered):
+            axes[0].scatter(result.rate, result.distortion)
+            axes[0].annotate(
+                f"beta={result.beta:g}",
+                (result.rate, result.distortion),
+                xytext=(5, 6 + 12 * index),
+                textcoords="offset points",
+            )
+            axes[1].plot(
+                range(1, len(result.kl_per_dimension) + 1),
+                result.kl_per_dimension,
+                label=f"beta={result.beta:g}",
+            )
         axes[0].set(
-            xlabel="Rate (nats / image)",
-            ylabel="Bernoulli distortion",
-            title="Rate-distortion working points",
+            xlabel="KL rate (nats / image)",
+            ylabel="Posterior-mean summed-pixel MSE / image",
+            title="Rate-distortion comparison",
         )
         axes[1].set(
-            xlabel="Rate (nats / image)",
-            ylabel="MIG",
-            title="Representation score across rate",
+            xlabel="Latent dimension",
+            ylabel="Mean KL (nats / image)",
+            title="Per-dimension latent rate",
         )
         for axis in axes:
             axis.grid(alpha=0.25)
+        axes[1].legend()
         figure.tight_layout()
-        figure.savefig(path, dpi=200)
+        figure.savefig(output_path, dpi=200)
         plt.close(figure)
 
 
-def evaluate(args: argparse.Namespace) -> None:
-    set_seed(args.probe_seed)
-    paths = discover_checkpoints(args)
-    if not paths:
-        raise FileNotFoundError(
-            "no beta-VAE checkpoints found; run 4.0_beta_vae.py first"
+def analyze(args: argparse.Namespace) -> None:
+    if not args.data.is_dir():
+        raise FileNotFoundError(f"dataset not found: {args.data}")
+    set_seed(args.seed)
+    device = try_gpu()
+    standard_model, standard_info = load_checkpoint(
+        args.standard_checkpoint, device
+    )
+    beta_model, beta_info = load_checkpoint(args.beta_checkpoint, device)
+    if standard_info.model_name != "vae":
+        raise ValueError("--standard-checkpoint must contain the standard VAE")
+    if beta_info.model_name != "beta_vae":
+        raise ValueError("--beta-checkpoint must contain a beta-VAE")
+    if standard_info.model_config != beta_info.model_config:
+        raise ValueError("compared checkpoints must use the same model_config")
+
+    loader = DataLoader(
+        image_folder_dataset(args.data),
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.workers > 0,
+    )
+    fixed_z = torch.randn(
+        NUM_PRIOR_SAMPLES, standard_info.z_dim, device=device
+    )
+    runs = (
+        ("standard_vae", standard_model, standard_info),
+        ("beta_vae", beta_model, beta_info),
+    )
+    results = []
+    artifacts = []
+    for run_name, model, info in runs:
+        result, comparison, prior_samples = evaluate_model(
+            model,
+            loader,
+            info=info,
+            maximum_batches=args.maximum_batches,
+            active_kl_threshold=args.active_kl_threshold,
+            fixed_z=fixed_z,
+            device=device,
         )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    split_seeds = set()
-    metadata = []
-    for path in paths:
-        checkpoint = torch.load(
-            path, map_location="cpu", weights_only=True
-        )
-        if checkpoint.get("model_name") == "beta_vae":
-            split_seeds.add(int(checkpoint["split_seed"]))
-            metadata.append(path)
-    if len(split_seeds) != 1:
-        raise ValueError(
-            "all compared checkpoints must use one FactorShapes split seed"
-        )
-    split_seed = split_seeds.pop()
-    loaders = make_loaders(args, split_seed=split_seed, device=device)
-    records = []
-    for path in metadata:
-        record = evaluate_checkpoint(
-            path, args=args, loaders=loaders, device=device
-        )
-        records.append(record)
+        results.append(result)
+        artifacts.append((run_name, comparison, prior_samples))
         print(
-            f"{record['model_name']} "
-            f"{record['control_name']}={record['control_value']:g} "
-            f"seed={record['seed']}: D={record['distortion']:.3f}, "
-            f"R={record['rate']:.3f}, "
-            f"MIG={record['mig']:.3f}, "
-            f"probe={record['probe_mean_accuracy']:.3f}"
+            f"{run_name}, beta={result.beta:g}: "
+            f"D={result.distortion:.3f}, R={result.rate:.3f}, "
+            f"beta*R={result.weighted_rate:.3f}, "
+            f"active_KL={result.active_kl_dimensions}/{info.z_dim}"
         )
 
-    out_dir = OUTPUT_ROOT / "beta_vae_evaluation"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    results = {
+    reset_dir(str(args.output))
+    for run_name, comparison, prior_samples in artifacts:
+        run_dir = args.output / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        save_image(
+            comparison,
+            run_dir / "real_and_posterior_mean_reconstruction.png",
+            nrow=comparison.shape[0] // 2,
+        )
+        save_image(
+            prior_samples,
+            run_dir / "matched_standard_normal_prior_samples.png",
+            nrow=PRIOR_GRID_COLUMNS,
+        )
+    report = {
         "protocol": {
-            "dataset": "FactorShapes32",
-            "factor_names": FACTOR_NAMES,
-            "factor_sizes": FACTOR_SIZES,
-            "split_seed": split_seed,
-            "code_bins": args.code_bins,
-            "probe_steps": args.probe_steps,
-            "identifiability_warning": (
-                "Controlled-factor scores do not establish unsupervised "
-                "semantic identifiability."
+            "dataset": "glasses-256",
+            "distortion": "posterior-mean summed-pixel MSE per image",
+            "active_kl_threshold_nats": args.active_kl_threshold,
+            "interpretation_warning": (
+                "Capacity diagnostics do not establish semantic "
+                "disentanglement without ground-truth factors."
             ),
         },
-        "runs": records,
-        "aggregate_by_model_and_control": aggregate_records(records),
+        "runs": [asdict(result) for result in results],
     }
-    (out_dir / "metrics.json").write_text(
-        json.dumps(results, indent=2) + "\n", encoding="utf-8"
+    (args.output / "metrics.json").write_text(
+        json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
-    save_summary_plot(records, out_dir / "rate_distortion_and_mig.png")
-    print(f"saved evaluation to {out_dir}")
+    save_summary_plot(results, args.output / "beta_comparison.png")
+    print(f"saved evaluation to {args.output}")
 
 
 def smoke_test() -> None:
-    set_seed(7)
-    factors = all_factor_combinations()[:320]
-    codes = torch.randn(len(factors), 10) * 0.05
-    codes[:, :5] += factors.to(torch.float32)
-    train_codes, test_codes = codes[:240], codes[240:]
-    train_factors, test_factors = factors[:240], factors[240:]
-    edges = quantile_bin_edges(train_codes, bins=8)
-    discrete = discretize_codes(test_codes, edges)
-    mutual_information = mutual_information_matrix(
-        discrete,
-        test_factors,
-        code_bins=8,
-        factor_sizes=FACTOR_SIZES,
+    rate, per_dimension, active = summarize_kl(
+        torch.tensor([0.0, 0.2, 1.0], dtype=torch.float64),
+        examples=2,
+        active_kl_threshold=0.05,
     )
-    scores = mig_and_modularity(
-        mutual_information,
-        test_factors,
-        factor_sizes=FACTOR_SIZES,
-    )
-    probe = train_factor_probe(
-        train_codes,
-        train_factors,
-        test_codes,
-        test_factors,
-        factor_sizes=FACTOR_SIZES,
-        hidden_dim=16,
-        steps=5,
-        learning_rate=1e-2,
-        seed=7,
-        device=torch.device("cpu"),
-    )
-    images = render_factor_shapes(factors[:4])
-    assert images.shape == (4, 1, 32, 32)
-    assert mutual_information.shape == (10, 5)
-    assert torch.isfinite(scores["mig"])
-    assert torch.isfinite(probe["mean_accuracy"])
-    print("smoke test passed")
+    assert rate == 0.6
+    assert per_dimension == [0.0, 0.1, 0.5]
+    assert active == 2
+    print("smoke test passed: rate and active dimensions are correct")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-test", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--code-bins", type=int, default=10)
-    parser.add_argument("--probe-hidden-dim", type=int, default=64)
-    parser.add_argument("--probe-steps", type=int, default=300)
-    parser.add_argument("--probe-lr", type=float, default=1e-2)
-    parser.add_argument("--probe-seed", type=int, default=123)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--data", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument(
-        "--beta-vae-root",
+        "--standard-checkpoint",
         type=Path,
-        default=OUTPUT_ROOT / "beta_vae",
+        default=DEFAULT_STANDARD_CHECKPOINT,
     )
+    parser.add_argument(
+        "--beta-checkpoint",
+        type=Path,
+        default=DEFAULT_BETA_CHECKPOINT,
+    )
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--maximum-batches", type=int, default=100)
+    parser.add_argument("--active-kl-threshold", type=float, default=0.05)
+    parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -417,7 +338,7 @@ def main() -> None:
     if args.smoke_test:
         smoke_test()
     else:
-        evaluate(args)
+        analyze(args)
 
 
 if __name__ == "__main__":

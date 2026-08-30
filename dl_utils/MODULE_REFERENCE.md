@@ -562,9 +562,19 @@ by this package.
 
 ### dl_utils/vae/vae.py
 
-Dependencies: torch, torch.nn.functional, torch.nn.
+Dependencies: __future__ (annotations), collections.abc (Callable, Mapping),
+os (PathLike), pathlib (Path), typing (Any), torch, torch.nn.functional,
+torch (Tensor), torch.nn, torchvision.utils (save_image), tqdm,
+dl_utils.data.vision (image_folder_loader), dl_utils.filesystem.directories
+(reset_dir), dl_utils.plot.figures (save_loss_panels),
+dl_utils.runtime.devices (try_gpu), dl_utils.runtime.randomness (set_seed),
+dl_utils.training.checkpoints (save_model_weights), dl_utils.training.metrics
+(MetricAccumulator).
 Public entries (__all__): diagonal_gaussian_kl, reparameterize, VAEEncoder,
-VAEDecoder, VAE.
+VAEDecoder, VAE, reconstruction_and_kl, train_glasses_vae.
+The shared loop keeps the 256x256 glasses dataset, model, optimizer, fixed
+prior samples, metrics, and artifacts identical between the standard-VAE and
+beta-VAE lessons while each entry script retains its objective definition.
 
 ### dl_utils/vae/vae_common.py
 
