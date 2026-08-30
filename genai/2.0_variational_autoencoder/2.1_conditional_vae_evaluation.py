@@ -10,6 +10,41 @@ then measures:
   controls when their final artifacts are available.
 
 The classifier is not part of the cVAE checkpoint or generation path.
+
+Data:
+    data/mnist, downloaded automatically by torchvision when absent. Digit
+    labels train the evaluator and condition the compared generators.
+
+Checkpoints:
+    output/vae/conditional_vae/standard-prior/model.pth: required main model
+    output/vae/conditional_vae/learned-prior/model.pth: optional control
+    output/vae/conditional_vae/deterministic/model.pth: optional control
+
+Outputs:
+    output/vae/conditional_vae/evaluation/metrics.json: complete comparison
+    output/vae/conditional_vae/evaluation/<variant>_conditional_samples.png
+
+Evaluation data -- MNIST:
+Classifier training images:        60,000
+Classifier samples per epoch:      59,904 (234 full batches)
+Classifier epochs:                      3
+Classifier optimizer updates:         702
+Test images:                       10,000
+Batch size:                           256
+Generated samples per model:         1,280 (128 per class)
+Real diversity reference:            1,280 (128 per class)
+Maximum reconstruction examples:     5,000 per VAE variant
+
+Default dimensions:
+Evaluation input:                  32x32 grayscale
+Generated image:                   32x32 grayscale
+Latent vector:                         16 values (VAE variants)
+
+Model size:
+Standard-prior CVAE:                0.971 M parameters (required)
+Learned-prior CVAE:                 0.980 M parameters (optional)
+Deterministic baseline:             0.235 M parameters (optional)
+Evaluator classifier:               0.056 M parameters
 """
 
 from __future__ import annotations

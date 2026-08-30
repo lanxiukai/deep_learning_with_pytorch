@@ -18,6 +18,44 @@ causal loss ablation.
 The projected torchvision Inception distance is a consistent Fréchet proxy
 for this lesson, not canonical TensorFlow FID. Unified cross-family generation
 evaluation remains outside this model-specific entry.
+
+Data:
+    data/cifar10 test split, prepared by tool_scripts/download_dataset.py.
+    CIFAR-10 class labels are ignored.
+
+Checkpoints:
+    output/vae/vqgan/**/tokenizer.pth: discovered VQGAN runs
+    output/vae/vqgan/**/transformer_prior.pth: matching optional priors
+    output/vae/vq_vae/{tokenizer.pth,pixelcnn_prior.pth}: optional baseline
+    At least one VQGAN tokenizer is required.
+
+Outputs:
+    output/vae/vqgan_evaluation/metrics.json: detailed and summary metrics
+    output/vae/vqgan_evaluation/<system>_real_and_reconstruction.png
+    output/vae/vqgan_evaluation/<system>_prior_samples.png
+
+Evaluation data -- CIFAR-10 test:
+Available images:                      10,000
+Batch size:                                64
+Reconstruction examples:                2,048
+Generated examples:                       256
+Generation batch size:                     16
+Sampling temperature:                     1.0
+Projected Inception feature dimensions:    256
+
+Default dimensions:
+Evaluation input:                       32x32 RGB
+Generated image:                        32x32 RGB
+Latent token grid:                       8x8 indices
+
+Model size per default VQGAN system:
+VQGAN tokenizer:                         1.63 M parameters
+Patch discriminator:                     1.25 M parameters
+Transformer prior:                       3.44 M parameters
+Stored VQGAN total:                      6.32 M parameters
+Optional VQ-VAE baseline total:          3.02 M parameters
+Frozen Inception-v3 evaluator:          25.11 M parameters
+Frozen LPIPS-VGG evaluator:             14.72 M parameters
 """
 
 from __future__ import annotations

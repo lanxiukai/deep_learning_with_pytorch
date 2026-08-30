@@ -5,6 +5,38 @@ particle chunk size, test examples, and repeated random estimates. This keeps
 the training objective separate from the evaluation estimator. Posterior-mean
 reconstruction, Monte Carlo rate, active units, ESS/K, and prior samples are
 reported alongside the bound; none substitutes for the others.
+
+Data:
+    data/mnist, downloaded automatically by torchvision when absent. Digit
+    labels are ignored by the IWAE comparison.
+
+Checkpoints:
+    output/vae/iwae/k1/model.pth: default K=1 model
+    output/vae/iwae/k5/model.pth: default K=5 model
+    At least one checkpoint is required; missing models are reported.
+
+Outputs:
+    output/vae/iwae_evaluation/metrics.json: shared-protocol comparison
+    output/vae/iwae_evaluation/<model>_real_reconstruction_prior.png
+
+Evaluation data -- MNIST test:
+Available images:                  10,000
+Batch size:                            64
+Evaluated images per repeat:         2,048
+Evaluation particles:                 128
+Particle chunk size:                    8
+Repeated estimates:                     3
+Prior samples in each grid:             16
+
+Default dimensions:
+Evaluation input:                  32x32 grayscale
+Generated image:                   32x32 grayscale
+Latent vector:                         16 values
+
+Model size (each checkpoint):
+Encoder/posterior:                  0.431 M parameters
+Decoder:                            0.199 M parameters
+Total:                              0.631 M parameters
 """
 
 from __future__ import annotations

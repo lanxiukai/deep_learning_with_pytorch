@@ -13,6 +13,10 @@ Samples per epoch:       4,480
 Note: Counts include 517 repository-tracked label corrections. ``drop_last``
 omits 20 shuffled images per epoch.
 
+Default image sizes:
+Training input:  256x256 RGB
+Generated image: 256x256 RGB
+
 Generator:  12.9 M params
 Critic:      2.8 M params
 Total:      15.7 M params

@@ -24,6 +24,10 @@ Default schedule:
     Real images shown to D:  2.2 million
     Main D/G updates:        24,222 / 24,222
 
+Default image sizes:
+    Training input:          4x4 to 128x128 RGB, progressive by phase
+    Generated image:         4x4 to 128x128 RGB, progressive by phase
+
 Model size:
     Generator:               4.06 M parameters (plus one EMA copy)
     Discriminator:           4.59 M parameters

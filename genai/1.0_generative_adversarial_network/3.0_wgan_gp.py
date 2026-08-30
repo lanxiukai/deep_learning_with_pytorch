@@ -9,6 +9,10 @@ Anime faces:      63,565 images
 Samples per epoch: 63,488
 Note: ``drop_last=True`` discards the final incomplete batch of 77 images.
 
+Default image sizes:
+Training input:  64x64 RGB
+Generated image: 64x64 RGB
+
 Generator:   3.6 M params
 Critic:      2.8 M params
 Total:       6.4 M params

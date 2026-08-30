@@ -14,6 +14,34 @@ number of decoded particles approximately equal instead.
 
 Each run saves only final model weights and constructor metadata. These short
 runs intentionally have no checkpoint resumption machinery.
+
+Data:
+    data/mnist, downloaded automatically by torchvision when absent.
+
+Outputs:
+    output/vae/iwae/k1/: default K=1 checkpoint and prior samples
+    output/vae/iwae/k5/: default K=5 checkpoint and prior samples
+
+Training data -- MNIST:
+Training images:          60,000
+Validation images:        10,000
+Batch size:                  128
+Samples per full pass:    59,904 (468 full batches; drop_last=True)
+Training epochs:              10 per K
+Default runs:             K=1 and K=5
+Optimizer updates:         4,680 per run / 9,360 total
+Note: Digit labels are ignored. ``--match-particle-budget`` changes the
+non-minimum-K update count.
+
+Default dimensions:
+Training input:           32x32 grayscale
+Generated image:          32x32 grayscale
+Latent vector:                 16 values
+
+Model size (shared by every K):
+Encoder/posterior:         0.431 M parameters
+Decoder:                   0.199 M parameters
+Total:                     0.631 M parameters
 """
 
 from __future__ import annotations

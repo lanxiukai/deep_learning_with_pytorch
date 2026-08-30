@@ -8,6 +8,36 @@ The script keeps three image paths separate:
 
 Latent interpolation is a local decoder diagnostic, not evidence of
 independent semantic factors or unconditional generation.
+
+Data:
+    data/glasses-256, prepared by tool_scripts/download_dataset.py. Folder
+    labels are ignored by the standard VAE evaluation.
+
+Checkpoint:
+    output/vae/vae/vae.pth: frozen checkpoint from 1.0_vae.py
+
+Outputs:
+    output/vae/vae/evaluation/metrics.json: reconstruction and posterior metrics
+    output/vae/vae/evaluation/real_mean_and_sample_reconstruction.png
+    output/vae/vae/evaluation/standard_normal_prior_samples.png
+    output/vae/vae/evaluation/posterior_mean_interpolation_not_generation.png
+
+Evaluation data -- glasses-256:
+Available images:           4,500
+Batch size:                    16
+Maximum batches:              100
+Evaluated images:           1,600
+Comparison images:              8
+Prior samples:                  18
+Interpolation steps:             7
+
+Default dimensions:
+Evaluation input:           256x256 RGB
+Generated image:            256x256 RGB
+Latent vector:                  100 values
+
+Model size:
+Frozen standard VAE:         63.33 M parameters
 """
 
 import argparse

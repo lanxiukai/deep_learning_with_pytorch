@@ -36,6 +36,10 @@ Samples per epoch:       63,171 aligned grayscale/RGB pairs
 Note: The grayscale source is derived from the same RGB target in memory, so
 each training image contributes one pixel-aligned pair per epoch.
 
+Default image sizes:
+Training input:  128x128 grayscale
+Generated image: 128x128 RGB
+
 Generator:              41.8 M params
 Discriminator:           2.8 M params
 Total:                  44.6 M params

@@ -14,6 +14,36 @@ scalar combination, so usage entropy and reconstruction are still logged.
 The tokenizer file is a stage handoff, not a training-resume checkpoint. Each
 stage saves only final weights, constructor metadata, and the tokenizer identity
 needed to prevent pairing a prior with different tokenizer weights.
+
+Data:
+    data/cifar10, prepared by tool_scripts/download_dataset.py.
+
+Outputs:
+    output/vae/fsq/tokenizer_*.png: reconstruction comparisons
+    output/vae/fsq/prior_*.png: PixelCNN prior samples
+    output/vae/fsq/tokenizer.pth: final FSQ tokenizer checkpoint
+    output/vae/fsq/pixelcnn_prior.pth: final token-prior checkpoint
+
+Training data -- CIFAR-10:
+Training images:              50,000
+Validation images:            10,000
+Batch size:                      128
+Samples per epoch:            49,920 (390 full batches; drop_last=True)
+Tokenizer epochs:                 20
+Prior epochs:                     20
+Optimizer updates:             7,800 tokenizer / 7,800 prior
+Note: CIFAR-10 labels are ignored. The final 80 shuffled training images are
+omitted per epoch; stage 2 freezes the tokenizer.
+
+Default dimensions:
+Training input:               32x32 RGB
+Generated image:              32x32 RGB
+Latent token grid:              8x8 indices (1,600 fixed combinations)
+
+Model size:
+FSQ tokenizer:                 1.08 M parameters
+PixelCNN prior:                2.12 M parameters (tokenizer frozen)
+Stored total:                  3.19 M parameters
 """
 
 from __future__ import annotations

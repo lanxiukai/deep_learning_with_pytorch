@@ -5,6 +5,10 @@ Pokémon:          40,597 images across 721 class folders
 Samples per epoch: 40,597
 Note: Class labels are ignored; folders only provide the ImageFolder layout.
 
+Default image sizes:
+Training input:  64x64 RGB
+Generated image: 64x64 RGB
+
 Generator:       3.6 M params
 Discriminator:   2.8 M params
 Total:           6.4 M params

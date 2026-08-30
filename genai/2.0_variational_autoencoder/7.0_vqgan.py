@@ -22,6 +22,42 @@ This entry keeps only training and bounded training-time validation. Run
 paired fidelity, reconstruction distributions, token rates, prior likelihood,
 and complete generation under one held-out protocol.
 
+Data:
+    data/cifar10, prepared by tool_scripts/download_dataset.py.
+
+Outputs:
+    output/vae/vqgan[/<run-name>]/tokenizer_*.png: reconstructions
+    output/vae/vqgan[/<run-name>]/prior_*.png: Transformer-prior samples
+    output/vae/vqgan[/<run-name>]/tokenizer.pth: tokenizer and discriminator
+    output/vae/vqgan[/<run-name>]/transformer_prior.pth: token prior
+
+Training data -- CIFAR-10:
+Training images:              50,000
+Validation images:            10,000
+Batch size:                       64
+Samples per epoch:            49,984 (781 full batches; drop_last=True)
+Tokenizer epochs:                 30
+Prior epochs:                     30
+Optimizer updates:            23,430 tokenizer / 22,430 discriminator
+                              23,430 Transformer prior
+Note: CIFAR-10 labels are ignored. D starts at tokenizer step 1,000; 16
+shuffled images are omitted per epoch. Stage 2 freezes the tokenizer, and
+training-time validation uses the first 1,024 validation images.
+
+Default dimensions:
+Training input:               32x32 RGB
+Generated image:              32x32 RGB
+Latent token grid:              8x8 indices (512-entry codebook)
+
+Model size:
+VQGAN tokenizer:               1.63 M parameters
+Patch discriminator:           1.25 M parameters
+Stage-one trainable total:      2.88 M parameters (frozen LPIPS excluded)
+Frozen LPIPS VGG:              14.72 M parameters (not optimized or stored)
+Stage-one resident total:      17.60 M parameters
+Transformer prior:             3.44 M parameters (tokenizer frozen)
+Stored model total:             6.32 M parameters
+
 Named runs make the intended same-architecture progression explicit::
 
     python 7.0_vqgan.py --run-name pixel-vq --perceptual-weight 0 --discriminator-weight 0

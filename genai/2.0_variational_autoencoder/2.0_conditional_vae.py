@@ -17,6 +17,34 @@ baseline is also separate, not a mislabelled zero-KL VAE.
 Each variant saves only final model weights and constructor metadata. These
 short runs intentionally have no checkpoint resumption machinery.
 
+Data:
+    data/mnist, downloaded automatically by torchvision when absent.
+
+Outputs:
+    output/vae/conditional_vae/<variant>/model.pth: final variant checkpoint
+    output/vae/conditional_vae/<variant>/conditional_samples.png: class grid
+
+Training data -- MNIST:
+Training images:          60,000
+Validation images:        10,000
+Batch size:                  128
+Samples per epoch:        59,904 (468 full batches; drop_last=True)
+Training epochs:              15 per selected variant
+Optimizer updates:         7,020 per selected variant
+Default variant:          standard-prior
+Note: Digit labels condition every variant. The final 96 shuffled training
+images are omitted per epoch.
+
+Default dimensions:
+Training input:           32x32 grayscale
+Generated image:          32x32 grayscale
+Latent vector:                 16 values (VAE variants)
+
+Model size:
+Standard-prior CVAE:       0.971 M parameters (default)
+Learned-prior CVAE:        0.980 M parameters
+Deterministic baseline:    0.235 M parameters
+
 Examples:
     python genai/2.0_variational_autoencoder/2.0_conditional_vae.py
     python genai/2.0_variational_autoencoder/2.0_conditional_vae.py \

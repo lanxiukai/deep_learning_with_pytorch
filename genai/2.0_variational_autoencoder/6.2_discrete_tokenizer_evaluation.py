@@ -13,6 +13,41 @@ System evidence:
 The feature metric uses torchvision Inception-v3 with an optional fixed random
 projection.  It is a consistent Fréchet proxy for this comparison, not the
 canonical TensorFlow FID implementation.
+
+Data:
+    data/cifar10 test split, prepared by tool_scripts/download_dataset.py.
+    CIFAR-10 class labels are ignored.
+
+Checkpoints:
+    output/vae/vq_vae/{tokenizer.pth,pixelcnn_prior.pth}: VQ-VAE system
+    output/vae/fsq/{tokenizer.pth,pixelcnn_prior.pth}: FSQ system
+    At least one tokenizer is required; a missing prior disables generation.
+
+Outputs:
+    output/vae/discrete_tokenizer_evaluation/metrics.json: system comparison
+    output/vae/discrete_tokenizer_evaluation/<system>_real_and_reconstruction.png
+    output/vae/discrete_tokenizer_evaluation/<system>_prior_samples.png
+
+Evaluation data -- CIFAR-10 test:
+Available images:                      10,000
+Batch size:                                64
+Reconstruction examples:                2,048
+Generated examples:                       256
+Generation batch size:                     32
+Sampling temperature:                     1.0
+Projected Inception feature dimensions:    256
+
+Default dimensions:
+Evaluation input:                       32x32 RGB
+Generated image:                        32x32 RGB
+Latent token grid:                       8x8 indices
+
+Model size:
+VQ-VAE tokenizer / prior:               1.19 M / 1.84 M parameters
+VQ-VAE system total:                    3.02 M parameters
+FSQ tokenizer / prior:                  1.08 M / 2.12 M parameters
+FSQ system total:                       3.19 M parameters
+Frozen Inception-v3 evaluator:         25.11 M parameters
 """
 
 from __future__ import annotations

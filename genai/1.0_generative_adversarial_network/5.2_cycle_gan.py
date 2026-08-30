@@ -28,6 +28,10 @@ Samples per epoch:       48,472 unpaired image pairs
 Note: The unpaired dataset uses the larger domain as its length, so the smaller
 blond-hair domain cycles and 18,492 of its images are reused once per epoch.
 
+Default image sizes:
+Training input:  128x128 RGB
+Generated image: 128x128 RGB
+
 Generator (each):      11.4 M params
 Discriminator (each):   2.8 M params
 Total (2 of each):     28.3 M params

@@ -15,6 +15,33 @@ layer is informative.  The next lesson changes only the lower posterior.
 
 The script saves final model weights and the small set of constructor and
 evaluation controls needed by the next lesson. It has no resume machinery.
+
+Data:
+    FactorShapes32, generated in memory from the complete independent factor
+    grid with a deterministic 80/20 combination split.
+
+Outputs:
+    output/vae/hierarchical_vae/baseline/model.pth: final HVAE checkpoint
+    output/vae/hierarchical_vae/baseline/prior_samples.png: prior sample grid
+
+Training data -- FactorShapes32:
+Available combinations:       3,528
+Training split:                2,822 images
+Test split:                      706 images
+Batch size:                       128
+Samples per epoch:             2,816 (22 full batches; drop_last=True)
+Training epochs:                  40
+Optimizer updates:               880
+Note: Factor annotations define the dataset and later evaluation but do not
+enter the training objective. Six shuffled images are omitted per epoch.
+
+Default dimensions:
+Training input:               32x32 grayscale
+Generated image:              32x32 grayscale
+Latent vectors:               z1=24 / z2=12 values
+
+Model size:
+Hierarchical VAE:              0.876 M parameters
 """
 
 from __future__ import annotations

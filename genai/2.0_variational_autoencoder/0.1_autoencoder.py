@@ -5,10 +5,33 @@ training progress is directly comparable. The final checkpoint contains model
 weights and constructor metadata only; this short run intentionally has no
 resume machinery.
 
+Data:
+    data/mnist, downloaded automatically by torchvision when absent.
+
 Outputs:
     output/vae/autoencoder_mnist/training/epoch_*.png: fixed reconstructions
     output/vae/autoencoder_mnist/autoencoder.pth: final model checkpoint
     output/vae/autoencoder_mnist/loss_curves.png: per-image reconstruction loss
+
+Training data -- MNIST:
+Training images:          60,000
+Test images:              10,000
+Batch size:                   32
+Samples per epoch:        60,000 (1,875 full batches)
+Training epochs:              10
+Optimizer updates:        18,750
+Note: Digit labels select the fixed test grid but do not enter the training
+objective.
+
+Default dimensions:
+Training input:           28x28 grayscale
+Reconstructed image:      28x28 grayscale
+Latent vector:                 20 values
+
+Model size:
+Encoder:                   0.161 M parameters
+Decoder:                   0.162 M parameters
+Total:                     0.323 M parameters
 """
 
 from __future__ import annotations

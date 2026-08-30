@@ -5,6 +5,10 @@ Anime faces:      63,565 images
 Samples per epoch: 63,565
 Note: The dataset has one class folder; its label is ignored by the GAN.
 
+Default image sizes:
+Training input:  64x64 RGB
+Generated image: 64x64 RGB
+
 Generator:       3.6 M params
 Discriminator:   2.8 M params
 Total:           6.4 M params

@@ -4,6 +4,38 @@ Both checkpoints use the same glasses-256 images, model architecture, and
 fixed prior samples. The evaluation focuses on reconstruction distortion,
 KL rate, beta-weighted rate, and per-dimension latent use. These capacity
 diagnostics do not establish semantic disentanglement.
+
+Data:
+    data/glasses-256, prepared by tool_scripts/download_dataset.py. Folder
+    labels are ignored by both compared models.
+
+Checkpoints:
+    output/vae/vae/vae.pth: required standard VAE
+    output/vae/beta_vae/beta_vae.pth: required beta-VAE
+
+Outputs:
+    output/vae/beta_vae_evaluation/metrics.json: rate-distortion report
+    output/vae/beta_vae_evaluation/beta_comparison.png: summary figure
+    output/vae/beta_vae_evaluation/<model>/real_and_posterior_mean_reconstruction.png
+    output/vae/beta_vae_evaluation/<model>/matched_standard_normal_prior_samples.png
+
+Evaluation data -- glasses-256:
+Available images:             4,500
+Batch size:                      16
+Maximum batches:                100
+Evaluated images per model:   1,600
+Matched prior samples:            18
+Active-KL threshold:             0.05 nats per dimension
+
+Default dimensions:
+Evaluation input:             256x256 RGB
+Generated image:              256x256 RGB
+Latent vector:                    100 values
+
+Model size:
+Standard VAE:                  63.33 M parameters
+Beta-VAE:                     63.33 M parameters
+Loaded total:                126.66 M parameters
 """
 
 from __future__ import annotations

@@ -40,6 +40,10 @@ Samples per epoch:       49,984 (781 full batches; drop_last=True)
 Training epochs:         650
 Optimizer updates:       507,650 D / 101,530 G (exactly 5:1)
 
+Default image sizes:
+Training input:          32x32 RGB
+Generated image:         32x32 RGB
+
 Generator:                4.28 M params
 Discriminator:            1.05 M params
 Total:                    5.33 M params

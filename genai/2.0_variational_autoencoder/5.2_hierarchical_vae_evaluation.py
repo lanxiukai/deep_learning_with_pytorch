@@ -11,6 +11,38 @@ counterfactuals:
 It also saves two controlled resampling grids.  Any apparent global/local
 division remains an empirical observation, not a property implied by the
 hierarchical ELBO.
+
+Data:
+    FactorShapes32 test split, generated in memory with the split seed stored
+    in the compared checkpoints. Factor annotations do not enter the models.
+
+Checkpoints:
+    output/vae/hierarchical_vae/baseline/model.pth: default HVAE
+    output/vae/ladder_vae/baseline/model.pth: default Ladder VAE
+    At least one checkpoint is required; missing models are reported.
+
+Outputs:
+    output/vae/hierarchical_vae_evaluation/metrics.json: comparison report
+    output/vae/hierarchical_vae_evaluation/<model>/posterior_and_prior_replacements.png
+    output/vae/hierarchical_vae_evaluation/<model>/fixed_top_resampled_lower_prior.png
+    output/vae/hierarchical_vae_evaluation/<model>/fixed_evidence_changed_top.png
+
+Evaluation data -- FactorShapes32 test:
+Available and evaluated images:       706
+Batch size:                            64
+Intervention samples per image:         8
+Visual variants per fixed input:        6
+Active-variance threshold:           0.01
+
+Default dimensions:
+Evaluation input:                32x32 grayscale
+Generated image:                 32x32 grayscale
+Latent vectors:                  z1=24 / z2=12 values
+
+Model size:
+Hierarchical VAE:                 0.876 M parameters
+Ladder VAE:                       0.874 M parameters
+Loaded total:                     1.750 M parameters
 """
 
 from __future__ import annotations

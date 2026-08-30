@@ -15,6 +15,36 @@ The tokenizer file is a stage handoff, not a training-resume checkpoint. Each
 stage saves only final weights, constructor metadata, and the tokenizer identity
 needed to prevent pairing a prior with different tokenizer weights.
 
+Data:
+    data/cifar10, prepared by tool_scripts/download_dataset.py.
+
+Outputs:
+    output/vae/vq_vae/tokenizer_*.png: reconstruction comparisons
+    output/vae/vq_vae/prior_*.png: PixelCNN prior samples
+    output/vae/vq_vae/tokenizer.pth: final tokenizer checkpoint
+    output/vae/vq_vae/pixelcnn_prior.pth: final token-prior checkpoint
+
+Training data -- CIFAR-10:
+Training images:              50,000
+Validation images:            10,000
+Batch size:                      128
+Samples per epoch:            49,920 (390 full batches; drop_last=True)
+Tokenizer epochs:                 20
+Prior epochs:                     20
+Optimizer updates:             7,800 tokenizer / 7,800 prior
+Note: CIFAR-10 labels are ignored. The final 80 shuffled training images are
+omitted per epoch; stage 2 freezes the tokenizer.
+
+Default dimensions:
+Training input:               32x32 RGB
+Generated image:              32x32 RGB
+Latent token grid:              8x8 indices (512-entry codebook)
+
+Model size:
+VQ-VAE tokenizer:              1.19 M parameters
+PixelCNN prior:                1.84 M parameters (tokenizer frozen)
+Stored total:                  3.02 M parameters
+
 Examples:
     python genai/2.0_variational_autoencoder/6.0_vq_vae.py --smoke-test
     python genai/2.0_variational_autoencoder/6.0_vq_vae.py --stage tokenizer
