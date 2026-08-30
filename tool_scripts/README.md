@@ -1,21 +1,22 @@
 # Tool Scripts
 
-This directory contains repository-level utilities for dataset preparation,
-cloud GPU workflows, GAN benchmarks, environment inspection, and standalone
-visualizations. Run commands from the repository root unless a script says
-otherwise.
+This README is the operating index for repository-level tools: dataset
+preparation, cloud GPU entry points, GAN benchmarks, environment inspection,
+and standalone visualizations. Exact CLI options remain in each script's
+`--help` output.
 
-## Before running
+## Running tools
 
-Use the locked project environment for Python tools:
+Run commands from the repository root. Prepare the environment through the
+[project quick start](../README.md#quick-start), then use these invocation
+patterns:
 
 ```bash
-uv sync --locked
-uv run --locked --no-sync python tool_scripts/pytorch_test.py
+uv run --locked --no-sync python tool_scripts/SCRIPT.py
+bash tool_scripts/SCRIPT.sh --help
 ```
 
-`pytorch_test.py` is a read-only runtime check. Shell scripts expose their
-current options with `--help`.
+`pytorch_test.py` is the read-only runtime check used by the quick start.
 
 ## Choose a task
 
@@ -39,12 +40,31 @@ current options with `--help`.
 - Benchmark output directories must be new, protecting prior measurements from
   accidental reuse.
 
-## Detailed reference
+## Dataset profiles
 
-[SCRIPT_REFERENCE.md](SCRIPT_REFERENCE.md) contains the full cloud runbook,
-host requirements, environment profiles, benchmark interpretation, dataset
-catalog, cleanup checklist, and troubleshooting guidance.
+Base dependencies cover torchvision datasets and the project's small download
+registry. Kaggle-backed datasets require the `celeba` or `examples` extra; the
+complete lesson collection also needs `examples`:
+
+```bash
+uv sync --no-dev --extra celeba --locked
+uv run --locked --no-sync python tool_scripts/download_dataset.py --dataset celeba
+
+uv sync --extra examples --locked
+uv run --locked --no-sync python tool_scripts/download_dataset.py --dataset all
+```
+
+The downloader's `--help` output lists the current dataset names and optional
+CelebA CycleGAN split. Kaggle-backed downloads may require authentication.
+The `all` operation reports individual provider failures after attempting the
+complete collection.
+
+## Cloud GAN runbook
+
+[CLOUD_GAN_RUNBOOK.md](CLOUD_GAN_RUNBOOK.md) contains the host requirements,
+provisioning and training lifecycle, benchmark interpretation, cleanup
+checklist, and troubleshooting guidance.
 
 For focused work, start with this README, then open only the relevant script or
-reference section. Do not load the full cloud workflow for a local inspection
-or a small script change.
+runbook section. Exact actions, flags, choices, and defaults belong to each
+script's `--help` output.
