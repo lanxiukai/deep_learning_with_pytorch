@@ -46,10 +46,10 @@ Learned-prior CVAE:        0.980 M parameters
 Deterministic baseline:    0.235 M parameters
 
 Examples:
-    python genai/2.0_variational_autoencoder/2.0_conditional_vae.py
-    python genai/2.0_variational_autoencoder/2.0_conditional_vae.py \
+    python genai/2.0_variational_autoencoder/3.0_conditional_vae.py
+    python genai/2.0_variational_autoencoder/3.0_conditional_vae.py \
         --variant all
-    python genai/2.0_variational_autoencoder/2.0_conditional_vae.py \
+    python genai/2.0_variational_autoencoder/3.0_conditional_vae.py \
         --smoke-test
 """
 

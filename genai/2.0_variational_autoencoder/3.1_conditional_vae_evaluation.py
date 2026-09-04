@@ -344,7 +344,7 @@ def evaluate(args: argparse.Namespace) -> None:
     paths = _checkpoint_paths(args)
     if not paths["standard-prior"].exists():
         raise FileNotFoundError(
-            f"missing {paths['standard-prior']}; run 2.0_conditional_vae.py"
+            f"missing {paths['standard-prior']}; run 3.0_conditional_vae.py"
         )
     missing_controls = [
         name

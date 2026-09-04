@@ -226,7 +226,7 @@ def evaluate(args: argparse.Namespace) -> None:
     available = {name: path for name, path in paths.items() if path.exists()}
     if not available:
         raise FileNotFoundError(
-            "no default checkpoint exists; run 3.0_iwae.py first"
+            "no default checkpoint exists; run 4.0_iwae.py first"
         )
     out_dir = OUTPUT_ROOT / "iwae_evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)

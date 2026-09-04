@@ -83,7 +83,7 @@ class VAEEncoder(nn.Module):
 
 
 class VAEDecoder(nn.Module):
-    """Decode latent vectors into 256x256 RGB Bernoulli means."""
+    """Decode latent vectors into 256x256 RGB Gaussian means with fixed scale."""
 
     def __init__(self, z_dim=100):
         super().__init__()
