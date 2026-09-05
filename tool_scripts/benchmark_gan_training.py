@@ -1,367 +1,337 @@
-"""Benchmark a short 128x128 training burst for one compact GAN lesson."""
+"""Run finite forward/backward checks for one Imagenette-128 GAN on RTX 5090."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
-import runpy
 import time
-from contextlib import nullcontext
-from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Literal
 
 import torch
-from torch import nn
-from torch.optim import Optimizer
 
-from dl_utils.gan.progan import ProGANDiscriminator, ProGANGenerator
-from dl_utils.gan.stylegan import StyleGANDiscriminator, StyleGANGenerator
-from dl_utils.gan.stylegan2 import StyleDiscriminator, StyleGenerator
-from dl_utils.gan.stylegan_common import ProgressivePhase
-from dl_utils.gan.training import (
-    GANRun,
-    initialize_gan_models,
-    prepare_gan_run,
-    validate_finite_gan_state,
+from dl_utils.data.imagenette import make_imagenette_loader
+from dl_utils.gan.biggan import (
+    BigGANDiscriminator,
+    BigGANGenerator,
+    initialize_orthogonal_weights,
+    modified_orthogonal_regularization,
 )
-from dl_utils.training.accelerator import BF16Precision, make_fused_adam
+from dl_utils.gan.sagan import SAGANDiscriminator, SAGANGenerator
+from dl_utils.gan.sn_gan import (
+    SNDiscriminator,
+    SNGenerator,
+    discriminator_hinge_loss,
+    generator_hinge_loss,
+)
+from dl_utils.training.accelerator import (
+    configure_device,
+    make_fused_adam,
+    resolve_training_precision,
+)
+from dl_utils.training.optimization import update_ema
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LESSON_DIR = PROJECT_ROOT / "genai" / "1.0_generative_adversarial_network"
-LESSON_FILES = {
-    "progan": "7.0_progan.py",
-    "stylegan": "7.1_stylegan.py",
-    "stylegan2": "7.2_stylegan2.py",
+MODEL_DEFAULT_BATCH_SIZES = {
+    "sn_gan": 16,
+    "sagan": 16,
+    "biggan": 8,
 }
-RESOLUTION = 128
+NUM_CLASSES = 10
 
 
-@dataclass(frozen=True)
-class FP32BenchmarkPrecision:
-    """Run a benchmark with FP32 tensors and optional TF32 math."""
-
-    device: torch.device
-    mode: Literal["fp32", "tf32"]
-
-    @property
-    def name(self) -> str:
-        return self.mode
-
-    def autocast(self):
-        return nullcontext()
-
-    def backward_step(self, loss: torch.Tensor, optimizer: Optimizer) -> None:
-        loss.backward()
-        torch.cuda.synchronize(self.device)
-        optimizer.step()
-
-
-type BenchmarkPrecision = BF16Precision | FP32BenchmarkPrecision
-
-
-@dataclass
-class BenchmarkState:
-    """Objects needed to run repeated training bursts for one lesson."""
-
-    model_name: str
-    lesson: dict[str, Any]
-    run: GANRun
-    precision: BenchmarkPrecision
-    generator: nn.Module
-    discriminator: nn.Module
-    averaged_generator: nn.Module
-    optimizer_g: Optimizer
-    optimizer_d: Optimizer
-    batch_size: int
-    path_mean: torch.Tensor
-    global_step: int
-
-
-def positive_int(value: str) -> int:
-    """Parse one positive CLI integer."""
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("value must be positive")
-    return parsed
-
-
-def non_negative_int(value: str) -> int:
-    """Parse one non-negative CLI integer."""
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("value must be non-negative")
-    return parsed
-
-
-def validate_metrics(metrics: dict[str, float]) -> None:
-    """Reject a benchmark trajectory containing non-finite metrics."""
-    nonfinite = tuple(
-        name for name, value in metrics.items() if not math.isfinite(value)
-    )
-    if nonfinite:
-        raise RuntimeError(f"benchmark produced non-finite metrics: {metrics}")
-
-
-def resolve_benchmark_precision(
-    run: GANRun,
-    mode: Literal["bf16", "tf32", "fp32"],
-) -> BenchmarkPrecision:
-    """Select BF16 autocast, TF32-enabled FP32, or strict FP32."""
-    if mode == "bf16":
-        return run.precision
-    use_tf32 = mode == "tf32"
-    torch.backends.cuda.matmul.allow_tf32 = use_tf32
-    torch.backends.cudnn.allow_tf32 = use_tf32
-    torch.set_float32_matmul_precision("high" if use_tf32 else "highest")
-    return FP32BenchmarkPrecision(run.device, mode)
-
-
-def build_state(args: argparse.Namespace) -> BenchmarkState:
-    """Build the real lesson models, optimizers, precision, and data stream."""
-    lesson = runpy.run_path(str(LESSON_DIR / LESSON_FILES[args.model]))
-    run = prepare_gan_run(
-        f"benchmark-{args.model}",
-        seed=int(lesson["SEED"]),
-        data_pipeline=args.data_pipeline,
-        num_workers=args.num_workers,
-        prefetch_factor=args.prefetch_factor,
-        project_root=PROJECT_ROOT,
-    )
-    precision = resolve_benchmark_precision(run, args.precision)
-    base_batch_size = (
-        int(lesson["BATCH_SIZES"][RESOLUTION])
-        if args.model in {"progan", "stylegan"}
-        else int(lesson["BATCH_SIZE"])
-    )
-    batch_size = (
-        args.batch_size
-        if args.batch_size is not None
-        else base_batch_size * args.batch_scale
-    )
-    if run.dataset_size < batch_size:
-        raise ValueError("CelebA train split is smaller than the benchmark batch.")
-
-    if args.model == "progan":
-        generator = ProGANGenerator(**lesson["MODEL_CONFIG"])
-        discriminator = ProGANDiscriminator(**lesson["DISCRIMINATOR_CONFIG"])
-    elif args.model == "stylegan":
-        generator = StyleGANGenerator(**lesson["MODEL_CONFIG"])
-        discriminator = StyleGANDiscriminator(**lesson["DISCRIMINATOR_CONFIG"])
+def build_model(model_name, device, base_channels):
+    """Construct the lesson's default architecture and optimizer pair."""
+    common = {
+        "num_classes": NUM_CLASSES,
+        "base_channels": base_channels,
+        "image_size": 128,
+    }
+    if model_name == "sn_gan":
+        z_dim = 128
+        generator = SNGenerator(z_dim=z_dim, **common).to(device)
+        discriminator = SNDiscriminator(**common).to(device)
+        generator_lr = discriminator_lr = 2e-4
+        betas = (0.0, 0.9)
+        update_ratio = 5
+        averaged_generator = None
+    elif model_name == "sagan":
+        z_dim = 128
+        generator = SAGANGenerator(
+            z_dim=z_dim,
+            attention_resolution=32,
+            **common,
+        ).to(device)
+        discriminator = SAGANDiscriminator(
+            attention_resolution=32,
+            **common,
+        ).to(device)
+        generator_lr, discriminator_lr = 1e-4, 4e-4
+        betas = (0.0, 0.9)
+        update_ratio = 1
+        averaged_generator = None
     else:
-        generator = StyleGenerator(**lesson["MODEL_CONFIG"])
-        discriminator = StyleDiscriminator(**lesson["DISCRIMINATOR_CONFIG"])
-    generator, discriminator, averaged_generator = initialize_gan_models(
-        generator,
-        discriminator,
-        run.device,
-    )
+        z_dim = 120
+        generator = BigGANGenerator(
+            z_dim=z_dim,
+            class_embedding_dim=128,
+            attention_resolution=64,
+            **common,
+        ).to(device)
+        discriminator = BigGANDiscriminator(
+            attention_resolution=64,
+            **common,
+        ).to(device)
+        generator.apply(initialize_orthogonal_weights)
+        discriminator.apply(initialize_orthogonal_weights)
+        averaged_generator = deepcopy(generator).eval().requires_grad_(False)
+        generator_lr, discriminator_lr = 5e-5, 2e-4
+        betas = (0.0, 0.999)
+        update_ratio = 2
 
-    if args.model == "stylegan2":
-        g_ratio = lesson["G_REG_EVERY"] / (lesson["G_REG_EVERY"] + 1)
-        d_ratio = lesson["D_REG_EVERY"] / (lesson["D_REG_EVERY"] + 1)
-    else:
-        g_ratio = d_ratio = 1.0
     optimizer_g = make_fused_adam(
         generator.parameters(),
-        device=run.device,
-        lr=lesson["LEARNING_RATE"] * g_ratio,
-        betas=(0.0, 0.99**g_ratio),
+        device=device,
+        lr=generator_lr,
+        betas=betas,
     )
     optimizer_d = make_fused_adam(
         discriminator.parameters(),
-        device=run.device,
-        lr=lesson["LEARNING_RATE"] * d_ratio,
-        betas=(0.0, 0.99**d_ratio),
+        device=device,
+        lr=discriminator_lr,
+        betas=betas,
     )
-    return BenchmarkState(
-        model_name=args.model,
-        lesson=lesson,
-        run=run,
-        precision=precision,
-        generator=generator,
-        discriminator=discriminator,
-        averaged_generator=averaged_generator,
-        optimizer_g=optimizer_g,
-        optimizer_d=optimizer_d,
-        batch_size=batch_size,
-        path_mean=torch.zeros((), device=run.device),
-        global_step=0,
+    return (
+        generator,
+        discriminator,
+        averaged_generator,
+        optimizer_g,
+        optimizer_d,
+        z_dim,
+        update_ratio,
     )
 
 
-def train_batches(
-    state: BenchmarkState,
-    num_batches: int,
-) -> dict[str, float]:
-    """Run one representative regularization cycle at 128x128."""
-    starting_step = state.global_step
-    if state.model_name in {"progan", "stylegan"}:
-        phase = ProgressivePhase(
-            resolution=RESOLUTION,
-            name="stabilization",
-            batch_size=state.batch_size,
-            num_batches=num_batches,
+def make_real_batch_source(args, device, batch_size):
+    """Use prepared Imagenette when requested, otherwise deterministic noise."""
+    if args.data_dir is None:
+        random_generator = torch.Generator(device=device).manual_seed(args.seed)
+
+        def synthetic_batch():
+            images = (
+                torch.rand(
+                    batch_size,
+                    3,
+                    128,
+                    128,
+                    device=device,
+                    generator=random_generator,
+                )
+                .mul_(2)
+                .sub_(1)
+            )
+            labels = torch.randint(
+                NUM_CLASSES,
+                (batch_size,),
+                device=device,
+                generator=random_generator,
+            )
+            return images, labels
+
+        return synthetic_batch
+
+    loader = make_imagenette_loader(
+        args.data_dir,
+        batch_size,
+        device,
+        dequantize=args.model == "sn_gan",
+        num_workers=args.num_workers,
+        preprocessed=True,
+    )
+    iterator = iter(loader)
+
+    def imagenette_batch():
+        nonlocal iterator
+        try:
+            images, labels = next(iterator)
+        except StopIteration:
+            iterator = iter(loader)
+            images, labels = next(iterator)
+        return (
+            images.to(device, non_blocking=True),
+            labels.to(device, non_blocking=True),
         )
-        metrics, state.global_step = state.lesson["train_phase"](
-            state.generator,
-            state.discriminator,
-            state.run.data,
-            state.optimizer_g,
-            state.optimizer_d,
-            state.averaged_generator,
-            phase,
-            state.precision,
-            state.global_step,
-            state.lesson["D_REG_EVERY"],
-            state.lesson["REG_BATCH_SHRINK"],
+
+    return imagenette_batch
+
+
+def benchmark(args):
+    """Run warmup and timed optimization steps, then return JSON-ready data."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable.")
+    device = torch.device(args.device)
+    torch.cuda.set_device(device)
+    gpu_name = torch.cuda.get_device_name(device)
+    if not args.allow_other_gpu and "RTX 5090" not in gpu_name.upper():
+        raise RuntimeError(f"Expected an RTX 5090, found {gpu_name!r}.")
+    configure_device(device)
+    precision = resolve_training_precision(device, args.precision)
+    batch_size = args.batch_size or MODEL_DEFAULT_BATCH_SIZES[args.model]
+    torch.manual_seed(args.seed)
+
+    (
+        generator,
+        discriminator,
+        averaged_generator,
+        optimizer_g,
+        optimizer_d,
+        z_dim,
+        update_ratio,
+    ) = build_model(args.model, device, args.base_channels)
+    next_real_batch = make_real_batch_source(args, device, batch_size)
+    last_loss_tensors = {}
+    discriminator_steps = 0
+    generator_steps = 0
+
+    def train_step():
+        nonlocal discriminator_steps, generator_steps, last_loss_tensors
+        real, labels = next_real_batch()
+        current_batch_size = real.shape[0]
+        optimizer_d.zero_grad(set_to_none=True)
+        with precision.autocast():
+            noise = torch.randn(current_batch_size, z_dim, device=device)
+            fake_labels = torch.randint(
+                NUM_CLASSES,
+                (current_batch_size,),
+                device=device,
+            )
+            with torch.no_grad():
+                fake = generator(noise, fake_labels)
+            loss_d = discriminator_hinge_loss(
+                discriminator(real, labels),
+                discriminator(fake, fake_labels),
+            )
+        precision.backward_step(loss_d, optimizer_d)
+        discriminator_steps += 1
+        last_loss_tensors["discriminator"] = loss_d.detach()
+
+        if discriminator_steps % update_ratio == 0:
+            optimizer_g.zero_grad(set_to_none=True)
+            sampled_labels = torch.randint(
+                NUM_CLASSES,
+                (current_batch_size,),
+                device=device,
+            )
+            noise = torch.randn(current_batch_size, z_dim, device=device)
+            discriminator.requires_grad_(False)
+            try:
+                with precision.autocast():
+                    fake = generator(noise, sampled_labels)
+                    adversarial = generator_hinge_loss(
+                        discriminator(fake, sampled_labels)
+                    )
+                regularization = adversarial.new_zeros(())
+                if args.model == "biggan":
+                    regularization = modified_orthogonal_regularization(
+                        generator,
+                        strength=1e-4,
+                    )
+                loss_g = adversarial.float() + regularization
+                precision.backward_step(loss_g, optimizer_g)
+                if averaged_generator is not None:
+                    update_ema(
+                        averaged_generator,
+                        generator,
+                        decay=0.9999,
+                    )
+            finally:
+                discriminator.requires_grad_(True)
+            generator_steps += 1
+            last_loss_tensors.update(
+                generator=loss_g.detach(),
+                generator_adversarial=adversarial.detach(),
+                generator_regularization=regularization.detach(),
+            )
+
+    for _ in range(args.warmup_steps):
+        train_step()
+    torch.cuda.synchronize(device)
+    torch.cuda.reset_peak_memory_stats(device)
+    timed_start_d = discriminator_steps
+    timed_start_g = generator_steps
+    start = time.perf_counter()
+    for _ in range(args.steps):
+        train_step()
+    torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - start
+    if generator_steps == 0:
+        raise ValueError(
+            "warmup-steps plus steps must reach one generator update for "
+            f"the {update_ratio}:1 schedule."
         )
-    else:
-        epoch = state.lesson["TrainingEpoch"](
-            num_batches=num_batches,
-            num_images=num_batches * state.batch_size,
-            final_batch_size=state.batch_size,
+    last_losses = {name: float(value) for name, value in last_loss_tensors.items()}
+    if not all(math.isfinite(value) for value in last_losses.values()):
+        raise FloatingPointError(f"Non-finite loss: {last_losses}")
+
+    result = {
+        "model": args.model,
+        "gpu": gpu_name,
+        "precision": precision.name,
+        "base_channels": args.base_channels,
+        "batch_size": batch_size,
+        "resolution": 128,
+        "warmup_steps": args.warmup_steps,
+        "timed_discriminator_steps": discriminator_steps - timed_start_d,
+        "timed_generator_steps": generator_steps - timed_start_g,
+        "total_generator_steps": generator_steps,
+        "seconds": elapsed,
+        "images_per_second": args.steps * batch_size / elapsed,
+        "peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30,
+        "peak_reserved_gib": torch.cuda.max_memory_reserved(device) / 2**30,
+        "losses": last_losses,
+        "data": "imagenette-128" if args.data_dir is not None else "synthetic",
+    }
+    if args.json_output is not None:
+        args.json_output.parent.mkdir(parents=True, exist_ok=True)
+        args.json_output.write_text(
+            json.dumps(result, indent=2) + "\n",
+            encoding="utf-8",
         )
-        metrics, state.path_mean, state.global_step = state.lesson["train_epoch"](
-            state.generator,
-            state.discriminator,
-            state.run.data,
-            state.optimizer_g,
-            state.optimizer_d,
-            state.averaged_generator,
-            state.path_mean,
-            state.global_step,
-            epoch,
-            state.batch_size,
-            state.precision,
-            state.lesson["R1_BATCH_SHRINK"],
-            state.lesson["PATH_BATCH_SHRINK"],
-        )
-    if state.global_step != starting_step + num_batches:
-        raise RuntimeError("benchmark completed an unexpected number of steps.")
-    validate_metrics(metrics)
-    return metrics
+    return result
 
 
-def write_result(
-    path: Path,
-    state: BenchmarkState,
-    args: argparse.Namespace,
-    elapsed_seconds: float,
-) -> None:
-    """Write one machine-readable TSV row for the shell orchestrator."""
-    timed_images = state.batch_size * args.batches
-    images_per_second = timed_images / elapsed_seconds
-    peak_allocated_gib = torch.cuda.max_memory_allocated(state.run.device) / 2**30
-    peak_reserved_gib = torch.cuda.max_memory_reserved(state.run.device) / 2**30
-    header = (
-        "model",
-        "resolution",
-        "batch_size",
-        "pipeline",
-        "precision",
-        "warmup_batches",
-        "timed_batches",
-        "timed_images",
-        "train_seconds",
-        "images_per_second",
-        "peak_allocated_gib",
-        "peak_reserved_gib",
-    )
-    values = (
-        state.model_name,
-        str(RESOLUTION),
-        str(state.batch_size),
-        state.run.pipeline,
-        state.precision.name,
-        str(args.warmup_batches),
-        str(args.batches),
-        str(timed_images),
-        f"{elapsed_seconds:.6f}",
-        f"{images_per_second:.3f}",
-        f"{peak_allocated_gib:.3f}",
-        f"{peak_reserved_gib:.3f}",
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\t".join(header) + "\n" + "\t".join(values) + "\n",
-        encoding="utf-8",
-    )
-
-
-def main(args: argparse.Namespace) -> None:
-    """Warm the real training path, time it, and report throughput and memory."""
-    state = build_state(args)
-    print(
-        f"model={state.model_name} resolution={RESOLUTION} "
-        f"batch={state.batch_size} precision={state.precision.name} "
-        f"pipeline={state.run.pipeline}"
-    )
-    if args.warmup_batches:
-        print(f"warmup_batches={args.warmup_batches}")
-        train_batches(state, args.warmup_batches)
-
-    torch.cuda.synchronize(state.run.device)
-    torch.cuda.reset_peak_memory_stats(state.run.device)
-    start_time = time.perf_counter()
-    metrics = train_batches(state, args.batches)
-    torch.cuda.synchronize(state.run.device)
-    elapsed_seconds = time.perf_counter() - start_time
-    if elapsed_seconds <= 0:
-        raise RuntimeError("benchmark timer returned a non-positive duration.")
-    validate_finite_gan_state(
-        {
-            "generator": state.generator,
-            "discriminator": state.discriminator,
-            "averaged_generator": state.averaged_generator,
-        },
-        {
-            "generator": state.optimizer_g,
-            "discriminator": state.optimizer_d,
-        },
-        extra_tensors={"path_mean": state.path_mean},
-    )
-    write_result(args.result_file, state, args, elapsed_seconds)
-
-    metric_summary = " ".join(f"{name}={value:.6g}" for name, value in metrics.items())
-    validate_metrics(metrics)
-    print(
-        f"timed_batches={args.batches} "
-        f"train_seconds={elapsed_seconds:.3f} "
-        f"images_per_second={state.batch_size * args.batches / elapsed_seconds:.3f}"
-    )
-    print(f"metrics {metric_summary}")
-    print("metrics_finite=true")
-    print("nonfinite_metrics=none")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Run a short, full-training-load 128x128 precision benchmark for one GAN."
-        )
-    )
-    parser.add_argument("model", choices=tuple(LESSON_FILES))
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--precision",
-        choices=("bf16", "tf32", "fp32"),
-        default="bf16",
+        "--model",
+        choices=tuple(MODEL_DEFAULT_BATCH_SIZES),
+        required=True,
     )
-    parser.add_argument("--batches", type=positive_int, default=16)
-    parser.add_argument("--warmup-batches", type=non_negative_int, default=1)
-    batch_group = parser.add_mutually_exclusive_group()
-    batch_group.add_argument("--batch-scale", type=positive_int, default=1)
-    batch_group.add_argument("--batch-size", type=positive_int)
-    parser.add_argument("--num-workers", type=non_negative_int, default=4)
-    parser.add_argument("--prefetch-factor", type=positive_int, default=2)
+    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--warmup-steps", type=int, default=5)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--base-channels", type=int, default=64)
+    parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--data-dir", type=Path)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--json-output", type=Path)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--data-pipeline",
-        choices=("auto", "cuda", "cpu"),
-        default="auto",
+        "--allow-other-gpu",
+        action="store_true",
+        help="permit development checks on a CUDA GPU other than RTX 5090",
     )
-    parser.add_argument("--result-file", type=Path, required=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    positive_values = [args.steps, args.base_channels]
+    if args.batch_size is not None:
+        positive_values.append(args.batch_size)
+    if min(positive_values) < 1 or args.warmup_steps < 0:
+        parser.error("steps, batch-size, and channels must be positive")
+    if args.num_workers < 0:
+        parser.error("num-workers must be non-negative")
+    return args
 
 
 if __name__ == "__main__":
-    main(parse_args())
+    print(json.dumps(benchmark(parse_args()), indent=2))

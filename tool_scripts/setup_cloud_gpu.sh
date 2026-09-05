@@ -15,32 +15,31 @@ usage() {
     cat <<'EOF'
 Usage: bash tool_scripts/setup_cloud_gpu.sh [options]
 
-Prepare the locked BF16 project environment on an Ubuntu x86_64 cloud GPU host.
-The script is idempotent and does not install NVIDIA drivers, CUDA Toolkit,
-Codex, datasets, or editor extensions.
+Prepare the repository's locked environment on an Ubuntu x86_64 RTX 5090
+cloud host. The script does not install NVIDIA drivers, the CUDA Toolkit,
+datasets, Codex, or editor extensions.
 
 Options:
-  --profile PROFILE          core (default), celeba, examples, or full
+  --profile PROFILE          core (default), examples, or full
   --state-dir PATH           Persistent uv/Python cache directory
-  --skip-system-packages     Do not install missing curl/git/tmux
-  --skip-gpu-check           Allow setup without a visible compatible GPU
-  --dry-run                  Validate inputs and print the planned actions
+  --skip-system-packages     Do not install missing curl/git/rsync/tmux
+  --skip-gpu-check           Permit setup without a visible RTX 5090
+  --dry-run                  Validate inputs and print planned actions
   -h, --help                 Show this help
 
 Profiles:
-  core       Base dependencies, including PyTorch and torchvision
-  celeba     Core plus kagglehub, without development tools
+  core       Base runtime dependencies only
   examples   Core plus the optional examples dependencies
-  full       Every optional dependency, including examples and tests
+  full       Every optional dependency and development/test tools
 EOF
 }
 
 log() {
-    printf '[cloud-gpu-setup] %s\n' "$*"
+    printf '[rtx5090-setup] %s\n' "$*"
 }
 
 die() {
-    printf '[cloud-gpu-setup] ERROR: %s\n' "$*" >&2
+    printf '[rtx5090-setup] ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -72,22 +71,15 @@ while (($# > 0)); do
             usage
             exit 0
             ;;
-        *)
-            die "unknown option: $1"
-            ;;
+        *) die "unknown option: $1" ;;
     esac
 done
 
 case "$profile" in
-    core|celeba|examples|full) ;;
-    *) die "profile must be one of: core, celeba, examples, full" ;;
+    core|examples|full) ;;
+    *) die "profile must be one of: core, examples, full" ;;
 esac
-
-case "$state_dir" in
-    /*) ;;
-    *) state_dir="$PROJECT_ROOT/$state_dir" ;;
-esac
-
+[[ "$state_dir" == /* ]] || state_dir="$PROJECT_ROOT/$state_dir"
 [[ "$(uname -s)" == "Linux" ]] || die "Linux is required"
 [[ "$(uname -m)" == "x86_64" ]] || die "x86_64 is required"
 [[ -f "$PROJECT_ROOT/pyproject.toml" ]] || die "pyproject.toml not found"
@@ -98,21 +90,16 @@ if [[ "$skip_gpu_check" == false ]]; then
     command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
     gpu_summary="$(nvidia-smi \
         --query-gpu=name,memory.total,driver_version \
-        --format=csv,noheader)" || die "nvidia-smi failed"
-    driver_version="$(nvidia-smi \
-        --query-gpu=driver_version \
         --format=csv,noheader | head -n 1)"
-    driver_version="${driver_version//[[:space:]]/}"
-    driver_major="${driver_version%%.*}"
-    [[ "$driver_major" =~ ^[0-9]+$ ]] || die "cannot parse NVIDIA driver version"
-    ((driver_major >= 580)) || die "NVIDIA driver 580 or newer is required"
+    [[ "${gpu_summary^^}" == *"RTX 5090"* ]] || \
+        die "expected RTX 5090, found: $gpu_summary"
     log "GPU preflight passed: $gpu_summary"
 else
     log "GPU preflight skipped"
 fi
 
 missing_packages=()
-for command_package in curl:curl git:git tmux:tmux; do
+for command_package in curl:curl git:git rsync:rsync tmux:tmux; do
     command_name="${command_package%%:*}"
     package_name="${command_package##*:}"
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -121,20 +108,18 @@ for command_package in curl:curl git:git tmux:tmux; do
 done
 
 if ((${#missing_packages[@]} > 0)); then
-    if [[ "$skip_system_packages" == true ]]; then
-        die "missing commands and system package installation is disabled: ${missing_packages[*]}"
-    fi
-    command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install: ${missing_packages[*]}"
-
+    [[ "$skip_system_packages" == false ]] || \
+        die "missing commands: ${missing_packages[*]}"
+    command -v apt-get >/dev/null 2>&1 || \
+        die "apt-get is required to install: ${missing_packages[*]}"
     if ((EUID == 0)); then
         privilege=()
     else
-        command -v sudo >/dev/null 2>&1 || die "sudo is required to install system packages"
+        command -v sudo >/dev/null 2>&1 || die "sudo is required"
         privilege=(sudo)
     fi
-
     if [[ "$dry_run" == true ]]; then
-        log "would install system packages: ca-certificates ${missing_packages[*]}"
+        log "would install: ca-certificates ${missing_packages[*]}"
     else
         "${privilege[@]}" apt-get update
         "${privilege[@]}" env DEBIAN_FRONTEND=noninteractive \
@@ -144,20 +129,16 @@ else
     log "required system commands are already available"
 fi
 
-python_version=""
 IFS= read -r python_version < "$PROJECT_ROOT/.python-version"
 python_version="${python_version//[[:space:]]/}"
 [[ -n "$python_version" ]] || die ".python-version is empty"
-
 log "project: $PROJECT_ROOT"
 log "profile: $profile"
 log "persistent state: $state_dir"
 log "Python: $python_version"
 
 if [[ "$dry_run" == true ]]; then
-    log "would install uv if needed"
-    log "would run uv python install and uv sync --locked for profile '$profile'"
-    log "dry run completed"
+    log "would install uv if absent, install Python, and sync the lock"
     exit 0
 fi
 
@@ -165,34 +146,27 @@ mkdir -p "$state_dir/uv-cache" "$state_dir/uv-python"
 export UV_CACHE_DIR="$state_dir/uv-cache"
 export UV_PYTHON_INSTALL_DIR="$state_dir/uv-python"
 export PATH="$HOME/.local/bin:$PATH"
-
 if ! command -v uv >/dev/null 2>&1; then
     log "installing uv"
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$PATH"
 fi
-command -v uv >/dev/null 2>&1 || die "uv installation did not provide an executable"
+command -v uv >/dev/null 2>&1 || die "uv installation failed"
 
-log "using $(uv --version)"
 cd "$PROJECT_ROOT"
 uv python install "$python_version"
-
 sync_args=(sync --locked)
 case "$profile" in
-    core) ;;
-    celeba) sync_args+=(--no-dev --extra celeba) ;;
+    core) sync_args+=(--no-dev) ;;
     examples) sync_args+=(--extra examples) ;;
     full) sync_args+=(--all-extras) ;;
 esac
-
-start_seconds=$SECONDS
 uv "${sync_args[@]}"
-log "environment sync finished in $((SECONDS - start_seconds)) seconds"
 
 if [[ "$skip_gpu_check" == false ]]; then
     uv run --locked --no-sync python -c \
-        'import torch; assert torch.cuda.is_available(), "CUDA unavailable"; name = torch.cuda.get_device_name(0); capability = torch.cuda.get_device_capability(0); bf16 = torch.cuda.is_bf16_supported(); assert bf16, "the selected GPU or PyTorch build does not support BF16"; print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPU {name}; SM {capability[0]}.{capability[1]}; BF16 {bf16}")'
+        'import torch; assert torch.cuda.is_available(), "CUDA unavailable"; assert torch.cuda.is_bf16_supported(), "BF16 unavailable"; name=torch.cuda.get_device_name(0); assert "RTX 5090" in name.upper(), name; print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPU {name}; BF16=True")'
 fi
 
 log "setup completed"
-log "next: prepare data/celeba, then run 'bash tool_scripts/cloud_gan.sh smoke'"
+log "next: run 'bash tool_scripts/cloud_gan.sh smoke'"

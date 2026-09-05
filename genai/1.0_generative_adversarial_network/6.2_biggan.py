@@ -1,297 +1,178 @@
-"""Train a compact, paper-oriented BigGAN on CIFAR-10.
+"""Train a 64-channel BigGAN on Imagenette at 128x128.
 
-This lesson keeps SAGAN's class-conditional ResNet, self-attention, spectral
-normalization, projection discriminator, and hinge objective.  It then makes
-the main BigGAN additions that remain meaningful at 32x32:
-    - one class embedding shared by every generator block;
-    - hierarchical latent chunks (skip-z) in conditional BatchNorm;
-    - orthogonal initialization of G/D and modified orthogonal regularization;
-    - two D updates per G update with BigGAN's Adam/TTUR settings;
-    - an exponential moving average of G for monitoring and final sampling.
-
-The ImageNet-scale batch, channel widths, cross-replica BatchNorm, and standing
-statistics are deliberately omitted.  Normal CIFAR-10 BatchNorm running
-statistics are copied into the EMA model instead.  A truncated-normal helper
-remains available for optional sampling experiments, while the shared lesson
-evaluation stays focused on real-versus-generated comparisons.
+This lesson keeps SAGAN's conditional ResNet, attention, spectral
+normalization, projection discriminator, and hinge loss, then adds BigGAN's
+shared class embedding, six-way hierarchical ``z=120``, orthogonal
+initialization, modified orthogonal regularization, two D updates per G
+update, and a ``0.9999`` generator EMA. Adam uses the paper's ``G=5e-5``,
+``D=2e-4``, and ``beta=(0, 0.999)`` settings. The 64-channel baseline and
+batch 8 are deliberate single-RTX-5090 choices. The 20-epoch default is a
+teaching-scale Imagenette budget; larger distributed training details are not
+silently approximated.
 
 Data:
-    data/cifar10, prepared by tool_scripts/download_dataset.py.
+    data/imagenette-128/train/<WNID>/*.JPEG, prepared explicitly with
+    tool_scripts/download_dataset.py --dataset imagenette.
 
 Outputs:
-    Fresh runs reset training/ and checkpoints/ before setup; --resume-from
-    preserves both directories.
-    output/gan/biggan/training/epoch_*.png: fixed-z EMA samples by class
-    output/gan/biggan/checkpoints/latest.pth: full recoverable training state
-    output/gan/biggan/checkpoints/epoch_*.pth: sparse full-state archives
-    output/gan/biggan/generator.pth: final EMA generator and configuration
-    output/gan/biggan/online_generator.pth: final non-averaged generator
-    output/gan/biggan/discriminator.pth: final discriminator and configuration
-    output/gan/biggan/loss_curves.png: adversarial and regularization losses
-
-Resume an interrupted run:
-    python genai/1.0_generative_adversarial_network/6.2_biggan.py \
-        --resume-from output/gan/biggan/checkpoints/latest.pth
-
-Training data -- CIFAR-10:
-Training images:         50,000
-Samples per epoch:       49,984 (781 full batches; drop_last=True)
-Training epochs:         200
-Optimizer updates:       156,200 D / 78,100 G (exactly 2:1)
-
-Default image sizes:
-Training input:          32x32 RGB
-Generated image:         32x32 RGB
-
-Generator:                3.22 M params (plus one EMA copy)
-Discriminator:            1.08 M params
-Trainable total:          4.30 M params
+    Fresh runs replace the biggan output directory; --resume-from preserves it.
+    output/gan/biggan/{training,checkpoints,generator.pth,
+    online_generator.pth,discriminator.pth,loss_curves.png}. The final
+    generator.pth contains EMA weights. Set DL_OUTPUT_ROOT to relocate all
+    model directories together on a cloud volume.
 """
 
 import argparse
+import os
 from copy import deepcopy
 from pathlib import Path
+from typing import cast
 
-import torch
+from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
-from dl_utils.data.cifar10 import (
-    make_cifar10_loader,
-    normalized_cifar10_transform,
+from dl_utils.data.imagenette import (
+    IMAGENETTE_CLASS_NAMES,
+    make_imagenette_loader,
 )
-from dl_utils.runtime.devices import try_gpu
-from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.biggan import (
     BigGANDiscriminator,
-    CompactBigGANGenerator,
+    BigGANGenerator,
     initialize_orthogonal_weights,
     modified_orthogonal_regularization,
 )
-from dl_utils.gan.sagan import (
-    CIFAR10_CLASS_NAMES,
-    make_fixed_class_latent_grid,
-)
-from dl_utils.gan.sn_gan import (
-    discriminator_hinge_loss,
-    generator_hinge_loss,
-)
+from dl_utils.gan.conditional_training import train_conditional_hinge_epoch
+from dl_utils.gan.sagan import make_fixed_class_latent_grid
 from dl_utils.plot.figures import save_loss_panels
 from dl_utils.plot.images import save_training_samples
-from dl_utils.training.metrics import MetricAccumulator
+from dl_utils.runtime.devices import try_gpu
+from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.accelerator import (
+    configure_device,
+    make_fused_adam,
+    resolve_training_precision,
+)
 from dl_utils.training.optimization import UpdateRatioSchedule, update_ema
 from dl_utils.training.session import TrainingSession
 
-
 PROJECT_ROOT = infer_project_root()
-DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
-OUT_DIR = PROJECT_ROOT / "output" / "gan" / "biggan"
-TRAINING_DIR = OUT_DIR / "training"
-CHECKPOINT_DIR = OUT_DIR / "checkpoints"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
+DEFAULT_OUTPUT_ROOT = Path(
+    os.environ.get("DL_OUTPUT_ROOT", PROJECT_ROOT / "output" / "gan")
+)
 
-NUM_EPOCHS = 200
-BATCH_SIZE = 64
+NUM_EPOCHS = 20
+BATCH_SIZE = 8
 NUM_WORKERS = 8
 NUM_CLASSES = 10
-SAMPLES_PER_CLASS = 8
-Z_DIM = 128
-GENERATOR_BASE_CHANNELS = 64
-DISCRIMINATOR_BASE_CHANNELS = 128
+Z_DIM = 120
+BASE_CHANNELS = 64
 CLASS_EMBEDDING_DIM = 128
+IMAGE_SIZE = 128
+ATTENTION_RESOLUTION = 64
 GENERATOR_LR = 5e-5
 DISCRIMINATOR_LR = 2e-4
 DISCRIMINATOR_UPDATES_PER_GENERATOR = 2
 ORTHOGONAL_REGULARIZATION_STRENGTH = 1e-4
 EMA_DECAY = 0.9999
-SAMPLES_TO_DISPLAY = NUM_CLASSES * SAMPLES_PER_CLASS
-SAMPLE_EVERY_EPOCHS = 5
-CHECKPOINT_EVERY_EPOCHS = 5
-ARCHIVE_EVERY_EPOCHS = 25
+DISPLAY_CLASS_INDICES = tuple(range(NUM_CLASSES))
+SAMPLES_PER_CLASS = 4
+SAMPLE_EVERY_EPOCHS = 1
+CHECKPOINT_EVERY_EPOCHS = 1
+ARCHIVE_EVERY_EPOCHS = 5
 SEED = 42
+FORMAT_VERSION = 10
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
     "num_classes": NUM_CLASSES,
-    "base_channels": GENERATOR_BASE_CHANNELS,
+    "base_channels": BASE_CHANNELS,
     "class_embedding_dim": CLASS_EMBEDDING_DIM,
+    "image_size": IMAGE_SIZE,
+    "attention_resolution": ATTENTION_RESOLUTION,
 }
-
 DISCRIMINATOR_CONFIG = {
     "num_classes": NUM_CLASSES,
-    "base_channels": DISCRIMINATOR_BASE_CHANNELS,
+    "base_channels": BASE_CHANNELS,
+    "image_size": IMAGE_SIZE,
+    "attention_resolution": ATTENTION_RESOLUTION,
 }
 
 
-def train_epoch(
-    generator,
-    discriminator,
-    loader,
-    opt_g,
-    opt_d,
-    averaged_generator,
-    device,
-    discriminator_steps,
-    progress_bar=None,
-    update_schedule=None,
-):
-    """Train one epoch while preserving BigGAN's exact two-to-one phase."""
-    if discriminator_steps < 0:
-        raise ValueError("discriminator_steps must be non-negative.")
-    if update_schedule is None:
-        update_schedule = UpdateRatioSchedule(
-            DISCRIMINATOR_UPDATES_PER_GENERATOR,
-            len(loader),
-            NUM_EPOCHS,
-        )
-    discriminator_metrics = MetricAccumulator(
-        ("loss",),
-        device=device,
-    )
-    generator_metrics = MetricAccumulator(
-        ("total", "adversarial", "regularization"),
-        device=device,
-    )
-
-    for real, labels in loader:
-        real = real.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-        batch_size = real.shape[0]
-
-        noise = torch.randn(batch_size, Z_DIM, device=device)  # (B, Z_DIM)
-        with torch.no_grad():
-            fake = generator(noise, labels)
-        real_scores = discriminator(real, labels)
-        fake_scores = discriminator(fake, labels)
-        loss_d = discriminator_hinge_loss(real_scores, fake_scores)
-        opt_d.zero_grad(set_to_none=True)
-        loss_d.backward()
-        opt_d.step()
-
-        discriminator_metrics.update((loss_d,), num_examples=batch_size)
-        discriminator_steps += 1
-
-        should_update_generator = update_schedule.generator_due(
-            discriminator_steps
-        )
-        if should_update_generator:
-            sampled_labels = torch.randint(
-                NUM_CLASSES,
-                (batch_size,),
-                device=device,
-            )
-            noise = torch.randn(batch_size, Z_DIM, device=device)
-            discriminator.requires_grad_(False)
-            try:
-                opt_g.zero_grad(set_to_none=True)
-                fake = generator(noise, sampled_labels)
-                loss_g_adversarial = generator_hinge_loss(
-                    discriminator(fake, sampled_labels)
-                )
-                loss_g_regularization = modified_orthogonal_regularization(
-                    generator,
-                    strength=ORTHOGONAL_REGULARIZATION_STRENGTH,
-                )
-                loss_g_total = loss_g_adversarial + loss_g_regularization
-                loss_g_total.backward()
-                opt_g.step()
-                # Parameters are interpolated while BatchNorm buffers are
-                # synchronized directly with the online generator.
-                update_ema(
-                    averaged_generator,
-                    generator,
-                    decay=EMA_DECAY,
-                )
-            finally:
-                discriminator.requires_grad_(True)
-
-            generator_metrics.update(
-                (
-                    loss_g_total,
-                    loss_g_adversarial,
-                    loss_g_regularization,
-                ),
-                num_examples=batch_size,
-            )
-
-        if progress_bar is not None:
-            progress_bar.update(1)
-
-    generator_losses = generator_metrics.compute()
-    return (
-        discriminator_metrics.compute()["loss"],
-        generator_losses["total"],
-        generator_losses["adversarial"],
-        generator_losses["regularization"],
-        discriminator_steps,
-    )
-
-
-def main(resume_from=None):
-    if resume_from is None:
-        reset_dir(str(TRAINING_DIR))
-        reset_dir(str(CHECKPOINT_DIR))
-
-    if not (DATA_DIR / "cifar-10-batches-py").is_dir():
-        raise FileNotFoundError(
-            f"CIFAR-10 data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset.py first."
-        )
+def main(args):
+    output_dir = args.output_root / "biggan"
+    training_dir = output_dir / "training"
+    checkpoint_dir = output_dir / "checkpoints"
+    if args.resume_from is None:
+        reset_dir(str(output_dir))
+    training_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     set_seed(SEED)
     device = try_gpu()
-    loader = make_cifar10_loader(
-        DATA_DIR,
-        BATCH_SIZE,
+    configure_device(device)
+    precision = resolve_training_precision(device, args.precision)
+    loader = make_imagenette_loader(
+        args.data_dir,
+        args.batch_size,
         device,
-        train=True,
-        transform=normalized_cifar10_transform(horizontal_flip=True),
-        num_workers=NUM_WORKERS,
+        horizontal_flip=False,
+        num_workers=args.num_workers,
+        preprocessed=True,
     )
     update_schedule = UpdateRatioSchedule(
         DISCRIMINATOR_UPDATES_PER_GENERATOR,
         len(loader),
-        NUM_EPOCHS,
+        args.epochs,
     )
 
-    generator = CompactBigGANGenerator(**MODEL_CONFIG).to(device)
+    generator = BigGANGenerator(**MODEL_CONFIG).to(device)
     discriminator = BigGANDiscriminator(**DISCRIMINATOR_CONFIG).to(device)
     generator.apply(initialize_orthogonal_weights)
     discriminator.apply(initialize_orthogonal_weights)
     averaged_generator = deepcopy(generator).eval().requires_grad_(False)
-
-    opt_g = torch.optim.Adam(
+    optimizer_g = make_fused_adam(
         generator.parameters(),
+        device=device,
         lr=GENERATOR_LR,
         betas=(0.0, 0.999),
     )
-    opt_d = torch.optim.Adam(
+    optimizer_d = make_fused_adam(
         discriminator.parameters(),
+        device=device,
         lr=DISCRIMINATOR_LR,
         betas=(0.0, 0.999),
     )
 
+    run_metadata = {
+        "format_version": FORMAT_VERSION,
+        "dataset": "imagenette-128",
+        "image_size": IMAGE_SIZE,
+        "conditioning": "class_conditional",
+        "discriminator_conditioning": "projection",
+        "precision": precision.name,
+        "batch_size": args.batch_size,
+        "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,
+        "ema_decay": EMA_DECAY,
+        "orthogonal_regularization_strength": (ORTHOGONAL_REGULARIZATION_STRENGTH),
+    }
     session = TrainingSession(
-        OUT_DIR,
-        total_epochs=NUM_EPOCHS,
+        output_dir,
+        total_epochs=args.epochs,
         models={
             "online_generator": generator,
             "generator": averaged_generator,
             "discriminator": discriminator,
         },
-        optimizers={"generator": opt_g, "discriminator": opt_d},
+        optimizers={
+            "generator": optimizer_g,
+            "discriminator": optimizer_d,
+        },
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
-        metadata={
-            "format_version": 7,
-            "conditioning": "class_conditional",
-            "discriminator_conditioning": "projection",
-            "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,
-            "ema_decay": EMA_DECAY,
-            "orthogonal_regularization_strength": (
-                ORTHOGONAL_REGULARIZATION_STRENGTH
-            ),
-        },
+        metadata=run_metadata,
         model_metadata={
             "online_generator": {
                 "model_name": "biggan_online_generator",
@@ -310,13 +191,13 @@ def main(resume_from=None):
         },
     )
     fixed_noise, fixed_labels = make_fixed_class_latent_grid(
-        NUM_CLASSES,
+        DISPLAY_CLASS_INDICES,
         SAMPLES_PER_CLASS,
         Z_DIM,
         device,
     )
     start_epoch, state = session.start(
-        resume_from,
+        args.resume_from,
         reset_output_dir=False,
         initial_state={
             "loss_history": {
@@ -335,74 +216,72 @@ def main(resume_from=None):
     fixed_noise = state["fixed_noise"].to(device)
     fixed_labels = state["fixed_labels"].to(device)
     discriminator_steps = state["discriminator_steps"]
-
-    planned_discriminator_updates = (
-        update_schedule.total_discriminator_updates
-    )
-    planned_generator_updates = update_schedule.total_generator_updates
-    expected_steps = update_schedule.completed_discriminator_updates(
-        start_epoch - 1
-    )
+    expected_steps = update_schedule.completed_discriminator_updates(start_epoch - 1)
     if discriminator_steps != expected_steps:
         raise ValueError("Checkpoint discriminator step count is inconsistent.")
     if loss_history["epoch"] != list(range(1, start_epoch)):
         raise ValueError("Checkpoint loss history does not match its epoch.")
-    expected_shape = (SAMPLES_TO_DISPLAY, Z_DIM)
-    if tuple(fixed_noise.shape) != expected_shape:
-        raise ValueError("Checkpoint fixed noise has an unexpected shape.")
-    if tuple(fixed_labels.shape) != (SAMPLES_TO_DISPLAY,):
-        raise ValueError("Checkpoint fixed labels have an unexpected shape.")
-    if fixed_labels.dtype != torch.long:
-        raise ValueError("Checkpoint fixed labels must use torch.long.")
-    if resume_from is not None:
-        print(f"Resumed training from epoch {start_epoch - 1}: {resume_from}")
 
+    dataset = cast(ImageFolder, loader.dataset)
+    class_names = [
+        IMAGENETTE_CLASS_NAMES[dataset.classes[index]]
+        for index in DISPLAY_CLASS_INDICES
+    ]
+    planned_d_steps = update_schedule.total_discriminator_updates
+    planned_g_steps = update_schedule.total_generator_updates
     print(
-        "Planned optimizer updates: "
-        f"D={planned_discriminator_updates:,}, "
-        f"G={planned_generator_updates:,} "
-        f"(exactly {DISCRIMINATOR_UPDATES_PER_GENERATOR}:1)"
+        f"Device={device}; precision={precision.name}; "
+        f"Imagenette batches/epoch={len(loader):,}"
     )
+    print(
+        f"Planned optimizer updates: D={planned_d_steps:,}, "
+        f"G={planned_g_steps:,} ({DISCRIMINATOR_UPDATES_PER_GENERATOR}:1)"
+    )
+
     with tqdm(
-        total=planned_discriminator_updates,
+        total=planned_d_steps,
         initial=discriminator_steps,
-        desc=f"Epoch {min(start_epoch, NUM_EPOCHS)}/{NUM_EPOCHS}",
+        desc=f"Epoch {min(start_epoch, args.epochs)}/{args.epochs}",
         unit="batch",
         dynamic_ncols=True,
         mininterval=1.0,
     ) as progress_bar:
-        for epoch in range(start_epoch, NUM_EPOCHS + 1):
+        for epoch in range(start_epoch, args.epochs + 1):
             progress_bar.set_description(
-                f"Epoch {epoch}/{NUM_EPOCHS}",
+                f"Epoch {epoch}/{args.epochs}",
                 refresh=False,
             )
-
-            (
-                loss_d,
-                loss_g_total,
-                loss_g_adversarial,
-                loss_g_regularization,
-                discriminator_steps,
-            ) = train_epoch(
+            result = train_conditional_hinge_epoch(
                 generator,
                 discriminator,
                 loader,
-                opt_g,
-                opt_d,
-                averaged_generator,
+                optimizer_g,
+                optimizer_d,
                 device,
-                discriminator_steps,
-                progress_bar=progress_bar,
+                precision,
+                z_dim=Z_DIM,
+                num_classes=NUM_CLASSES,
+                generator_batch_size=args.batch_size,
+                discriminator_steps=discriminator_steps,
                 update_schedule=update_schedule,
+                generator_regularizer=lambda model: modified_orthogonal_regularization(
+                    model,
+                    strength=ORTHOGONAL_REGULARIZATION_STRENGTH,
+                ),
+                after_generator_step=lambda: update_ema(
+                    averaged_generator,
+                    generator,
+                    decay=EMA_DECAY,
+                ),
+                progress_bar=progress_bar,
             )
+            discriminator_steps = result.discriminator_steps
             loss_history["epoch"].append(epoch)
-            loss_history["discriminator"].append(loss_d)
-            loss_history["generator_total"].append(loss_g_total)
-            loss_history["generator_adversarial"].append(
-                loss_g_adversarial
-            )
+            loss_history["discriminator"].append(result.discriminator)
+            loss_history["generator_total"].append(result.generator_total)
+            loss_history["generator_adversarial"].append(result.generator_adversarial)
             loss_history["generator_regularization"].append(
-                loss_g_regularization
+                result.generator_regularization
             )
 
             if epoch == 1 or epoch % SAMPLE_EVERY_EPOCHS == 0:
@@ -410,20 +289,17 @@ def main(resume_from=None):
                     averaged_generator,
                     fixed_noise,
                     fixed_labels,
-                    TRAINING_DIR / f"epoch_{epoch:03d}.png",
-                    class_names=CIFAR10_CLASS_NAMES[:NUM_CLASSES],
-                    title=(
-                        "Compact BigGAN EMA fixed class samples - "
-                        f"epoch {epoch:03d}"
-                    ),
+                    training_dir / f"epoch_{epoch:03d}.png",
+                    class_names=class_names,
+                    class_indices=DISPLAY_CLASS_INDICES,
+                    title=f"BigGAN EMA Imagenette-128 samples - epoch {epoch:03d}",
                     shared_latents_across_classes=True,
+                    inference_batch_size=2,
                 )
 
             state["discriminator_steps"] = discriminator_steps
             session.checkpoint(epoch, state)
 
-    if discriminator_steps != planned_discriminator_updates:
-        raise RuntimeError("Training ended with an unexpected D update count.")
     session.finish()
     save_loss_panels(
         loss_history["epoch"],
@@ -436,23 +312,35 @@ def main(resume_from=None):
                 "G adversarial loss": loss_history["generator_adversarial"],
             },
             "Modified orthogonal regularization": {
-                "G orthogonal penalty": loss_history[
-                    "generator_regularization"
-                ],
+                "G orthogonal penalty": loss_history["generator_regularization"],
             },
         },
-        OUT_DIR / "loss_curves.png",
+        output_dir / "loss_curves.png",
     )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train the class-conditional CIFAR-10 BigGAN."
+        description="Train the Imagenette-128 class-conditional BigGAN."
+    )
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
+    parser.add_argument(
+        "--precision",
+        choices=("auto", "bf16", "fp32"),
+        default="auto",
     )
     parser.add_argument("--resume-from", type=Path, metavar="CHECKPOINT")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if min(args.epochs, args.batch_size) < 1:
+        parser.error("epochs and batch-size must be positive")
+    if args.num_workers < 0:
+        parser.error("num-workers must be non-negative")
+    return args
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(resume_from=args.resume_from)
+    main(parse_args())

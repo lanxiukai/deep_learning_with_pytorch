@@ -1,40 +1,36 @@
-"""Class-conditional SAGAN models and projection-discriminator utilities.
+"""Self-Attention GAN models for class-conditional 128x128 images.
 
-SAGAN is the first lesson in this sequence whose original paper explicitly
-uses conditional BatchNorm in the generator and a projection discriminator.
-Keeping those mechanisms here makes the preceding SN-GAN lesson genuinely
-unconditional while allowing BigGAN to inherit the same conditional baseline.
+SAGAN extends the preceding projection SN-GAN with spectral normalization in
+the generator and a non-local attention block at 32x32. The 64-channel model
+and five-stage 4-to-128 hierarchy follow the public paper implementation.
 """
+
+from collections.abc import Sequence
+from itertools import pairwise
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils import spectral_norm
 
-from dl_utils.gan.sn_gan import SNDiscriminatorResidualBlock
-
-
-CIFAR10_CLASS_NAMES = (
-    "airplane",
-    "automobile",
-    "bird",
-    "cat",
-    "deer",
-    "dog",
-    "frog",
-    "horse",
-    "ship",
-    "truck",
+from dl_utils.gan.sn_gan import (
+    IMAGENETTE_IMAGE_SIZE,
+    IMAGENETTE_NUM_CLASSES,
+    CategoricalConditionalBatchNorm2d,
+    SNDiscriminatorResidualBlock,
+    SNGeneratorResidualBlock,
+    validate_class_labels,
 )
 
 
 def _initialize_sagan_weights(module):
-    """Apply the paper implementation's Xavier/zero-bias initialization."""
-    if isinstance(module, (nn.Conv2d, nn.Linear)):
+    """Apply the public implementation's Xavier/zero-bias initialization."""
+    if isinstance(module, (nn.Conv2d, nn.Linear, nn.Embedding)):
         weight = getattr(module, "weight_orig", module.weight)
         nn.init.xavier_uniform_(weight)
-        if module.bias is not None:
-            nn.init.zeros_(module.bias)
+        bias = getattr(module, "bias", None)
+        if isinstance(bias, torch.Tensor):
+            nn.init.zeros_(bias)
     elif isinstance(module, nn.BatchNorm2d):
         if module.weight is not None:
             nn.init.ones_(module.weight)
@@ -43,14 +39,30 @@ def _initialize_sagan_weights(module):
 
 
 def make_fixed_class_latent_grid(
-    num_classes,
+    class_indices,
     samples_per_class,
     z_dim,
     device,
     *,
     base_noise=None,
 ):
-    """Return labels and latent columns repeated across every class row."""
+    """Repeat fixed latent columns for each requested class index.
+
+    Passing an integer preserves the original convenience API and selects
+    ``range(class_indices)``. A sequence can select a small, spread-out subset
+    of dataset classes for readable sample grids.
+    """
+    if isinstance(class_indices, int):
+        if class_indices < 1:
+            raise ValueError("class_indices must be positive.")
+        selected_classes = tuple(range(class_indices))
+    elif isinstance(class_indices, Sequence):
+        selected_classes = tuple(class_indices)
+        if not selected_classes:
+            raise ValueError("class_indices must not be empty.")
+    else:
+        raise TypeError("class_indices must be an integer or a sequence.")
+
     if base_noise is None:
         base_noise = torch.randn(samples_per_class, z_dim, device=device)
     elif tuple(base_noise.shape) != (samples_per_class, z_dim):
@@ -61,222 +73,222 @@ def make_fixed_class_latent_grid(
     else:
         base_noise = base_noise.to(device)
 
-    labels = torch.arange(num_classes, device=device).repeat_interleave(
-        samples_per_class
-    )  # element-wise consecutive repetition
-    noise = base_noise.repeat(num_classes, 1)  # tensor tiling / repetition
-    # noise:  z₀ z₁ z₂ z₃ | z₀ z₁ z₂ z₃ | z₀ z₁ z₂ z₃
-    # labels:  0  0  0  0 |  1  1  1  1 |  2  2  2  2
-    # B = num_classes * samples_per_class
-    return noise, labels  # noise: (B, z_dim), labels: (B,)
+    classes = torch.tensor(selected_classes, dtype=torch.long, device=device)
+    labels = classes.repeat_interleave(samples_per_class)
+    noise = base_noise.repeat(len(selected_classes), 1)
+    return noise, labels
 
 
 class SelfAttention(nn.Module):
-    """SAGAN non-local attention with pooled keys and values.
-
-    The query keeps the full spatial grid, while the key and value branches
-    are pooled by two. This preserves the paper's non-local interaction while
-    keeping the quadratic attention matrix practical for image features.
-    """
+    """SAGAN non-local attention with pooled keys and values."""
 
     def __init__(self, channels):
         super().__init__()
         key_channels = max(1, channels // 8)
         value_channels = max(1, channels // 2)
-        self.query = spectral_norm(
-            nn.Conv2d(channels, key_channels, 1)
-        )
-        self.key = spectral_norm(
-            nn.Conv2d(channels, key_channels, 1)
-        )
-        self.value = spectral_norm(
-            nn.Conv2d(channels, value_channels, 1)
-        )
-        self.output = spectral_norm(
-            nn.Conv2d(value_channels, channels, 1)
-        )
+        self.query = spectral_norm(nn.Conv2d(channels, key_channels, 1))
+        self.key = spectral_norm(nn.Conv2d(channels, key_channels, 1))
+        self.value = spectral_norm(nn.Conv2d(channels, value_channels, 1))
+        self.output = spectral_norm(nn.Conv2d(value_channels, channels, 1))
         self.gamma = nn.Parameter(torch.zeros(()))
 
     def forward(self, inputs):
         if inputs.ndim != 4:
-            raise ValueError("SelfAttention expects an BCHW tensor.")
+            raise ValueError("SelfAttention expects a BCHW tensor.")
         batch, _, height, width = inputs.shape
         if min(height, width) < 2:
             raise ValueError("SelfAttention needs spatial dimensions >= 2.")
 
-        # (B, C/8, H, W) -> (B, C/8, H×W) -> (B, H×W, C/8)
         query = self.query(inputs).flatten(2).transpose(1, 2)
-        # (B, C/8, H, W) -> (B, C/8, H/2, W/2) -> (B, C/8, H×W/4)
         key = F.max_pool2d(self.key(inputs), 2).flatten(2)
-        # (B, H×W, H×W/4), attention[b, i, :].sum() = 1
         attention = torch.softmax(query @ key, dim=-1)
-
-        # (B, C/2, H, W) -> (B, C/2, H/2, W/2) -> (B, C/2, H×W/4)
         value = F.max_pool2d(self.value(inputs), 2).flatten(2)
-        attended = value @ attention.transpose(1, 2)        # (B, C/2, H×W)
-        attended = attended.view(batch, -1, height, width)  # (B, C/2, H, W)
-        return inputs + self.gamma * self.output(attended)  # (B, C, H, W)
+        attended = value @ attention.transpose(1, 2)
+        attended = attended.view(batch, -1, height, width)
+        return inputs + self.gamma * self.output(attended)
 
 
-class ConditionalBatchNorm2d(nn.Module):
-    """BatchNorm with class-indexed gain and bias lookup tables."""
-
-    def __init__(self, channels, num_classes):
-        super().__init__()
-        self.normalization = nn.BatchNorm2d(channels, affine=False)
-        self.gain = nn.Embedding(num_classes, channels)
-        self.bias = nn.Embedding(num_classes, channels)
-        nn.init.ones_(self.gain.weight)
-        nn.init.zeros_(self.bias.weight)
-
-    def forward(self, inputs, labels):
-        # inputs shape: (B, C, H, W)， labels shape: (B,)
-        gain = self.gain(labels)[:, :, None, None]  # (B, C) -> (B, C, 1, 1)
-        bias = self.bias(labels)[:, :, None, None]  # (B, C) -> (B, C, 1, 1)
-        return self.normalization(inputs) * gain + bias  # (B, C, H, W)
+ConditionalBatchNorm2d = CategoricalConditionalBatchNorm2d
 
 
-class SAGANGeneratorResidualBlock(nn.Module):
+class SAGANGeneratorResidualBlock(SNGeneratorResidualBlock):
     """Spectral-normalized conditional residual block with 2x upsampling."""
 
     def __init__(self, in_channels, out_channels, num_classes):
-        super().__init__()
-        self.norm1 = ConditionalBatchNorm2d(in_channels, num_classes)
-        self.norm2 = ConditionalBatchNorm2d(out_channels, num_classes)
-        self.conv1 = spectral_norm(
-            nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        super().__init__(
+            in_channels,
+            out_channels,
+            num_classes,
+            spectral_normalization=True,
         )
-        self.conv2 = spectral_norm(
-            nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        )
-        # Every block crosses a resolution boundary, so its shortcut remains a
-        # learned projection even when the channel count is unchanged.
-        self.skip = spectral_norm(
-            nn.Conv2d(in_channels, out_channels, 1)
-        )
-
-    def forward(self, inputs, labels):
-        # inputs shape: (B, C_in, H, W)， labels shape: (B,)
-        # (B, C_in, H, W) -> (B, C_in, 2H, 2W)
-        residual = F.interpolate(inputs, scale_factor=2, mode="nearest")
-        residual = self.skip(residual)  # (B, C_out, 2H, 2W)
-
-        hidden = F.relu(self.norm1(inputs, labels), inplace=True)  # (B, C_in, H, W)
-        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")  # (B, C_in, 2H, 2W)
-        hidden = self.conv1(hidden)  # (B, C_out, 2H, 2W)
-        hidden = self.conv2(
-            F.relu(self.norm2(hidden, labels), inplace=True)
-        )  # (B, C_out, 2H, 2W)
-        return hidden + residual  # (B, C_out, 2H, 2W)
 
 
 class SAGANGenerator(nn.Module):
-    """Class-conditional 32x32 SAGAN generator with tapered channels."""
+    """Paper-oriented 128x128 SAGAN generator with 32x32 attention."""
 
     def __init__(
         self,
         z_dim=128,
-        num_classes=10,
+        num_classes=IMAGENETTE_NUM_CLASSES,
         base_channels=64,
+        image_size=IMAGENETTE_IMAGE_SIZE,
+        attention_resolution=32,
     ):
         super().__init__()
-        if z_dim < 1:
-            raise ValueError("z_dim must be positive.")
-        if base_channels < 1:
-            raise ValueError("base_channels must be positive.")
+        if z_dim < 1 or base_channels < 1 or num_classes < 1:
+            raise ValueError("z_dim, base_channels, and num_classes must be positive.")
+        if image_size != IMAGENETTE_IMAGE_SIZE:
+            raise ValueError("SAGANGenerator currently implements only 128x128 output.")
+        block_resolutions = (8, 16, 32, 64, 128)
+        if attention_resolution not in block_resolutions:
+            raise ValueError(
+                f"attention_resolution must be one of {block_resolutions}."
+            )
+
         self.z_dim = z_dim
-        self.input = spectral_norm(
-            nn.Linear(z_dim, base_channels * 8 * 4 * 4)
-        )
-        self.block1 = SAGANGeneratorResidualBlock(
+        self.num_classes = num_classes
+        self.image_size = image_size
+        self.attention_after_block = block_resolutions.index(attention_resolution)
+        channels = [
+            base_channels * 16,
+            base_channels * 16,
             base_channels * 8,
             base_channels * 4,
-            num_classes,
-        )
-        self.block2 = SAGANGeneratorResidualBlock(
-            base_channels * 4,
-            base_channels * 2,
-            num_classes,
-        )
-        self.attention = SelfAttention(base_channels * 2)
-        self.block3 = SAGANGeneratorResidualBlock(
             base_channels * 2,
             base_channels,
-            num_classes,
-        )
-        self.output_norm = nn.BatchNorm2d(base_channels)
-        self.output = spectral_norm(nn.Conv2d(base_channels, 3, 3, padding=1))
+        ]
+        self.input = spectral_norm(nn.Linear(z_dim, channels[0] * 4 * 4))
+        blocks = [
+            SAGANGeneratorResidualBlock(
+                in_channels,
+                out_channels,
+                num_classes,
+            )
+            for in_channels, out_channels in pairwise(channels)
+        ]
+        self.blocks = nn.ModuleList(blocks)
+        attention_channels = channels[self.attention_after_block + 1]
+        self.attention = SelfAttention(attention_channels)
+        self.output_norm = nn.BatchNorm2d(channels[-1])
+        self.output = spectral_norm(nn.Conv2d(channels[-1], 3, 3, padding=1))
         self.apply(_initialize_sagan_weights)
+        for block in blocks:
+            nn.init.ones_(block.norm1.gain.weight)
+            nn.init.zeros_(block.norm1.bias.weight)
+            nn.init.ones_(block.norm2.gain.weight)
+            nn.init.zeros_(block.norm2.bias.weight)
 
     def forward(self, noise, labels):
-        # noise shape: (B, z_dim), labels shape: (B,)
         if noise.ndim != 2 or noise.shape[1] != self.z_dim:
             raise ValueError(
                 f"Expected noise with shape (batch, {self.z_dim}), "
                 f"got {tuple(noise.shape)}."
             )
-        if labels.ndim != 1 or labels.shape[0] != noise.shape[0]:
-            raise ValueError("labels must have shape (batch,).")
+        validate_class_labels(labels, noise.shape[0])
 
-        hidden = self.input(noise)  # (B, 8C * 4 * 4)
-        hidden = hidden.view(noise.shape[0], -1, 4, 4)     # (B, 8C, 4, 4)
-        hidden = self.block1(hidden, labels)  # (B, 4C, 8, 8)
-        hidden = self.block2(hidden, labels)  # (B, 2C, 16, 16)
-        hidden = self.attention(hidden)       # (B, 2C, 16, 16)
-        hidden = self.block3(hidden, labels)  # (B, C, 32, 32)
-        hidden = F.relu(self.output_norm(hidden), inplace=True)  # (B, C, 32, 32)
-        return torch.tanh(self.output(hidden))  # (B, 3, 32, 32)
+        hidden = self.input(noise).view(noise.shape[0], -1, 4, 4)
+        for index, block in enumerate(self.blocks):
+            hidden = block(hidden, labels)
+            if index == self.attention_after_block:
+                hidden = self.attention(hidden)
+        hidden = F.relu(self.output_norm(hidden), inplace=True)
+        return torch.tanh(self.output(hidden))
 
 
 class SAGANDiscriminator(nn.Module):
-    """Projection discriminator with self-attention on 16x16 features.
+    """Wide projection discriminator with configurable attention resolution."""
 
-    The score is ``u(h(x)) + <e(y), h(x)>``.  This is the first model in the
-    lesson sequence that owns label conditioning in the discriminator.
-    """
-
-    def __init__(self, num_classes=10, base_channels=128):
+    def __init__(
+        self,
+        num_classes=IMAGENETTE_NUM_CLASSES,
+        base_channels=64,
+        image_size=IMAGENETTE_IMAGE_SIZE,
+        attention_resolution=32,
+    ):
         super().__init__()
-        if base_channels < 1:
-            raise ValueError("base_channels must be positive.")
-        channels = base_channels
-        self.block1 = SNDiscriminatorResidualBlock(
-            3, channels, first=True
+        if base_channels < 1 or num_classes < 1:
+            raise ValueError("base_channels and num_classes must be positive.")
+        if image_size != IMAGENETTE_IMAGE_SIZE:
+            raise ValueError(
+                "SAGANDiscriminator currently implements only 128x128 input."
+            )
+        block_resolutions = (64, 32, 16, 8, 4, 4)
+        if attention_resolution not in set(block_resolutions):
+            raise ValueError("attention_resolution must be one of (4, 8, 16, 32, 64).")
+
+        self.num_classes = num_classes
+        self.image_size = image_size
+        self.attention_after_block = block_resolutions.index(attention_resolution)
+        channels = [
+            base_channels,
+            base_channels * 2,
+            base_channels * 4,
+            base_channels * 8,
+            base_channels * 16,
+            base_channels * 16,
+        ]
+        self.blocks = nn.ModuleList(
+            [
+                SNDiscriminatorResidualBlock(
+                    3,
+                    channels[0],
+                    first=True,
+                    wide=True,
+                )
+            ]
+            + [
+                SNDiscriminatorResidualBlock(
+                    in_channels,
+                    out_channels,
+                    wide=True,
+                )
+                for in_channels, out_channels in pairwise(channels[:-1])
+            ]
+            + [
+                SNDiscriminatorResidualBlock(
+                    channels[-2],
+                    channels[-1],
+                    downsample=False,
+                    wide=True,
+                )
+            ]
         )
-        self.attention = SelfAttention(channels)
-        self.block2 = SNDiscriminatorResidualBlock(channels, channels)
-        self.block3 = SNDiscriminatorResidualBlock(
-            channels, channels, downsample=False
-        )
-        self.block4 = SNDiscriminatorResidualBlock(
-            channels, channels, downsample=False
-        )
-        self.output = spectral_norm(nn.Linear(channels, 1))
+        attention_channels = channels[self.attention_after_block]
+        self.attention = SelfAttention(attention_channels)
+        self.feature_channels = channels[-1]
+        self.output = spectral_norm(nn.Linear(self.feature_channels, 1))
         self.class_embedding = spectral_norm(
-            nn.Embedding(num_classes, channels)
+            nn.Embedding(num_classes, self.feature_channels)
         )
         self.apply(_initialize_sagan_weights)
-        nn.init.xavier_uniform_(self.class_embedding.weight_orig)
 
     def extract_features(self, images):
-        # images shape: (B, 3, 32, 32)
-        hidden = self.block1(images)     # (B, 128, 16, 16)
-        hidden = self.attention(hidden)  # (B, 128, 16, 16)
-        hidden = self.block2(hidden)     # (B, 128, 8, 8)
-        hidden = self.block3(hidden)     # (B, 128, 8, 8)
-        hidden = self.block4(hidden)     # (B, 128, 8, 8)
-        hidden = F.relu(hidden, inplace=True)
-        return hidden.sum(dim=(2, 3))    # (B, 128), global sum pooling
+        if (
+            images.ndim != 4
+            or images.shape[1] != 3
+            or tuple(images.shape[-2:]) != (self.image_size, self.image_size)
+        ):
+            raise ValueError(
+                "Expected images with shape "
+                f"(batch, 3, {self.image_size}, {self.image_size}), "
+                f"got {tuple(images.shape)}."
+            )
+        hidden = images
+        for index, block in enumerate(self.blocks):
+            hidden = block(hidden)
+            if index == self.attention_after_block:
+                hidden = self.attention(hidden)
+        return F.relu(hidden, inplace=True).sum(dim=(2, 3))
 
     def forward(self, images, labels):
-        hidden = self.extract_features(images)
-        unconditional = self.output(hidden).squeeze(1)  # (B,)
-        projection = (self.class_embedding(labels) * hidden).sum(dim=1)  # (B,)
-        return unconditional + projection  # (B,)
+        validate_class_labels(labels, images.shape[0])
+        features = self.extract_features(images)
+        unconditional = self.output(features).squeeze(1)
+        projection = (self.class_embedding(labels) * features).sum(dim=1)
+        return unconditional + projection
 
 
 __all__ = [
-    "CIFAR10_CLASS_NAMES",
     "ConditionalBatchNorm2d",
     "SAGANDiscriminator",
     "SAGANGenerator",

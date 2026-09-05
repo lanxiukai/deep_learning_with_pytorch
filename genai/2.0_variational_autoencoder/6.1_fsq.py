@@ -2,7 +2,8 @@
 
 This is a matched tokenizer branch of VQ-VAE. Relative to
 ``6.0_vq_vae.py``, the encoder, decoder, straight-through gradient, frozen
-tokenizer boundary, and second-stage PixelCNN remain.  The quantizer changes:
+tokenizer boundary, and class-conditional second-stage PixelCNN remain. The
+quantizer changes:
 
 * each low-dimensional channel is bounded and rounded to fixed levels;
 * mixed-radix packing maps the scalar tuple to one integer token;
@@ -10,40 +11,43 @@ tokenizer boundary, and second-stage PixelCNN remain.  The quantizer changes:
 
 Removing dead *entries* does not guarantee that the encoder visits every
 scalar combination, so usage entropy and reconstruction are still logged.
+The 128x128 image path and 16x16 token grid exactly match ``6.0_vq_vae.py`` so
+the quantizer remains the controlled algorithmic difference.
 
 The tokenizer file is a stage handoff, not a training-resume checkpoint. Each
 stage saves only final weights, constructor metadata, and the tokenizer identity
 needed to prevent pairing a prior with different tokenizer weights.
 
 Data:
-    data/cifar10, prepared by tool_scripts/download_dataset.py.
+    data/imagenette-128/{train,val}/<WNID>/*.JPEG, prepared by
+    tool_scripts/download_dataset.py --dataset imagenette.
 
 Outputs:
     output/vae/fsq/tokenizer_*.png: reconstruction comparisons
-    output/vae/fsq/prior_*.png: PixelCNN prior samples
+    output/vae/fsq/prior_*.png: one PixelCNN sample per Imagenette class
     output/vae/fsq/tokenizer.pth: final FSQ tokenizer checkpoint
     output/vae/fsq/pixelcnn_prior.pth: final token-prior checkpoint
 
-Training data -- CIFAR-10:
-Training images:              50,000
-Validation images:            10,000
-Batch size:                      128
-Samples per epoch:            49,920 (390 full batches; drop_last=True)
+Training data -- Imagenette-128:
+Training images:               9,469
+Validation images:             3,925
+Batch size:                       64
+Samples per epoch:             9,408 (147 full batches; drop_last=True)
 Tokenizer epochs:                 20
 Prior epochs:                     20
-Optimizer updates:             7,800 tokenizer / 7,800 prior
-Note: CIFAR-10 labels are ignored. The final 80 shuffled training images are
-omitted per epoch; stage 2 freezes the tokenizer.
+Optimizer updates:             2,940 tokenizer / 2,940 prior
+Note: the tokenizer remains label-free; class labels condition only the frozen-
+token PixelCNN prior. The final 61 shuffled images are omitted per epoch.
 
 Default dimensions:
-Training input:               32x32 RGB
-Generated image:              32x32 RGB
-Latent token grid:              8x8 indices (1,600 fixed combinations)
+Training input:             128x128 RGB
+Generated image:            128x128 RGB
+Latent token grid:            16x16 indices (1,600 fixed combinations)
 
 Model size:
-FSQ tokenizer:                 1.08 M parameters
-PixelCNN prior:                2.12 M parameters (tokenizer frozen)
-Stored total:                  3.19 M parameters
+FSQ tokenizer:                 1.60 M parameters
+Conditional PixelCNN prior:    2.12 M parameters (tokenizer frozen)
+Stored total:                  3.72 M parameters
 """
 
 from __future__ import annotations
@@ -57,20 +61,24 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
-from dl_utils.data.cifar10 import (
-    make_cifar10_loader,
-    normalized_cifar10_transform,
-)
+from dl_utils.data.imagenette import make_imagenette_loader
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
     model_state_fingerprint,
     save_model_weights,
 )
-from dl_utils.vae.quantization import FSQAutoencoder32, TokenUsageAccumulator
-from dl_utils.vae.token_prior import PixelCNNPrior
+from dl_utils.vae.quantization import FSQAutoencoder, TokenUsageAccumulator
+from dl_utils.vae.token_prior import PixelCNNPrior, make_fixed_class_labels
 
 PROJECT_ROOT = infer_project_root()
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
+IMAGE_SIZE = 128
+NUM_CLASSES = 10
+DOWNSAMPLE_STEPS = 3
+LATENT_GRID_SIZE = IMAGE_SIZE // (2**DOWNSAMPLE_STEPS)
+TOKENS_PER_IMAGE = LATENT_GRID_SIZE**2
+SAMPLES_PER_CLASS = 1
 
 
 def parse_levels(text: str) -> tuple[int, ...]:
@@ -87,20 +95,37 @@ def parse_levels(text: str) -> tuple[int, ...]:
 
 def smoke_test() -> None:
     torch.manual_seed(7)
-    model = FSQAutoencoder32(levels=(4, 4, 4), hidden_channels=32)
-    prior = PixelCNNPrior(64, hidden_channels=24, layers=3)
-    x = torch.randn(4, 3, 32, 32).clamp(-1, 1)
+    model = FSQAutoencoder(
+        levels=(4, 4, 4),
+        hidden_channels=32,
+        downsample_steps=DOWNSAMPLE_STEPS,
+    )
+    prior = PixelCNNPrior(64, hidden_channels=24, layers=3, num_classes=NUM_CLASSES)
+    x = torch.randn(2, 3, IMAGE_SIZE, IMAGE_SIZE).clamp(-1, 1)
+    labels = torch.tensor([0, NUM_CLASSES - 1])
     reconstruction, indices, diagnostics = model(x)
     loss = F.mse_loss(reconstruction, x)
     loss.backward()
-    prior_loss = F.cross_entropy(prior(indices.detach()), indices.detach())
+    prior_loss = F.cross_entropy(
+        prior(indices.detach(), labels=labels), indices.detach()
+    )
     prior_loss.backward()
+    with torch.inference_mode():
+        sampled = prior.sample(
+            1,
+            LATENT_GRID_SIZE,
+            LATENT_GRID_SIZE,
+            device=torch.device("cpu"),
+            labels=torch.tensor([0]),
+        )
+        generated = model.decode_indices(sampled)
 
     all_indices = torch.arange(model.quantizer.codebook_size)
     restored = model.quantizer.pack(model.quantizer.unpack(all_indices))
     assert torch.equal(all_indices, restored), "mixed-radix mapping is not reversible"
     assert reconstruction.shape == x.shape
-    assert indices.shape == (4, 8, 8)
+    assert generated.shape == (1, 3, IMAGE_SIZE, IMAGE_SIZE)
+    assert indices.shape == (2, LATENT_GRID_SIZE, LATENT_GRID_SIZE)
     assert model.encoder.net[0].weight.grad is not None
     print(
         f"smoke test passed: D={loss.item():.3f}, prior={prior_loss.item():.3f}, "
@@ -113,31 +138,35 @@ def smoke_test() -> None:
 def make_loaders(
     args: argparse.Namespace, device: torch.device
 ) -> tuple[DataLoader, DataLoader]:
-    transform = normalized_cifar10_transform(horizontal_flip=False)
-    data_root = PROJECT_ROOT / "data" / "cifar10"
     return (
-        make_cifar10_loader(
-            data_root,
+        make_imagenette_loader(
+            args.data_dir,
             args.batch_size,
             device,
-            train=True,
-            transform=transform,
+            split="train",
+            image_size=IMAGE_SIZE,
+            horizontal_flip=False,
             num_workers=args.workers,
+            preprocessed=True,
         ),
-        make_cifar10_loader(
-            data_root,
+        make_imagenette_loader(
+            args.data_dir,
             args.batch_size,
             device,
-            train=False,
-            transform=transform,
+            split="val",
+            image_size=IMAGE_SIZE,
+            horizontal_flip=False,
             num_workers=args.workers,
+            shuffle=False,
+            preprocessed=True,
+            drop_last=False,
         ),
     )
 
 
 @torch.inference_mode()
 def evaluate_tokenizer(
-    model: FSQAutoencoder32,
+    model: FSQAutoencoder,
     loader: DataLoader,
     *,
     device: torch.device,
@@ -152,9 +181,7 @@ def evaluate_tokenizer(
         x = x.to(device, non_blocking=True)
         reconstruction, indices, diagnostics = model(x)
         distortion += float(F.mse_loss(reconstruction, x)) * x.shape[0]
-        quantization_mse += (
-            float(diagnostics["quantization_mse"]) * x.shape[0]
-        )
+        quantization_mse += float(diagnostics["quantization_mse"]) * x.shape[0]
         usage.update(indices)
         examples += x.shape[0]
     statistics = usage.statistics()
@@ -166,16 +193,16 @@ def evaluate_tokenizer(
         "active_codes": float(statistics["active_codes"]),
         "usage_fraction": float(statistics["usage_fraction"]),
         "marginal_entropy_bits_per_token": entropy_bits,
-        "marginal_entropy_bits_per_image": 64 * entropy_bits,
+        "marginal_entropy_bits_per_image": TOKENS_PER_IMAGE * entropy_bits,
         "fixed_length_bits_per_image": (
-            64 * math.ceil(math.log2(vocabulary_size))
+            TOKENS_PER_IMAGE * math.ceil(math.log2(vocabulary_size))
         ),
     }
 
 
 @torch.inference_mode()
 def evaluate_prior(
-    tokenizer: FSQAutoencoder32,
+    tokenizer: FSQAutoencoder,
     prior: PixelCNNPrior,
     loader: DataLoader,
     *,
@@ -185,17 +212,18 @@ def evaluate_prior(
     prior.eval()
     nll = 0.0
     examples = 0
-    for x, _ in loader:
+    for x, labels in loader:
         x = x.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
         _, indices, _ = tokenizer.encode(x)
-        loss = F.cross_entropy(prior(indices), indices)
+        loss = F.cross_entropy(prior(indices, labels=labels), indices)
         nll += float(loss) * x.shape[0]
         examples += x.shape[0]
     nll /= examples
     return {
         "nll_nats_per_token": nll,
         "bits_per_token": nll / math.log(2),
-        "bits_per_image": 64 * nll / math.log(2),
+        "bits_per_image": TOKENS_PER_IMAGE * nll / math.log(2),
     }
 
 
@@ -205,12 +233,16 @@ def train_tokenizer(
     validation_loader: DataLoader,
     device: torch.device,
     out_dir: Path,
-) -> FSQAutoencoder32:
-    config = {"levels": args.levels, "hidden_channels": args.hidden_channels}
-    model = FSQAutoencoder32(**config).to(device)
+) -> FSQAutoencoder:
+    config = {
+        "levels": args.levels,
+        "hidden_channels": args.hidden_channels,
+        "downsample_steps": DOWNSAMPLE_STEPS,
+    }
+    model = FSQAutoencoder(**config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     vocabulary_size = model.quantizer.codebook_size
-    fixed_bits = 8 * 8 * math.ceil(math.log2(vocabulary_size))
+    fixed_bits = TOKENS_PER_IMAGE * math.ceil(math.log2(vocabulary_size))
     print(
         f"FSQ levels={args.levels}, vocabulary={vocabulary_size}, "
         f"fixed-length upper bound={fixed_bits} bits/image"
@@ -249,9 +281,7 @@ def train_tokenizer(
                 out_dir / f"tokenizer_{epoch:03d}.png",
                 nrow=8,
             )
-    validation = evaluate_tokenizer(
-        model, validation_loader, device=device
-    )
+    validation = evaluate_tokenizer(model, validation_loader, device=device)
     interface_id = model_state_fingerprint(model)
     save_model_weights(
         model,
@@ -260,6 +290,8 @@ def train_tokenizer(
             "model_name": "fsq_tokenizer",
             "interface_id": interface_id,
             "model_config": config,
+            "dataset": "imagenette-128",
+            "image_size": IMAGE_SIZE,
         },
     )
     print(
@@ -271,11 +303,16 @@ def train_tokenizer(
     return model.eval().requires_grad_(False)
 
 
-def load_tokenizer(path: Path, device: torch.device) -> FSQAutoencoder32:
+def load_tokenizer(path: Path, device: torch.device) -> FSQAutoencoder:
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     if checkpoint.get("model_name") != "fsq_tokenizer":
         raise ValueError("checkpoint is not an FSQ tokenizer")
-    model = FSQAutoencoder32(**checkpoint["model_config"]).to(device)
+    if (
+        checkpoint.get("dataset") != "imagenette-128"
+        or checkpoint.get("image_size") != IMAGE_SIZE
+    ):
+        raise ValueError("tokenizer is not the Imagenette-128 configuration")
+    model = FSQAutoencoder(**checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     if checkpoint.get("interface_id") != model_state_fingerprint(model):
         raise ValueError(
@@ -286,7 +323,7 @@ def load_tokenizer(path: Path, device: torch.device) -> FSQAutoencoder32:
 
 def train_prior(
     args: argparse.Namespace,
-    tokenizer: FSQAutoencoder32,
+    tokenizer: FSQAutoencoder,
     train_loader: DataLoader,
     validation_loader: DataLoader,
     device: torch.device,
@@ -298,17 +335,19 @@ def train_prior(
         vocabulary_size,
         hidden_channels=args.prior_hidden_channels,
         layers=args.prior_layers,
+        num_classes=NUM_CLASSES,
     ).to(device)
     optimizer = torch.optim.Adam(prior.parameters(), lr=args.prior_lr)
     for epoch in range(1, args.prior_epochs + 1):
         prior.train()
         nll_sum = 0.0
         examples = 0
-        for x, _ in train_loader:
+        for x, labels in train_loader:
             x = x.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
             with torch.inference_mode():
                 _, indices, _ = tokenizer.encode(x)
-            loss = F.cross_entropy(prior(indices), indices)
+            loss = F.cross_entropy(prior(indices, labels=labels), indices)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -320,28 +359,30 @@ def train_prior(
             f"train bits/token={nll / math.log(2):.3f}"
         )
         if epoch == 1 or epoch % args.sample_every == 0:
-            prior.eval()
-            indices = prior.sample(
-                64,
-                8,
-                8,
-                device=device,
-                temperature=args.temperature,
-            )
-            samples = tokenizer.decode_indices(indices)
-            save_image(
-                samples.mul(0.5).add(0.5),
-                out_dir / f"prior_{epoch:03d}.png",
-                nrow=8,
-            )
-    validation = evaluate_prior(
-        tokenizer, prior, validation_loader, device=device
-    )
+            with torch.inference_mode():
+                prior.eval()
+                labels = make_fixed_class_labels(NUM_CLASSES, SAMPLES_PER_CLASS, device)
+                indices = prior.sample(
+                    labels.shape[0],
+                    LATENT_GRID_SIZE,
+                    LATENT_GRID_SIZE,
+                    device=device,
+                    labels=labels,
+                    temperature=args.temperature,
+                )
+                samples = tokenizer.decode_indices(indices)
+                save_image(
+                    samples.mul(0.5).add(0.5),
+                    out_dir / f"prior_{epoch:03d}.png",
+                    nrow=5,
+                )
+    validation = evaluate_prior(tokenizer, prior, validation_loader, device=device)
     tokenizer_interface_id = model_state_fingerprint(tokenizer)
     prior_config = {
         "vocabulary_size": vocabulary_size,
         "hidden_channels": args.prior_hidden_channels,
         "layers": args.prior_layers,
+        "num_classes": NUM_CLASSES,
     }
     save_model_weights(
         prior,
@@ -350,6 +391,9 @@ def train_prior(
             "model_name": "fsq_pixelcnn_prior",
             "model_config": prior_config,
             "tokenizer_interface_id": tokenizer_interface_id,
+            "dataset": "imagenette-128",
+            "image_size": IMAGE_SIZE,
+            "conditioning": "class_conditional",
         },
     )
     print(
@@ -386,6 +430,7 @@ def train(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--stage", choices=("tokenizer", "prior", "all"), default="all")
     parser.add_argument("--levels", type=parse_levels, default=(8, 8, 5, 5))
     parser.add_argument("--tokenizer-epochs", type=int, default=20)
@@ -393,7 +438,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-channels", type=int, default=128)
     parser.add_argument("--prior-hidden-channels", type=int, default=128)
     parser.add_argument("--prior-layers", type=int, default=7)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--prior-lr", type=float, default=2e-4)
     parser.add_argument("--temperature", type=float, default=1.0)

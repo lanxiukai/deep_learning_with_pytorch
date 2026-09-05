@@ -1,4 +1,4 @@
-"""Quantizers and compact image-tokenizer blocks for VQ/FSQ lessons."""
+"""Quantizers and reusable image-tokenizer blocks for VQ/FSQ lessons."""
 
 from __future__ import annotations
 
@@ -71,9 +71,7 @@ class VectorQuantizer(nn.Module):
             self.embedding.weight, -1.0 / codebook_size, 1.0 / codebook_size
         )
 
-    def forward(
-        self, z_e: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
+    def forward(self, z_e: Tensor) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         if z_e.ndim != 4 or z_e.shape[1] != self.embedding_dim:
             raise ValueError("expected z_e with shape [B, embedding_dim, H, W]")
         flat = z_e.permute(0, 2, 3, 1).contiguous().reshape(-1, self.embedding_dim)
@@ -177,45 +175,85 @@ class ResidualBlock(nn.Module):
         return x + self.net(x)
 
 
-class ImageEncoder32(nn.Module):
-    """32x32 image to 8x8 feature grid."""
+class ImageEncoder(nn.Module):
+    """Image encoder with an explicit power-of-two spatial compression."""
 
     def __init__(
-        self, out_channels: int, *, image_channels: int = 3, hidden_channels: int = 128
+        self,
+        out_channels: int,
+        *,
+        image_channels: int = 3,
+        hidden_channels: int = 128,
+        downsample_steps: int = 2,
     ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
+        if hidden_channels < 2 or downsample_steps < 2:
+            raise ValueError(
+                "hidden_channels and downsample_steps must be at least two"
+            )
+        layers: list[nn.Module] = [
             nn.Conv2d(image_channels, hidden_channels // 2, 4, 2, 1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_channels // 2, hidden_channels, 4, 2, 1),
-            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1),
-            ResidualBlock(hidden_channels),
-            ResidualBlock(hidden_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_channels, out_channels, 1),
+        ]
+        in_channels = hidden_channels // 2
+        for step in range(1, downsample_steps):
+            layers.append(nn.Conv2d(in_channels, hidden_channels, 4, 2, 1))
+            if step < downsample_steps - 1:
+                layers.append(nn.ReLU(inplace=True))
+            in_channels = hidden_channels
+        layers.extend(
+            [
+                nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1),
+                ResidualBlock(hidden_channels),
+                ResidualBlock(hidden_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(hidden_channels, out_channels, 1),
+            ]
         )
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.net(x)
 
 
-class ImageDecoder32(nn.Module):
-    """8x8 feature grid to a 32x32 image in [-1, 1]."""
+class ImageDecoder(nn.Module):
+    """Mirror an ``ImageEncoder`` and map features to RGB in [-1, 1]."""
 
     def __init__(
-        self, in_channels: int, *, image_channels: int = 3, hidden_channels: int = 128
+        self,
+        in_channels: int,
+        *,
+        image_channels: int = 3,
+        hidden_channels: int = 128,
+        downsample_steps: int = 2,
     ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
+        if hidden_channels < 2 or downsample_steps < 2:
+            raise ValueError(
+                "hidden_channels and downsample_steps must be at least two"
+            )
+        layers: list[nn.Module] = [
             nn.Conv2d(in_channels, hidden_channels, 3, padding=1),
             ResidualBlock(hidden_channels),
             ResidualBlock(hidden_channels),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, 4, 2, 1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_channels // 2, image_channels, 4, 2, 1),
-            nn.Tanh(),
+        ]
+        for _ in range(downsample_steps - 2):
+            layers.extend(
+                [
+                    nn.ConvTranspose2d(hidden_channels, hidden_channels, 4, 2, 1),
+                    nn.ReLU(inplace=True),
+                ]
+            )
+        layers.extend(
+            [
+                nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, 4, 2, 1),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_channels // 2, image_channels, 4, 2, 1),
+                nn.Tanh(),
+            ]
         )
+        self.net = nn.Sequential(*layers)
 
     @property
     def last_layer(self) -> nn.Parameter:
@@ -228,8 +266,8 @@ class ImageDecoder32(nn.Module):
         return self.net(z)
 
 
-class VQVAE32(nn.Module):
-    """Compact VQ-VAE tokenizer with an 8x8 index grid."""
+class VQVAE(nn.Module):
+    """VQ-VAE tokenizer with configurable spatial compression."""
 
     def __init__(
         self,
@@ -239,18 +277,22 @@ class VQVAE32(nn.Module):
         embedding_dim: int = 64,
         codebook_size: int = 512,
         commitment: float = 0.25,
+        downsample_steps: int = 2,
     ) -> None:
         super().__init__()
-        self.encoder = ImageEncoder32(
+        self.downsample_steps = downsample_steps
+        self.encoder = ImageEncoder(
             embedding_dim,
             image_channels=image_channels,
             hidden_channels=hidden_channels,
+            downsample_steps=downsample_steps,
         )
         self.quantizer = VectorQuantizer(codebook_size, embedding_dim, commitment)
-        self.decoder = ImageDecoder32(
+        self.decoder = ImageDecoder(
             embedding_dim,
             image_channels=image_channels,
             hidden_channels=hidden_channels,
+            downsample_steps=downsample_steps,
         )
 
     def encode(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
@@ -268,8 +310,8 @@ class VQVAE32(nn.Module):
         return self.decoder(z_st), indices, quantizer_loss, diagnostics
 
 
-class FSQAutoencoder32(nn.Module):
-    """Same 32x32 tokenizer architecture with FSQ replacing learned VQ."""
+class FSQAutoencoder(nn.Module):
+    """The same configurable tokenizer with FSQ replacing learned VQ."""
 
     def __init__(
         self,
@@ -277,18 +319,22 @@ class FSQAutoencoder32(nn.Module):
         *,
         image_channels: int = 3,
         hidden_channels: int = 128,
+        downsample_steps: int = 2,
     ) -> None:
         super().__init__()
+        self.downsample_steps = downsample_steps
         self.quantizer = FiniteScalarQuantizer(levels)
-        self.encoder = ImageEncoder32(
+        self.encoder = ImageEncoder(
             self.quantizer.dim,
             image_channels=image_channels,
             hidden_channels=hidden_channels,
+            downsample_steps=downsample_steps,
         )
-        self.decoder = ImageDecoder32(
+        self.decoder = ImageDecoder(
             self.quantizer.dim,
             image_channels=image_channels,
             hidden_channels=hidden_channels,
+            downsample_steps=downsample_steps,
         )
 
     def encode(self, x: Tensor) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
@@ -306,11 +352,23 @@ class FSQAutoencoder32(nn.Module):
         return self.decoder(z_st), indices, diagnostics
 
 
+# Preserve imports used by the earlier 32x32 lessons and old checkpoints. The
+# default two downsampling steps still map 32x32 images to an 8x8 token grid.
+ImageEncoder32 = ImageEncoder
+ImageDecoder32 = ImageDecoder
+VQVAE32 = VQVAE
+FSQAutoencoder32 = FSQAutoencoder
+
+
 __all__ = [
+    "VQVAE",
     "VQVAE32",
+    "FSQAutoencoder",
     "FSQAutoencoder32",
     "FiniteScalarQuantizer",
+    "ImageDecoder",
     "ImageDecoder32",
+    "ImageEncoder",
     "ImageEncoder32",
     "ResidualBlock",
     "TokenUsageAccumulator",

@@ -1,261 +1,174 @@
-"""Train an unconditional, paper-oriented SN-GAN on CIFAR-10.
+"""Train a class-conditional projection SN-GAN on Imagenette at 128x128.
 
-This lesson follows the CIFAR ResNet experiment in *Spectral Normalization for
-Generative Adversarial Networks*:
-    - CIFAR-10 is modeled without using its class labels;
-    - z has 128 dimensions and initializes a 4x4x256 feature map;
-    - G contains three constant-width upsampling residual blocks;
-    - D contains two downsampling and two same-resolution residual blocks;
-    - spectral normalization is applied to every learned map in D, but not G;
-    - the hinge objective and an exact five D updates per G update use the
-      paper's ResNet training setting;
-    - D uses batches of 64 real/fake images while G uses batches of 128;
-    - real uint8 pixels use uniform dequantization before entering D.
-
-Projection discrimination and conditional BatchNorm are intentionally absent.
-They first appear in ``6.1_sagan.py``, whose original paper explicitly uses
-both mechanisms.  Fixed-noise samples, loss curves, and full checkpoints are
-teaching conveniences and do not alter the adversarial updates.
+This lesson keeps the reference 128x128 conditional architecture and training
+choices: ``z=128``, ``ch=64``, conditional BatchNorm, projection
+discrimination, hinge loss, Adam ``(2e-4, beta1=0, beta2=0.9)``, and five
+discriminator updates per generator update. Spectral normalization remains
+discriminator-only, making SAGAN's next change easy to see. The 20-epoch
+default is a teaching-scale budget for Imagenette rather than a paper-scale
+reproduction.
 
 Data:
-    data/cifar10, prepared by tool_scripts/download_dataset.py.
+    data/imagenette-128/train/<WNID>/*.JPEG, prepared explicitly with
+    tool_scripts/download_dataset.py --dataset imagenette.
 
 Outputs:
-    Fresh runs reset training/ and checkpoints/ before setup; --resume-from
-    preserves both directories.
-    output/gan/sn_gan/training/epoch_*.png: fixed-z unconditional samples
-    output/gan/sn_gan/checkpoints/latest.pth: full recoverable training state
-    output/gan/sn_gan/checkpoints/epoch_*.pth: sparse full-state archives
-    output/gan/sn_gan/generator.pth: final generator and configuration
-    output/gan/sn_gan/discriminator.pth: final discriminator and configuration
-    output/gan/sn_gan/loss_curves.png: separate D and G loss panels
-
-Resume an interrupted run:
-    python genai/1.0_generative_adversarial_network/6.0_sn_gan.py \
-        --resume-from output/gan/sn_gan/checkpoints/latest.pth
-
-Training data -- CIFAR-10:
-Training images:         50,000
-Samples per epoch:       49,984 (781 full batches; drop_last=True)
-Training epochs:         650
-Optimizer updates:       507,650 D / 101,530 G (exactly 5:1)
-
-Default image sizes:
-Training input:          32x32 RGB
-Generated image:         32x32 RGB
-
-Generator:                4.28 M params
-Discriminator:            1.05 M params
-Total:                    5.33 M params
+    Fresh runs replace the sn_gan output directory; --resume-from preserves it.
+    output/gan/sn_gan/{training,checkpoints,generator.pth,
+    discriminator.pth,loss_curves.png}. Set DL_OUTPUT_ROOT to relocate the
+    three model directories together on a cloud volume.
 """
 
 import argparse
+import os
 from pathlib import Path
+from typing import cast
 
-import torch
-from torchvision import transforms
+from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
-from dl_utils.data.cifar10 import make_cifar10_loader
-from dl_utils.runtime.devices import try_gpu
-from dl_utils.runtime.randomness import set_seed
+from dl_utils.data.imagenette import (
+    IMAGENETTE_CLASS_NAMES,
+    make_imagenette_loader,
+)
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.gan.sn_gan import (
-    SNDiscriminator,
-    SNGenerator,
-    discriminator_hinge_loss,
-    generator_hinge_loss,
-    uniform_dequantize_uint8,
-)
+from dl_utils.gan.conditional_training import train_conditional_hinge_epoch
+from dl_utils.gan.sagan import make_fixed_class_latent_grid
+from dl_utils.gan.sn_gan import SNDiscriminator, SNGenerator
 from dl_utils.plot.figures import save_loss_panels
-from dl_utils.plot.images import save_fixed_noise_samples
-from dl_utils.training.metrics import MetricAccumulator
+from dl_utils.plot.images import save_training_samples
+from dl_utils.runtime.devices import try_gpu
+from dl_utils.runtime.randomness import set_seed
+from dl_utils.training.accelerator import (
+    configure_device,
+    make_fused_adam,
+    resolve_training_precision,
+)
 from dl_utils.training.optimization import UpdateRatioSchedule
 from dl_utils.training.session import TrainingSession
 
-
 PROJECT_ROOT = infer_project_root()
-DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
-OUT_DIR = PROJECT_ROOT / "output" / "gan" / "sn_gan"
-TRAINING_DIR = OUT_DIR / "training"
-CHECKPOINT_DIR = OUT_DIR / "checkpoints"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
+DEFAULT_OUTPUT_ROOT = Path(
+    os.environ.get("DL_OUTPUT_ROOT", PROJECT_ROOT / "output" / "gan")
+)
 
-NUM_EPOCHS = 650
-DISCRIMINATOR_BATCH_SIZE = 64
-GENERATOR_BATCH_SIZE = 128
+NUM_EPOCHS = 20
+DISCRIMINATOR_BATCH_SIZE = 16
+GENERATOR_BATCH_SIZE = 32
 NUM_WORKERS = 8
+NUM_CLASSES = 10
 Z_DIM = 128
-GENERATOR_BASE_CHANNELS = 256
-DISCRIMINATOR_BASE_CHANNELS = 128
+BASE_CHANNELS = 64
+IMAGE_SIZE = 128
 LEARNING_RATE = 2e-4
 DISCRIMINATOR_UPDATES_PER_GENERATOR = 5
-SAMPLES_TO_DISPLAY = 64
-SAMPLE_GRID_COLUMNS = 8
-SAMPLE_EVERY_EPOCHS = 50
-CHECKPOINT_EVERY_EPOCHS = 10
-ARCHIVE_EVERY_EPOCHS = 50
+DISPLAY_CLASS_INDICES = tuple(range(NUM_CLASSES))
+SAMPLES_PER_CLASS = 4
+SAMPLE_EVERY_EPOCHS = 1
+CHECKPOINT_EVERY_EPOCHS = 1
+ARCHIVE_EVERY_EPOCHS = 5
 SEED = 42
+FORMAT_VERSION = 8
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
-    "base_channels": GENERATOR_BASE_CHANNELS,
+    "num_classes": NUM_CLASSES,
+    "base_channels": BASE_CHANNELS,
+    "image_size": IMAGE_SIZE,
 }
-
 DISCRIMINATOR_CONFIG = {
-    "base_channels": DISCRIMINATOR_BASE_CHANNELS,
+    "num_classes": NUM_CLASSES,
+    "base_channels": BASE_CHANNELS,
+    "image_size": IMAGE_SIZE,
 }
 
 
-def train_epoch(
-    generator,
-    discriminator,
-    loader,
-    opt_g,
-    opt_d,
-    device,
-    discriminator_steps,
-    progress_bar=None,
-    update_schedule=None,
-):
-    """Train one epoch while preserving the exact five-to-one update phase."""
-    if discriminator_steps < 0:
-        raise ValueError("discriminator_steps must be non-negative.")
-    if update_schedule is None:
-        update_schedule = UpdateRatioSchedule(
-            DISCRIMINATOR_UPDATES_PER_GENERATOR,
-            len(loader),
-            NUM_EPOCHS,
-        )
-    discriminator_metrics = MetricAccumulator(
-        ("loss",),
-        device=device,
-    )
-    generator_metrics = MetricAccumulator(
-        ("loss",),
-        device=device,
-    )
-
-    for real, _ in loader:
-        real = real.to(device, non_blocking=True)
-        batch_size = real.shape[0]
-
-        noise = torch.randn(batch_size, Z_DIM, device=device)
-        with torch.no_grad():
-            fake = generator(noise)
-        real_scores = discriminator(real)
-        fake_scores = discriminator(fake)
-        loss_d = discriminator_hinge_loss(real_scores, fake_scores)
-        opt_d.zero_grad(set_to_none=True)
-        loss_d.backward()
-        opt_d.step()
-
-        discriminator_metrics.update((loss_d,), num_examples=batch_size)
-        discriminator_steps += 1
-
-        should_update_generator = update_schedule.generator_due(
-            discriminator_steps
-        )
-        if should_update_generator:
-            noise = torch.randn(
-                GENERATOR_BATCH_SIZE,
-                Z_DIM,
-                device=device,
-            )
-            discriminator.requires_grad_(False)
-            try:
-                opt_g.zero_grad(set_to_none=True)
-                fake = generator(noise)
-                loss_g = generator_hinge_loss(discriminator(fake))
-                loss_g.backward()
-                opt_g.step()
-            finally:
-                discriminator.requires_grad_(True)
-
-            generator_metrics.update(
-                (loss_g,),
-                num_examples=GENERATOR_BATCH_SIZE,
-            )
-
-        if progress_bar is not None:
-            progress_bar.update(1)
-
-    return (
-        discriminator_metrics.compute()["loss"],
-        generator_metrics.compute()["loss"],
-        discriminator_steps,
-    )
-
-
-def main(resume_from=None):
-    if resume_from is None:
-        reset_dir(str(TRAINING_DIR))
-        reset_dir(str(CHECKPOINT_DIR))
-
-    if not (DATA_DIR / "cifar-10-batches-py").is_dir():
-        raise FileNotFoundError(
-            f"CIFAR-10 data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset.py first."
-        )
+def main(args):
+    output_dir = args.output_root / "sn_gan"
+    training_dir = output_dir / "training"
+    checkpoint_dir = output_dir / "checkpoints"
+    if args.resume_from is None:
+        reset_dir(str(output_dir))
+    training_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     set_seed(SEED)
     device = try_gpu()
-    loader = make_cifar10_loader(
-        DATA_DIR,
-        DISCRIMINATOR_BATCH_SIZE,
+    configure_device(device)
+    precision = resolve_training_precision(device, args.precision)
+    loader = make_imagenette_loader(
+        args.data_dir,
+        args.batch_size,
         device,
-        train=True,
-        transform=transforms.Compose(
-            [
-                transforms.PILToTensor(),
-                transforms.Lambda(uniform_dequantize_uint8),
-            ]
-        ),
-        num_workers=NUM_WORKERS,
+        dequantize=True,
+        horizontal_flip=False,
+        num_workers=args.num_workers,
+        preprocessed=True,
     )
     update_schedule = UpdateRatioSchedule(
         DISCRIMINATOR_UPDATES_PER_GENERATOR,
         len(loader),
-        NUM_EPOCHS,
+        args.epochs,
     )
 
     generator = SNGenerator(**MODEL_CONFIG).to(device)
     discriminator = SNDiscriminator(**DISCRIMINATOR_CONFIG).to(device)
-
-    opt_g = torch.optim.Adam(
+    optimizer_g = make_fused_adam(
         generator.parameters(),
+        device=device,
         lr=LEARNING_RATE,
         betas=(0.0, 0.9),
     )
-    opt_d = torch.optim.Adam(
+    optimizer_d = make_fused_adam(
         discriminator.parameters(),
+        device=device,
         lr=LEARNING_RATE,
         betas=(0.0, 0.9),
     )
 
+    run_metadata = {
+        "format_version": FORMAT_VERSION,
+        "dataset": "imagenette-128",
+        "image_size": IMAGE_SIZE,
+        "conditioning": "class_conditional",
+        "discriminator_conditioning": "projection",
+        "precision": precision.name,
+        "discriminator_batch_size": args.batch_size,
+        "generator_batch_size": args.generator_batch_size,
+        "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,
+    }
     session = TrainingSession(
-        OUT_DIR,
-        total_epochs=NUM_EPOCHS,
+        output_dir,
+        total_epochs=args.epochs,
         models={"generator": generator, "discriminator": discriminator},
-        optimizers={"generator": opt_g, "discriminator": opt_d},
+        optimizers={
+            "generator": optimizer_g,
+            "discriminator": optimizer_d,
+        },
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         archive_every_epochs=ARCHIVE_EVERY_EPOCHS,
-        metadata={
-            "format_version": 5,
-            "conditioning": "unconditional",
-            "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,
-        },
+        metadata=run_metadata,
         model_metadata={
-            "generator": {"model_name": "sn_gan", "model_config": MODEL_CONFIG},
+            "generator": {
+                "model_name": "sn_gan",
+                "model_config": MODEL_CONFIG,
+            },
             "discriminator": {
                 "model_name": "sn_gan_discriminator",
                 "model_config": DISCRIMINATOR_CONFIG,
             },
         },
     )
-    fixed_noise = torch.randn(SAMPLES_TO_DISPLAY, Z_DIM, device=device)
+    fixed_noise, fixed_labels = make_fixed_class_latent_grid(
+        DISPLAY_CLASS_INDICES,
+        SAMPLES_PER_CLASS,
+        Z_DIM,
+        device,
+    )
     start_epoch, state = session.start(
-        resume_from,
+        args.resume_from,
         reset_output_dir=False,
         initial_state={
             "loss_history": {
@@ -264,103 +177,132 @@ def main(resume_from=None):
                 "generator": [],
             },
             "fixed_noise": fixed_noise.cpu(),
+            "fixed_labels": fixed_labels.cpu(),
             "discriminator_steps": 0,
         },
     )
     loss_history = state["loss_history"]
     fixed_noise = state["fixed_noise"].to(device)
+    fixed_labels = state["fixed_labels"].to(device)
     discriminator_steps = state["discriminator_steps"]
-
-    planned_discriminator_updates = (
-        update_schedule.total_discriminator_updates
-    )
-    planned_generator_updates = update_schedule.total_generator_updates
-    print(
-        "Planned optimizer updates: "
-        f"D={planned_discriminator_updates:,}, "
-        f"G={planned_generator_updates:,} "
-        f"(exactly {DISCRIMINATOR_UPDATES_PER_GENERATOR}:1)"
-    )
-    expected_steps = update_schedule.completed_discriminator_updates(
-        start_epoch - 1
-    )
+    expected_steps = update_schedule.completed_discriminator_updates(start_epoch - 1)
     if discriminator_steps != expected_steps:
         raise ValueError("Checkpoint discriminator step count is inconsistent.")
     if loss_history["epoch"] != list(range(1, start_epoch)):
         raise ValueError("Checkpoint loss history does not match its epoch.")
-    if fixed_noise.shape != (SAMPLES_TO_DISPLAY, Z_DIM):
-        raise ValueError("Checkpoint fixed noise has an unexpected shape.")
-    if resume_from is not None:
-        print(f"Resumed training from epoch {start_epoch - 1}: {resume_from}")
+
+    dataset = cast(ImageFolder, loader.dataset)
+    class_names = [
+        IMAGENETTE_CLASS_NAMES[dataset.classes[index]]
+        for index in DISPLAY_CLASS_INDICES
+    ]
+    planned_d_steps = update_schedule.total_discriminator_updates
+    planned_g_steps = update_schedule.total_generator_updates
+    print(
+        f"Device={device}; precision={precision.name}; "
+        f"Imagenette batches/epoch={len(loader):,}"
+    )
+    print(
+        f"Planned optimizer updates: D={planned_d_steps:,}, "
+        f"G={planned_g_steps:,} ({DISCRIMINATOR_UPDATES_PER_GENERATOR}:1)"
+    )
 
     with tqdm(
-        total=planned_discriminator_updates,
+        total=planned_d_steps,
         initial=discriminator_steps,
-        desc=f"Epoch {min(start_epoch, NUM_EPOCHS)}/{NUM_EPOCHS}",
+        desc=f"Epoch {min(start_epoch, args.epochs)}/{args.epochs}",
         unit="batch",
         dynamic_ncols=True,
         mininterval=1.0,
     ) as progress_bar:
-        for epoch in range(start_epoch, NUM_EPOCHS + 1):
+        for epoch in range(start_epoch, args.epochs + 1):
             progress_bar.set_description(
-                f"Epoch {epoch}/{NUM_EPOCHS}",
+                f"Epoch {epoch}/{args.epochs}",
                 refresh=False,
             )
-
-            loss_d, loss_g, discriminator_steps = train_epoch(
+            result = train_conditional_hinge_epoch(
                 generator,
                 discriminator,
                 loader,
-                opt_g,
-                opt_d,
+                optimizer_g,
+                optimizer_d,
                 device,
-                discriminator_steps,
-                progress_bar=progress_bar,
+                precision,
+                z_dim=Z_DIM,
+                num_classes=NUM_CLASSES,
+                generator_batch_size=args.generator_batch_size,
+                discriminator_steps=discriminator_steps,
                 update_schedule=update_schedule,
+                progress_bar=progress_bar,
             )
+            discriminator_steps = result.discriminator_steps
             loss_history["epoch"].append(epoch)
-            loss_history["discriminator"].append(loss_d)
-            loss_history["generator"].append(loss_g)
+            loss_history["discriminator"].append(result.discriminator)
+            loss_history["generator"].append(result.generator_total)
 
             if epoch == 1 or epoch % SAMPLE_EVERY_EPOCHS == 0:
-                save_fixed_noise_samples(
+                save_training_samples(
                     generator,
                     fixed_noise,
-                    TRAINING_DIR / f"epoch_{epoch:03d}.png",
-                    columns=SAMPLE_GRID_COLUMNS,
-                    title="Unconditional SN-GAN fixed-z samples",
-                    epoch=epoch,
+                    fixed_labels,
+                    training_dir / f"epoch_{epoch:03d}.png",
+                    class_names=class_names,
+                    class_indices=DISPLAY_CLASS_INDICES,
+                    title=f"SN-GAN Imagenette-128 samples - epoch {epoch:03d}",
+                    shared_latents_across_classes=True,
+                    inference_batch_size=4,
                 )
 
             state["discriminator_steps"] = discriminator_steps
             session.checkpoint(epoch, state)
 
-    if discriminator_steps != planned_discriminator_updates:
-        raise RuntimeError("Training ended with an unexpected D update count.")
     session.finish()
-
     save_loss_panels(
         loss_history["epoch"],
         {
             "Discriminator hinge loss": {
                 "D hinge loss": loss_history["discriminator"],
             },
-            "Generator adversarial loss": {
-                "G adversarial loss": loss_history["generator"],
+            "Generator hinge objective": {
+                "G hinge objective": loss_history["generator"],
             },
         },
-        OUT_DIR / "loss_curves.png",
+        output_dir / "loss_curves.png",
     )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train the unconditional CIFAR-10 SN-GAN."
+        description="Train the Imagenette-128 class-conditional SN-GAN."
+    )
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DISCRIMINATOR_BATCH_SIZE,
+        help="Real/fake discriminator batch size.",
+    )
+    parser.add_argument(
+        "--generator-batch-size",
+        type=int,
+        default=GENERATOR_BATCH_SIZE,
+    )
+    parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
+    parser.add_argument(
+        "--precision",
+        choices=("auto", "bf16", "fp32"),
+        default="auto",
     )
     parser.add_argument("--resume-from", type=Path, metavar="CHECKPOINT")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if min(args.epochs, args.batch_size, args.generator_batch_size) < 1:
+        parser.error("epochs and batch sizes must be positive")
+    if args.num_workers < 0:
+        parser.error("num-workers must be non-negative")
+    return args
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(resume_from=args.resume_from)
+    main(parse_args())

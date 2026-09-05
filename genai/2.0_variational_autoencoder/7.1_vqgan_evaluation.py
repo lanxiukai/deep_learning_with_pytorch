@@ -1,4 +1,4 @@
-"""Evaluate trained VQGAN systems under one held-out CIFAR-10 protocol.
+"""Evaluate trained VQGAN systems under one Imagenette-128 protocol.
 
 This script reloads the tokenizer, PatchGAN discriminator, and causal
 Transformer prior from their stage artifacts. It reports:
@@ -20,8 +20,8 @@ for this lesson, not canonical TensorFlow FID. Unified cross-family generation
 evaluation remains outside this model-specific entry.
 
 Data:
-    data/cifar10 test split, prepared by tool_scripts/download_dataset.py.
-    CIFAR-10 class labels are ignored.
+    data/imagenette-128/val/<WNID>/*.JPEG, prepared by
+    tool_scripts/download_dataset.py --dataset imagenette.
 
 Checkpoints:
     output/vae/vqgan/**/tokenizer.pth: discovered VQGAN runs
@@ -34,26 +34,26 @@ Outputs:
     output/vae/vqgan_evaluation/<system>_real_and_reconstruction.png
     output/vae/vqgan_evaluation/<system>_prior_samples.png
 
-Evaluation data -- CIFAR-10 test:
-Available images:                      10,000
-Batch size:                                64
-Reconstruction examples:                2,048
-Generated examples:                       256
-Generation batch size:                     16
+Evaluation data -- Imagenette validation:
+Available images:                       3,925
+Batch size:                                16
+Reconstruction examples:                1,024
+Generated examples:                       100
+Generation batch size:                     10
 Sampling temperature:                     1.0
 Projected Inception feature dimensions:    256
 
 Default dimensions:
-Evaluation input:                       32x32 RGB
-Generated image:                        32x32 RGB
+Evaluation input:                     128x128 RGB
+Generated image:                      128x128 RGB
 Latent token grid:                       8x8 indices
 
 Model size per default VQGAN system:
-VQGAN tokenizer:                         1.63 M parameters
+VQGAN tokenizer:                         2.68 M parameters
 Patch discriminator:                     1.25 M parameters
-Transformer prior:                       3.44 M parameters
-Stored VQGAN total:                      6.32 M parameters
-Optional VQ-VAE baseline total:          3.02 M parameters
+Conditional Transformer prior:           3.44 M parameters
+Stored VQGAN total:                      7.37 M parameters
+Optional VQ-VAE baseline total:          3.55 M parameters
 Frozen Inception-v3 evaluator:          25.11 M parameters
 Frozen LPIPS-VGG evaluator:             14.72 M parameters
 """
@@ -74,10 +74,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
-from dl_utils.data.cifar10 import (
-    make_cifar10_loader,
-    normalized_cifar10_transform,
-)
+from dl_utils.data.imagenette import make_imagenette_loader
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
@@ -91,18 +88,21 @@ from dl_utils.vae.image_quality import (
     structural_similarity_index,
 )
 from dl_utils.vae.perceptual_autoencoder import (
-    PatchDiscriminator32,
+    PatchDiscriminator,
     RandomFeaturePerceptualLoss,
-    VQPerceptualAutoencoder32,
+    VQPerceptualAutoencoder,
     build_perceptual_loss,
 )
-from dl_utils.vae.quantization import VQVAE32, TokenUsageAccumulator
+from dl_utils.vae.quantization import VQVAE, TokenUsageAccumulator
 from dl_utils.vae.token_prior import CausalTransformerPrior, PixelCNNPrior
 
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
+IMAGE_SIZE = 128
+NUM_CLASSES = 10
 
-Tokenizer = VQPerceptualAutoencoder32 | VQVAE32
+Tokenizer = VQPerceptualAutoencoder | VQVAE
 TokenPrior = CausalTransformerPrior | PixelCNNPrior
 
 
@@ -112,10 +112,11 @@ class EvaluatedSystem:
     family: str
     tokenizer: Tokenizer
     prior: TokenPrior | None
-    discriminator: PatchDiscriminator32 | None
+    discriminator: PatchDiscriminator | None
     tokenizer_checkpoint: Path
     prior_checkpoint: Path | None
     training_config: dict[str, object]
+    image_size: int
 
     @property
     def vocabulary_size(self) -> int:
@@ -131,12 +132,14 @@ class EvaluatedSystem:
         reconstruction, indices, _, diagnostics = self.tokenizer(x)
         return reconstruction, indices, diagnostics
 
-    def prior_loss(self, indices: Tensor) -> Tensor | None:
+    def prior_loss(self, indices: Tensor, labels: Tensor) -> Tensor | None:
         if isinstance(self.prior, CausalTransformerPrior):
-            logits, targets = self.prior.teacher_forcing(indices)
+            class_labels = labels if self.prior.num_classes > 0 else None
+            logits, targets = self.prior.teacher_forcing(indices, class_labels)
             return F.cross_entropy(logits.flatten(0, 1), targets.flatten())
         if isinstance(self.prior, PixelCNNPrior):
-            return F.cross_entropy(self.prior(indices), indices)
+            class_labels = labels if self.prior.num_classes > 0 else None
+            return F.cross_entropy(self.prior(indices, labels=class_labels), indices)
         return None
 
     @torch.inference_mode()
@@ -145,6 +148,7 @@ class EvaluatedSystem:
         count: int,
         *,
         device: torch.device,
+        labels: Tensor,
         temperature: float,
     ) -> Tensor:
         if self.prior is None:
@@ -154,14 +158,19 @@ class EvaluatedSystem:
             if side * side != self.prior.sequence_length:
                 raise ValueError("VQGAN token sequence must form a square grid")
             indices = self.prior.sample(
-                count, device=device, temperature=temperature
+                count,
+                device=device,
+                labels=labels if self.prior.num_classes > 0 else None,
+                temperature=temperature,
             ).reshape(count, side, side)
         elif isinstance(self.prior, PixelCNNPrior):
+            side = self.image_size // (2**self.tokenizer.downsample_steps)
             indices = self.prior.sample(
                 count,
-                8,
-                8,
+                side,
+                side,
                 device=device,
+                labels=labels if self.prior.num_classes > 0 else None,
                 temperature=temperature,
             )
         else:
@@ -170,14 +179,16 @@ class EvaluatedSystem:
 
 
 def make_test_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
-    return make_cifar10_loader(
-        PROJECT_ROOT / "data" / "cifar10",
+    return make_imagenette_loader(
+        args.data_dir,
         args.batch_size,
         device,
-        train=False,
-        transform=normalized_cifar10_transform(horizontal_flip=False),
+        split="val",
+        image_size=IMAGE_SIZE,
+        horizontal_flip=False,
         num_workers=args.workers,
         shuffle=False,
+        preprocessed=True,
         drop_last=False,
     )
 
@@ -221,7 +232,12 @@ def load_vqgan_system(tokenizer_path: Path, device: torch.device) -> EvaluatedSy
     model_config = checkpoint.get("model_config")
     if not isinstance(model_config, dict):
         raise TypeError("VQGAN model_config must be a mapping")
-    tokenizer = VQPerceptualAutoencoder32(**model_config)
+    training_config = _training_config(checkpoint)
+    if training_config.get("dataset") != "imagenette-128" or training_config.get(
+        "image_shape"
+    ) != [3, IMAGE_SIZE, IMAGE_SIZE]:
+        raise ValueError(f"{tokenizer_path} is not an Imagenette-128 tokenizer")
+    tokenizer = VQPerceptualAutoencoder(**model_config)
     tokenizer.load_state_dict(checkpoint["state_dict"], strict=True)
     interface_id = model_state_fingerprint(tokenizer)
     if checkpoint.get("interface_id") != interface_id:
@@ -237,13 +253,19 @@ def load_vqgan_system(tokenizer_path: Path, device: torch.device) -> EvaluatedSy
         discriminator_state, dict
     ):
         raise TypeError("PatchGAN configuration and state must be mappings")
-    discriminator = PatchDiscriminator32(**discriminator_config)
+    discriminator = PatchDiscriminator(**discriminator_config)
     discriminator.load_state_dict(discriminator_state, strict=True)
 
     prior_path = tokenizer_path.with_name("transformer_prior.pth")
     prior: CausalTransformerPrior | None = None
     if prior_path.is_file():
         prior_checkpoint = _load_checkpoint(prior_path, "vqgan_transformer_prior")
+        prior_training_config = _training_config(prior_checkpoint)
+        if (
+            prior_training_config.get("dataset") != "imagenette-128 tokens"
+            or prior_training_config.get("conditioning") != "class_conditional"
+        ):
+            raise ValueError(f"{prior_path} is not an Imagenette-128 conditional prior")
         prior_config = prior_checkpoint.get("model_config")
         if not isinstance(prior_config, dict):
             raise TypeError("VQGAN prior model_config must be a mapping")
@@ -262,7 +284,8 @@ def load_vqgan_system(tokenizer_path: Path, device: torch.device) -> EvaluatedSy
         discriminator=discriminator.to(device).eval().requires_grad_(False),
         tokenizer_checkpoint=tokenizer_path,
         prior_checkpoint=prior_path if prior is not None else None,
-        training_config=_training_config(checkpoint),
+        training_config=training_config,
+        image_size=IMAGE_SIZE,
     )
 
 
@@ -274,10 +297,15 @@ def load_vq_vae_baseline(
     if not tokenizer_path.is_file():
         return None
     checkpoint = _load_checkpoint(tokenizer_path, "vq_vae_tokenizer")
+    if (
+        checkpoint.get("dataset") != "imagenette-128"
+        or checkpoint.get("image_size") != IMAGE_SIZE
+    ):
+        raise ValueError(f"{tokenizer_path} is not an Imagenette-128 tokenizer")
     model_config = checkpoint.get("model_config")
     if not isinstance(model_config, dict):
         raise TypeError("VQ-VAE model_config must be a mapping")
-    tokenizer = VQVAE32(**model_config)
+    tokenizer = VQVAE(**model_config)
     tokenizer.load_state_dict(checkpoint["state_dict"], strict=True)
     interface_id = model_state_fingerprint(tokenizer)
     if checkpoint.get("interface_id") != interface_id:
@@ -286,6 +314,12 @@ def load_vq_vae_baseline(
     prior: PixelCNNPrior | None = None
     if prior_path.is_file():
         prior_checkpoint = _load_checkpoint(prior_path, "vq_vae_pixelcnn_prior")
+        if (
+            prior_checkpoint.get("dataset") != "imagenette-128"
+            or prior_checkpoint.get("image_size") != IMAGE_SIZE
+            or prior_checkpoint.get("conditioning") != "class_conditional"
+        ):
+            raise ValueError(f"{prior_path} is not an Imagenette-128 conditional prior")
         prior_config = prior_checkpoint.get("model_config")
         if not isinstance(prior_config, dict):
             raise TypeError("VQ-VAE prior model_config must be a mapping")
@@ -305,6 +339,7 @@ def load_vq_vae_baseline(
         tokenizer_checkpoint=tokenizer_path,
         prior_checkpoint=prior_path if prior is not None else None,
         training_config={"direct_baseline": True},
+        image_size=IMAGE_SIZE,
     )
 
 
@@ -406,11 +441,12 @@ def evaluate_reconstruction(
     examples = 0
     positions = 0
     comparison: Tensor | None = None
-    for x, _ in loader:
+    for x, labels in loader:
         remaining = max_examples - examples
         if remaining <= 0:
             break
         x = x[:remaining].to(device, non_blocking=True)
+        labels = labels[:remaining].to(device, non_blocking=True)
         reconstruction, indices, diagnostics = system.reconstruct_and_tokens(x)
         if comparison is None:
             comparison = torch.cat((x[:16], reconstruction[:16])).cpu()
@@ -430,7 +466,7 @@ def evaluate_reconstruction(
             * x.shape[0]
         )
         usage.update(indices)
-        loss = system.prior_loss(indices)
+        loss = system.prior_loss(indices, labels)
         if loss is not None:
             prior_nll += float(loss) * x.shape[0]
             prior_examples += x.shape[0]
@@ -522,8 +558,18 @@ def evaluate_generation(
     generated = 0
     while generated < examples:
         count = min(batch_size, examples - generated)
+        labels = torch.arange(
+            generated,
+            generated + count,
+            device=device,
+        ).remainder(NUM_CLASSES)
         start = time.perf_counter()
-        images = system.sample(count, device=device, temperature=temperature)
+        images = system.sample(
+            count,
+            device=device,
+            labels=labels,
+            temperature=temperature,
+        )
         if device.type == "cuda":
             torch.cuda.synchronize()
         elapsed += time.perf_counter() - start
@@ -616,7 +662,8 @@ def evaluate(args: argparse.Namespace) -> None:
     model_results: dict[str, dict[str, object]] = {}
     results: dict[str, object] = {
         "protocol": {
-            "dataset": "CIFAR-10 test",
+            "dataset": "imagenette-128 validation",
+            "conditioning": "class_conditional",
             "max_reconstruction_examples": args.max_examples,
             "generation_examples": args.generation_examples,
             "generation_batch_size": args.generation_batch_size,
@@ -715,10 +762,13 @@ class TinyFeatures(nn.Module):
 def smoke_test() -> None:
     set_seed(7)
     device = torch.device("cpu")
-    tokenizer = VQPerceptualAutoencoder32(
-        latent_channels=4, codebook_size=16, hidden_channels=16
+    tokenizer = VQPerceptualAutoencoder(
+        latent_channels=4,
+        codebook_size=16,
+        hidden_channels=16,
+        downsample_steps=4,
     )
-    discriminator = PatchDiscriminator32(base_channels=8)
+    discriminator = PatchDiscriminator(base_channels=8)
     prior_config = {
         "vocabulary_size": 16,
         "sequence_length": 64,
@@ -726,6 +776,7 @@ def smoke_test() -> None:
         "heads": 4,
         "layers": 1,
         "dropout": 0.0,
+        "num_classes": NUM_CLASSES,
     }
     prior = CausalTransformerPrior(**prior_config)
     interface_id = model_state_fingerprint(tokenizer)
@@ -744,10 +795,13 @@ def smoke_test() -> None:
                     "latent_channels": 4,
                     "codebook_size": 16,
                     "hidden_channels": 16,
+                    "downsample_steps": 4,
                 },
                 "training_config": {
                     "run_name": "smoke",
                     "adversarial_weighting": "fixed",
+                    "dataset": "imagenette-128",
+                    "image_shape": [3, IMAGE_SIZE, IMAGE_SIZE],
                 },
             },
             tokenizer_path,
@@ -758,14 +812,26 @@ def smoke_test() -> None:
                 "state_dict": prior.state_dict(),
                 "model_config": prior_config,
                 "tokenizer_interface_id": interface_id,
+                "training_config": {
+                    "dataset": "imagenette-128 tokens",
+                    "conditioning": "class_conditional",
+                },
             },
             tokenizer_path.with_name("transformer_prior.pth"),
         )
         system = load_vqgan_system(tokenizer_path, device)
-        baseline_tokenizer = VQVAE32(
-            hidden_channels=16, embedding_dim=4, codebook_size=16
+        baseline_tokenizer = VQVAE(
+            hidden_channels=16,
+            embedding_dim=4,
+            codebook_size=16,
+            downsample_steps=3,
         )
-        baseline_prior = PixelCNNPrior(16, hidden_channels=8, layers=1)
+        baseline_prior = PixelCNNPrior(
+            16,
+            hidden_channels=8,
+            layers=1,
+            num_classes=NUM_CLASSES,
+        )
         baseline_interface_id = model_state_fingerprint(baseline_tokenizer)
         baseline_directory = Path(directory) / "vq-vae"
         baseline_tokenizer_path = baseline_directory / "tokenizer.pth"
@@ -779,7 +845,10 @@ def smoke_test() -> None:
                     "hidden_channels": 16,
                     "embedding_dim": 4,
                     "codebook_size": 16,
+                    "downsample_steps": 3,
                 },
+                "dataset": "imagenette-128",
+                "image_size": IMAGE_SIZE,
             },
             baseline_tokenizer_path,
         )
@@ -791,8 +860,12 @@ def smoke_test() -> None:
                     "vocabulary_size": 16,
                     "hidden_channels": 8,
                     "layers": 1,
+                    "num_classes": NUM_CLASSES,
                 },
                 "tokenizer_interface_id": baseline_interface_id,
+                "dataset": "imagenette-128",
+                "image_size": IMAGE_SIZE,
+                "conditioning": "class_conditional",
             },
             baseline_prior_path,
         )
@@ -801,7 +874,7 @@ def smoke_test() -> None:
         )
         loader = DataLoader(
             TensorDataset(
-                torch.rand(8, 3, 32, 32).mul(2).sub(1),
+                torch.rand(8, 3, IMAGE_SIZE, IMAGE_SIZE).mul(2).sub(1),
                 torch.arange(8) % 10,
             ),
             batch_size=4,
@@ -836,8 +909,8 @@ def smoke_test() -> None:
             temperature=1.0,
             device=device,
         )
-    assert comparison.shape == (8, 3, 32, 32)
-    assert images.shape == (2, 3, 32, 32)
+    assert comparison.shape == (8, 3, IMAGE_SIZE, IMAGE_SIZE)
+    assert images.shape == (2, 3, IMAGE_SIZE, IMAGE_SIZE)
     assert baseline_system is not None and baseline_system.has_complete_prior
     assert metrics["patch_discriminator"] is not None
     assert metrics["prior"] is not None
@@ -851,10 +924,11 @@ def smoke_test() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-test", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--max-examples", type=int, default=2_048)
-    parser.add_argument("--generation-examples", type=int, default=256)
-    parser.add_argument("--generation-batch-size", type=int, default=16)
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--max-examples", type=int, default=1_024)
+    parser.add_argument("--generation-examples", type=int, default=100)
+    parser.add_argument("--generation-batch-size", type=int, default=10)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--inception-projection-dim", type=int, default=256)
     parser.add_argument("--feature-seed", type=int, default=2026)

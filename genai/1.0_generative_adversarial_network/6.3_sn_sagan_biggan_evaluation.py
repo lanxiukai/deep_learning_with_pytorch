@@ -1,139 +1,82 @@
-"""Compare CIFAR-10 reference images with fresh GAN samples.
+"""Compare Imagenette-128 references with conditional GAN samples.
 
-Each available model gets one focused two-row figure.  The first row contains
-one CIFAR-10 test image per class; the second uses evaluation-only latent
-vectors that are independent of the fixed inputs saved under ``training/``.
-SAGAN and BigGAN generate the class named above each column, while SN-GAN
-remains unconditional and makes no per-column class claim.
-
-Missing generator checkpoints are reported and skipped so any completed model
-in the lesson sequence can be evaluated independently.
-
-Inputs:
-    data/cifar10, prepared by tool_scripts/download_dataset.py
-    output/gan/sn_gan/generator.pth, created by 6.0_sn_gan.py
-    output/gan/sagan/generator.pth, created by 6.1_sagan.py
-    output/gan/biggan/generator.pth, created by 6.2_biggan.py
-
-Outputs:
-    Each evaluation directory is reset at the start of every run.
-    output/gan/sn_gan/evaluation/real_vs_generated.png
-    output/gan/sagan/evaluation/real_vs_generated.png
-    output/gan/biggan/evaluation/real_vs_generated.png
+Each available generator receives the same ten Imagenette class indices and
+model-specific evaluation noise. Missing checkpoints are reported and skipped
+so the three lessons can still be trained and inspected independently.
 """
+
+import argparse
+import os
+from pathlib import Path
 
 import torch
 
-from dl_utils.data.cifar10 import (
-    make_cifar10_dataset,
-    normalized_cifar10_transform,
+from dl_utils.data.imagenette import (
+    IMAGENETTE_CLASS_NAMES,
+    make_imagenette_dataset,
 )
-from dl_utils.runtime.devices import try_gpu
-from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
-from dl_utils.gan.biggan import CompactBigGANGenerator
-from dl_utils.gan.sagan import (
-    CIFAR10_CLASS_NAMES,
-    SAGANGenerator,
-)
-from dl_utils.gan.sn_gan import (
-    SNGenerator,
-)
+from dl_utils.gan.biggan import BigGANGenerator
 from dl_utils.gan.inference import generate_in_batches
+from dl_utils.gan.sagan import SAGANGenerator
+from dl_utils.gan.sn_gan import SNGenerator
 from dl_utils.plot.images import save_image_row_grid
+from dl_utils.runtime.devices import try_gpu
+from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import load_model_weights
 
-
 PROJECT_ROOT = infer_project_root()
-DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
-MODEL_OUT_DIRS = {
-    model_name: PROJECT_ROOT / "output" / "gan" / model_name
-    for model_name in ("sn_gan", "sagan", "biggan")
-}
-EVALUATION_DIRS = {
-    model_name: MODEL_OUT_DIRS[model_name] / "evaluation"
-    for model_name in MODEL_OUT_DIRS
-}
-
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
+DEFAULT_OUTPUT_ROOT = Path(
+    os.environ.get("DL_OUTPUT_ROOT", PROJECT_ROOT / "output" / "gan")
+)
+IMAGE_SIZE = 128
 NUM_CLASSES = 10
+DISPLAY_CLASS_INDICES = tuple(range(NUM_CLASSES))
 EVALUATION_SEED = 10_042
 MODEL_EVALUATION_SEEDS = {
     "sn_gan": EVALUATION_SEED + 1,
     "sagan": EVALUATION_SEED + 2,
     "biggan": EVALUATION_SEED + 3,
 }
-
 MODEL_SPECS = (
-    (
-        "sn_gan",
-        "SN-GAN",
-        SNGenerator,
-        MODEL_OUT_DIRS["sn_gan"] / "generator.pth",
-        "6.0_sn_gan.py",
-        5,
-        "unconditional",
-        None,
-    ),
-    (
-        "sagan",
-        "SAGAN",
-        SAGANGenerator,
-        MODEL_OUT_DIRS["sagan"] / "generator.pth",
-        "6.1_sagan.py",
-        8,
-        "class_conditional",
-        None,
-    ),
-    (
-        "biggan",
-        "Compact BigGAN EMA",
-        CompactBigGANGenerator,
-        MODEL_OUT_DIRS["biggan"] / "generator.pth",
-        "6.2_biggan.py",
-        7,
-        "class_conditional",
-        "ema",
-    ),
+    ("sn_gan", "SN-GAN", SNGenerator, "6.0_sn_gan.py", 8, None),
+    ("sagan", "SAGAN", SAGANGenerator, "6.1_sagan.py", 11, None),
+    ("biggan", "BigGAN EMA", BigGANGenerator, "6.2_biggan.py", 10, "ema"),
 )
 
 
-def load_cifar10_test_references():
-    """Return one deterministic, normalized test image for every class."""
-    if not (DATA_DIR / "cifar-10-batches-py").is_dir():
-        raise FileNotFoundError(
-            f"CIFAR-10 data not found: {DATA_DIR}. "
-            "Run tool_scripts/download_dataset.py first."
-        )
-
-    dataset = make_cifar10_dataset(
-        DATA_DIR,
-        train=False,
-        transform=normalized_cifar10_transform(horizontal_flip=False),
-    )
-    indices_by_class = [[] for _ in range(NUM_CLASSES)]
+def load_imagenette_references(data_dir):
+    """Return one deterministic normalized image for each display class."""
+    dataset = make_imagenette_dataset(data_dir, preprocessed=True)
+    candidates = {class_index: [] for class_index in DISPLAY_CLASS_INDICES}
     for sample_index, class_index in enumerate(dataset.targets):
-        indices_by_class[class_index].append(sample_index)
-    if any(not indices for indices in indices_by_class):
-        raise RuntimeError("CIFAR-10 test data is missing a class.")
+        if class_index in candidates:
+            candidates[class_index].append(sample_index)
+    if any(not indices for indices in candidates.values()):
+        raise RuntimeError("The Imagenette tree is missing a display class.")
 
     random_generator = torch.Generator().manual_seed(EVALUATION_SEED)
     selected_indices = [
         indices[
-            torch.randint(
-                len(indices),
-                (),
-                generator=random_generator,
-            ).item()
+            int(
+                torch.randint(
+                    len(indices),
+                    (),
+                    generator=random_generator,
+                ).item()
+            )
         ]
-        for indices in indices_by_class
+        for indices in candidates.values()
     ]
-
-    images = torch.stack(
-        [dataset[index][0] for index in selected_indices]
-    )
-    labels = torch.arange(NUM_CLASSES, dtype=torch.long)
-    return images, labels
+    images = torch.stack([dataset[index][0] for index in selected_indices])
+    labels = torch.tensor(DISPLAY_CLASS_INDICES, dtype=torch.long)
+    class_names = [
+        IMAGENETTE_CLASS_NAMES[dataset.classes[index]]
+        for index in DISPLAY_CLASS_INDICES
+    ]
+    return images, labels, class_names
 
 
 def load_generator(
@@ -142,43 +85,26 @@ def load_generator(
     checkpoint_path,
     script_name,
     expected_format_version,
-    expected_conditioning,
     expected_weights,
     device,
 ):
-    """Load one generator produced by the current lesson scripts."""
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(
-            f"{model_name} checkpoint not found: {checkpoint_path}. "
-            f"Run {script_name} first."
-        )
-
+    """Load a generator produced by the current Imagenette lesson scripts."""
     expected_metadata = {
         "model_name": model_name,
         "format_version": expected_format_version,
-        "conditioning": expected_conditioning,
+        "conditioning": "class_conditional",
     }
     if expected_weights is not None:
         expected_metadata["weights"] = expected_weights
 
-    def prepare_constructor_config(model_config):
-        checkpoint_image_size = model_config.get("image_size", 32)
-        if checkpoint_image_size != 32:
+    def validate_config(model_config):
+        if model_config.get("image_size") != IMAGE_SIZE:
             raise ValueError(
-                f"Expected a 32x32 checkpoint at {checkpoint_path}."
+                f"Expected a {IMAGE_SIZE}x{IMAGE_SIZE} checkpoint at {checkpoint_path}."
             )
-        if (
-            expected_conditioning == "class_conditional"
-            and model_config.get("num_classes") != NUM_CLASSES
-        ):
-            raise ValueError(
-                f"Expected {NUM_CLASSES} classes at {checkpoint_path}."
-            )
-        return {
-            key: value
-            for key, value in model_config.items()
-            if key != "image_size"
-        }
+        if model_config.get("num_classes") != NUM_CLASSES:
+            raise ValueError(f"Expected {NUM_CLASSES} classes at {checkpoint_path}.")
+        return model_config
 
     try:
         return load_model_weights(
@@ -186,7 +112,7 @@ def load_generator(
             model_class,
             device=device,
             expected_metadata=expected_metadata,
-            config_transform=prepare_constructor_config,
+            config_transform=validate_config,
         )
     except ValueError as error:
         raise ValueError(f"{error} Retrain it with {script_name}.") from error
@@ -198,54 +124,39 @@ def save_real_vs_generated(
     display_name,
     generator,
     model_config,
-    conditioning,
     reference_images,
     reference_labels,
+    class_names,
+    output_path,
     device,
+    batch_size,
 ):
-    """Save one model's CIFAR-10 test-versus-fresh-sample comparison."""
+    """Save one model's Imagenette reference-versus-sample comparison."""
     z_dim = model_config.get("z_dim")
     if not isinstance(z_dim, int) or z_dim < 1:
         raise ValueError(f"{model_name} checkpoint has an invalid z_dim.")
 
-    random_generator = torch.Generator().manual_seed(
-        MODEL_EVALUATION_SEEDS[model_name]
-    )
+    random_generator = torch.Generator().manual_seed(MODEL_EVALUATION_SEEDS[model_name])
     noise = torch.randn(
-        NUM_CLASSES,
+        len(DISPLAY_CLASS_INDICES),
         z_dim,
         generator=random_generator,
     ).to(device)
-    if conditioning == "class_conditional":
-        generated_images = generate_in_batches(
-            (noise, reference_labels.to(device)),
-            NUM_CLASSES,
-            lambda noise_batch, label_batch: generator(
-                noise_batch,
-                label_batch,
-            ).float(),
-            module=generator,
-        )
-        generated_row_label = display_name
-        column_labels = [
-            name.title() for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
-        ]
-        title = f"{display_name}: CIFAR-10 test vs class-conditioned samples"
-    else:
-        generated_images = generate_in_batches(
-            noise,
-            NUM_CLASSES,
-            lambda noise_batch: generator(noise_batch).float(),
-            module=generator,
-        )
-        generated_row_label = f"{display_name} (unconditional)"
-        column_labels = [
-            f"Reference: {name.title()}"
-            for name in CIFAR10_CLASS_NAMES[:NUM_CLASSES]
-        ]
-        title = f"{display_name}: CIFAR-10 test vs unconditional samples"
-
-    expected_shape = (NUM_CLASSES, 3, 32, 32)
+    generated_images = generate_in_batches(
+        (noise, reference_labels.to(device)),
+        batch_size,
+        lambda noise_batch, label_batch: generator(
+            noise_batch,
+            label_batch,
+        ).float(),
+        module=generator,
+    )
+    expected_shape = (
+        len(DISPLAY_CLASS_INDICES),
+        3,
+        IMAGE_SIZE,
+        IMAGE_SIZE,
+    )
     if tuple(generated_images.shape) != expected_shape:
         raise ValueError(
             f"{model_name} generated {tuple(generated_images.shape)}; "
@@ -253,23 +164,22 @@ def save_real_vs_generated(
         )
     save_image_row_grid(
         [reference_images, generated_images],
-        ["CIFAR-10 test", generated_row_label],
-        EVALUATION_DIRS[model_name] / "real_vs_generated.png",
-        title=title,
-        column_labels=column_labels,
+        ["Imagenette train", display_name],
+        output_path,
+        title=f"{display_name}: Imagenette-128 reference vs conditional sample",
+        column_labels=class_names,
     )
-    return EVALUATION_DIRS[model_name] / "real_vs_generated.png"
 
 
-def main():
-    for evaluation_dir in EVALUATION_DIRS.values():
-        reset_dir(str(evaluation_dir))
-
+def main(args):
+    for model_name, *_ in MODEL_SPECS:
+        reset_dir(str(args.output_root / model_name / "evaluation"))
     available_specs = []
     for spec in MODEL_SPECS:
-        model_name, display_name, _, checkpoint_path, script_name, *_ = spec
+        model_name, display_name, _, script_name, *_ = spec
+        checkpoint_path = args.output_root / model_name / "generator.pth"
         if checkpoint_path.is_file():
-            available_specs.append(spec)
+            available_specs.append((*spec, checkpoint_path))
         else:
             print(
                 f"Skipping {display_name}: {checkpoint_path} is missing. "
@@ -281,40 +191,54 @@ def main():
 
     set_seed(EVALUATION_SEED)
     device = try_gpu()
-    reference_images, reference_labels = load_cifar10_test_references()
-
+    references, labels, class_names = load_imagenette_references(args.data_dir)
     for (
         model_name,
         display_name,
         model_class,
-        checkpoint_path,
         script_name,
         format_version,
-        conditioning,
         weights,
+        checkpoint_path,
     ) in available_specs:
+        evaluation_dir = args.output_root / model_name / "evaluation"
         generator, model_config = load_generator(
             model_name,
             model_class,
             checkpoint_path,
             script_name,
             format_version,
-            conditioning,
             weights,
             device,
         )
-        output_path = save_real_vs_generated(
+        output_path = evaluation_dir / "real_vs_generated.png"
+        save_real_vs_generated(
             model_name,
             display_name,
             generator,
             model_config,
-            conditioning,
-            reference_images,
-            reference_labels,
+            references,
+            labels,
+            class_names,
+            output_path,
             device,
+            args.batch_size,
         )
         print(f"Saved {display_name} comparison: {output_path}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Evaluate Imagenette-128 SN-GAN, SAGAN, and BigGAN."
+    )
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--batch-size", type=int, default=2)
+    args = parser.parse_args()
+    if args.batch_size < 1:
+        parser.error("batch-size must be positive")
+    return args
+
+
 if __name__ == "__main__":
-    main()
+    main(parse_args())

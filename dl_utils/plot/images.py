@@ -225,9 +225,16 @@ def save_training_samples(
     dpi=200,
     shared_latents_across_classes=False,
     inference_batch_size: int | None = None,
+    class_indices=None,
 ) -> None:
     """Generate and save fixed class-conditional samples grouped by class."""
     class_names = tuple(class_names)
+    if class_indices is None:
+        class_indices = tuple(range(len(class_names)))
+    else:
+        class_indices = tuple(class_indices)
+    if len(class_indices) != len(class_names):
+        raise ValueError("class_indices and class_names must have equal length.")
     sample_batch_size = (
         len(noise) if inference_batch_size is None else inference_batch_size
     )
@@ -244,7 +251,7 @@ def save_training_samples(
     cpu_labels = labels.cpu()
     image_rows = [
         samples[cpu_labels == class_index]
-        for class_index in range(len(class_names))
+        for class_index in class_indices
     ]
     save_image_row_grid(
         image_rows,

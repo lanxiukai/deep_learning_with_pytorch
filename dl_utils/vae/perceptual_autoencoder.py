@@ -32,48 +32,88 @@ class ResidualBlock(nn.Module):
         return x + self.net(x)
 
 
-class PerceptualEncoder32(nn.Module):
-    """32x32 RGB image to an 8x8 latent grid."""
+class PerceptualEncoder(nn.Module):
+    """Residual image encoder with configurable spatial compression."""
 
-    def __init__(self, out_channels: int, hidden_channels: int = 128) -> None:
+    def __init__(
+        self,
+        out_channels: int,
+        hidden_channels: int = 128,
+        downsample_steps: int = 2,
+    ) -> None:
         super().__init__()
+        if hidden_channels < 2 or downsample_steps < 2:
+            raise ValueError(
+                "hidden_channels and downsample_steps must be at least two"
+            )
         groups = min(32, hidden_channels)
         while hidden_channels % groups != 0:
             groups -= 1
-        self.net = nn.Sequential(
+        layers: list[nn.Module] = [
             nn.Conv2d(3, hidden_channels // 2, 4, 2, 1),
             nn.SiLU(inplace=True),
-            nn.Conv2d(hidden_channels // 2, hidden_channels, 4, 2, 1),
-            ResidualBlock(hidden_channels),
-            ResidualBlock(hidden_channels),
-            nn.GroupNorm(groups, hidden_channels),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(hidden_channels, out_channels, 3, padding=1),
+        ]
+        in_channels = hidden_channels // 2
+        for step in range(1, downsample_steps):
+            layers.append(nn.Conv2d(in_channels, hidden_channels, 4, 2, 1))
+            if step < downsample_steps - 1:
+                layers.append(nn.SiLU(inplace=True))
+            in_channels = hidden_channels
+        layers.extend(
+            [
+                ResidualBlock(hidden_channels),
+                ResidualBlock(hidden_channels),
+                nn.GroupNorm(groups, hidden_channels),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(hidden_channels, out_channels, 3, padding=1),
+            ]
         )
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.net(x)
 
 
-class PerceptualDecoder32(nn.Module):
-    """8x8 latent grid to a 32x32 RGB image in [-1, 1]."""
+class PerceptualDecoder(nn.Module):
+    """Mirror a ``PerceptualEncoder`` and reconstruct RGB in [-1, 1]."""
 
-    def __init__(self, in_channels: int, hidden_channels: int = 128) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 128,
+        downsample_steps: int = 2,
+    ) -> None:
         super().__init__()
+        if hidden_channels < 2 or downsample_steps < 2:
+            raise ValueError(
+                "hidden_channels and downsample_steps must be at least two"
+            )
         groups = min(32, hidden_channels)
         while hidden_channels % groups != 0:
             groups -= 1
-        self.net = nn.Sequential(
+        layers: list[nn.Module] = [
             nn.Conv2d(in_channels, hidden_channels, 3, padding=1),
             ResidualBlock(hidden_channels),
             ResidualBlock(hidden_channels),
             nn.GroupNorm(groups, hidden_channels),
             nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, 4, 2, 1),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(hidden_channels // 2, 3, 4, 2, 1),
-            nn.Tanh(),
+        ]
+        for _ in range(downsample_steps - 2):
+            layers.extend(
+                [
+                    nn.ConvTranspose2d(hidden_channels, hidden_channels, 4, 2, 1),
+                    nn.SiLU(inplace=True),
+                ]
+            )
+        layers.extend(
+            [
+                nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, 4, 2, 1),
+                nn.SiLU(inplace=True),
+                nn.ConvTranspose2d(hidden_channels // 2, 3, 4, 2, 1),
+                nn.Tanh(),
+            ]
         )
+        self.net = nn.Sequential(*layers)
 
     @property
     def last_layer(self) -> nn.Parameter:
@@ -86,7 +126,7 @@ class PerceptualDecoder32(nn.Module):
         return self.net(z)
 
 
-class VQPerceptualAutoencoder32(nn.Module):
+class VQPerceptualAutoencoder(nn.Module):
     """VQGAN first-stage model without hiding its loss in the module."""
 
     def __init__(
@@ -96,13 +136,17 @@ class VQPerceptualAutoencoder32(nn.Module):
         codebook_size: int = 512,
         hidden_channels: int = 128,
         commitment: float = 0.25,
+        downsample_steps: int = 2,
     ) -> None:
         super().__init__()
-        self.encoder = PerceptualEncoder32(latent_channels, hidden_channels)
-        self.quantizer = VectorQuantizer(
-            codebook_size, latent_channels, commitment
+        self.downsample_steps = downsample_steps
+        self.encoder = PerceptualEncoder(
+            latent_channels, hidden_channels, downsample_steps
         )
-        self.decoder = PerceptualDecoder32(latent_channels, hidden_channels)
+        self.quantizer = VectorQuantizer(codebook_size, latent_channels, commitment)
+        self.decoder = PerceptualDecoder(
+            latent_channels, hidden_channels, downsample_steps
+        )
 
     def encode(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         return self.quantizer(self.encoder(x))
@@ -122,13 +166,11 @@ class VQPerceptualAutoencoder32(nn.Module):
 class KLPerceptualAutoencoder32(nn.Module):
     """Continuous KL-regularized autoencoder used before latent diffusion."""
 
-    def __init__(
-        self, *, latent_channels: int = 4, hidden_channels: int = 128
-    ) -> None:
+    def __init__(self, *, latent_channels: int = 4, hidden_channels: int = 128) -> None:
         super().__init__()
         self.latent_channels = latent_channels
-        self.encoder = PerceptualEncoder32(2 * latent_channels, hidden_channels)
-        self.decoder = PerceptualDecoder32(latent_channels, hidden_channels)
+        self.encoder = PerceptualEncoder(2 * latent_channels, hidden_channels)
+        self.decoder = PerceptualDecoder(latent_channels, hidden_channels)
 
     def encode(self, x: Tensor) -> tuple[Tensor, Tensor]:
         mu, logvar = self.encoder(x).chunk(2, dim=1)
@@ -154,9 +196,7 @@ class KLPerceptualAutoencoder32(nn.Module):
         return self.decoder(z / latent_scale)
 
     def reconstruct(self, x: Tensor) -> Tensor:
-        return self.decode_latent(
-            self.encode_latent(x, sample=False), latent_scale=1.0
-        )
+        return self.decode_latent(self.encode_latent(x, sample=False), latent_scale=1.0)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         mu, logvar = self.encode(x)
@@ -164,7 +204,7 @@ class KLPerceptualAutoencoder32(nn.Module):
         return self.decoder(z), mu, logvar, z
 
 
-class PatchDiscriminator32(nn.Module):
+class PatchDiscriminator(nn.Module):
     """Small PatchGAN returning a spatial grid of local real/fake logits."""
 
     def __init__(self, base_channels: int = 64) -> None:
@@ -242,9 +282,7 @@ class VGGPerceptualLoss(nn.Module):
         from torchvision import models
 
         features = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features
-        self.blocks = nn.ModuleList(
-            [features[:4], features[4:9], features[9:16]]
-        )
+        self.blocks = nn.ModuleList([features[:4], features[4:9], features[9:16]])
         self.eval().requires_grad_(False)
         self.register_buffer(
             "mean", torch.tensor((0.485, 0.456, 0.406)).view(1, 3, 1, 1)
@@ -329,9 +367,7 @@ def adaptive_adversarial_weight(
     maximum: float = 1e4,
 ) -> Tensor:
     """Match last-decoder-layer gradient norms and stop the ratio's gradient."""
-    base_gradient = torch.autograd.grad(
-        base_loss, last_layer, retain_graph=True
-    )[0]
+    base_gradient = torch.autograd.grad(base_loss, last_layer, retain_graph=True)[0]
     adversarial_gradient = torch.autograd.grad(
         adversarial_loss, last_layer, retain_graph=True
     )[0]
@@ -339,15 +375,27 @@ def adaptive_adversarial_weight(
     return (float(scale) * ratio.clamp(0.0, maximum)).detach()
 
 
+# Backward-compatible names for the earlier 32x32 lessons. Their defaults keep
+# the original two-step compression, while VQGAN can request four steps.
+PerceptualEncoder32 = PerceptualEncoder
+PerceptualDecoder32 = PerceptualDecoder
+VQPerceptualAutoencoder32 = VQPerceptualAutoencoder
+PatchDiscriminator32 = PatchDiscriminator
+
+
 __all__ = [
     "KLPerceptualAutoencoder32",
     "LPIPSPerceptualLoss",
+    "PatchDiscriminator",
     "PatchDiscriminator32",
+    "PerceptualDecoder",
     "PerceptualDecoder32",
+    "PerceptualEncoder",
     "PerceptualEncoder32",
     "RandomFeaturePerceptualLoss",
     "ResidualBlock",
     "VGGPerceptualLoss",
+    "VQPerceptualAutoencoder",
     "VQPerceptualAutoencoder32",
     "adaptive_adversarial_weight",
     "build_perceptual_loss",

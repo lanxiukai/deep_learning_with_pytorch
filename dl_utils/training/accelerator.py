@@ -1,7 +1,8 @@
-"""Single-GPU BF16 helpers for long-running training lessons."""
+"""Single-GPU precision helpers for long-running training lessons."""
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -33,6 +34,26 @@ class BF16Precision:
         optimizer.step()
 
 
+@dataclass(frozen=True)
+class FP32Precision:
+    """Own the ordinary FP32 forward and optimizer-step behavior."""
+
+    device: torch.device
+
+    @property
+    def name(self) -> str:
+        return "fp32"
+
+    def autocast(self):
+        """Return a no-op context matching the mixed-precision interface."""
+        return nullcontext()
+
+    def backward_step(self, loss, optimizer) -> None:
+        """Backpropagate and update parameters in FP32."""
+        loss.backward()
+        optimizer.step()
+
+
 def configure_device(device: torch.device) -> None:
     """Enable safe throughput-oriented CUDA backend settings."""
     if device.type != "cuda":
@@ -54,6 +75,22 @@ def resolve_bf16_precision(device: torch.device) -> BF16Precision:
     return BF16Precision(device)
 
 
+def resolve_training_precision(
+    device: torch.device,
+    requested: str = "auto",
+) -> BF16Precision | FP32Precision:
+    """Resolve ``auto``, ``bf16``, or ``fp32`` for one training run."""
+    if requested not in {"auto", "bf16", "fp32"}:
+        raise ValueError("requested precision must be auto, bf16, or fp32.")
+    if requested == "fp32":
+        return FP32Precision(device)
+    if requested == "bf16":
+        return resolve_bf16_precision(device)
+    if device.type == "cuda" and torch.cuda.is_bf16_supported():
+        return BF16Precision(device)
+    return FP32Precision(device)
+
+
 def make_fused_adam(parameters, *, device: torch.device, **kwargs):
     """Create Adam with its fused CUDA implementation when available."""
     return torch.optim.Adam(
@@ -65,7 +102,9 @@ def make_fused_adam(parameters, *, device: torch.device, **kwargs):
 
 __all__ = [
     "BF16Precision",
+    "FP32Precision",
     "configure_device",
     "make_fused_adam",
     "resolve_bf16_precision",
+    "resolve_training_precision",
 ]

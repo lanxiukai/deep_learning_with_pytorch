@@ -1,9 +1,12 @@
-"""Compact BigGAN additions built on the SAGAN discriminator.
+"""BigGAN components for a paper-oriented 128x128 teaching model.
 
-The generator demonstrates shared class embeddings, conditional BatchNorm,
-hierarchical latent inputs, and modified orthogonal regularization. It remains
-a small CIFAR-10 teaching model rather than a large-scale BigGAN reproduction.
+The 64-channel default keeps the original 128x128 architecture, hierarchical
+120-dimensional latent input, shared 128-dimensional class embedding,
+64x64 attention, spectral normalization, and projection discriminator. It
+deliberately avoids the paper's costly 96-channel and 2,048-image scaling.
 """
+
+from itertools import pairwise
 
 import torch
 import torch.nn.functional as F
@@ -11,6 +14,11 @@ from torch import nn
 from torch.nn.utils import spectral_norm
 
 from dl_utils.gan.sagan import SAGANDiscriminator, SelfAttention
+from dl_utils.gan.sn_gan import (
+    IMAGENETTE_IMAGE_SIZE,
+    IMAGENETTE_NUM_CLASSES,
+    validate_class_labels,
+)
 
 
 class ConditionalBatchNorm2d(nn.Module):
@@ -19,32 +27,25 @@ class ConditionalBatchNorm2d(nn.Module):
     def __init__(self, channels, condition_dim):
         super().__init__()
         self.normalization = nn.BatchNorm2d(channels, affine=False)
-        # Map each condition from (B, condition_dim) to (B, 2C):
-        # first C values for gamma, remaining C values for beta.
         self.affine = spectral_norm(nn.Linear(condition_dim, 2 * channels))
         nn.init.zeros_(self.affine.bias)
 
     def forward(self, inputs, condition):
-        # inputs shape: (B, C, H, W), condition shape: (B, condition_dim)
-        gamma, beta = self.affine(condition).chunk(2, dim=1)  # gamma: (B, C), beta: (B, C)
-        gamma = gamma[:, :, None, None]  # (B, C, 1, 1)
-        beta = beta[:, :, None, None]    # (B, C, 1, 1)
-        return self.normalization(inputs) * (1 + gamma) + beta  # (B, C, H, W)
+        gamma, beta = self.affine(condition).chunk(2, dim=1)
+        gamma = gamma[:, :, None, None]
+        beta = beta[:, :, None, None]
+        return self.normalization(inputs) * (1 + gamma) + beta
 
 
 class BigGANGeneratorResidualBlock(nn.Module):
-    """Conditional residual block that upsamples by a factor of two."""
+    """Vector-conditioned residual block that upsamples by two."""
 
     def __init__(self, in_channels, out_channels, condition_dim):
         super().__init__()
         self.norm1 = ConditionalBatchNorm2d(in_channels, condition_dim)
         self.norm2 = ConditionalBatchNorm2d(out_channels, condition_dim)
-        self.conv1 = spectral_norm(
-            nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        )
-        self.conv2 = spectral_norm(
-            nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        )
+        self.conv1 = spectral_norm(nn.Conv2d(in_channels, out_channels, 3, padding=1))
+        self.conv2 = spectral_norm(nn.Conv2d(out_channels, out_channels, 3, padding=1))
         self.skip = (
             spectral_norm(nn.Conv2d(in_channels, out_channels, 1))
             if in_channels != out_channels
@@ -52,97 +53,137 @@ class BigGANGeneratorResidualBlock(nn.Module):
         )
 
     def forward(self, inputs, condition):
-        # inputs shape: (B, C_in, H, W), condition shape: (B, condition_dim)
-        residual = F.interpolate(inputs, scale_factor=2, mode="nearest")  # (B, C_in, 2H, 2W)
-        residual = self.skip(residual)  # (B, C_out, 2H, 2W)
+        residual = F.interpolate(inputs, scale_factor=2, mode="nearest")
+        residual = self.skip(residual)
 
         hidden = F.relu(self.norm1(inputs, condition), inplace=True)
-        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")  # (B, C_in, 2H, 2W)
-        hidden = self.conv1(hidden)  # (B, C_out, 2H, 2W)
+        hidden = F.interpolate(hidden, scale_factor=2, mode="nearest")
+        hidden = self.conv1(hidden)
         hidden = self.conv2(F.relu(self.norm2(hidden, condition), inplace=True))
-        return hidden + residual  # (B, C_out, 2H, 2W)
+        return hidden + residual
 
 
-class CompactBigGANGenerator(nn.Module):
-    """BigGAN-style 32x32 generator with a compact 64-channel base width."""
+class BigGANGenerator(nn.Module):
+    """128x128 BigGAN generator with hierarchical latent conditioning."""
 
     def __init__(
         self,
-        z_dim=128,
-        num_classes=10,
+        z_dim=120,
+        num_classes=IMAGENETTE_NUM_CLASSES,
         base_channels=64,
         class_embedding_dim=128,
+        image_size=IMAGENETTE_IMAGE_SIZE,
+        attention_resolution=64,
     ):
         super().__init__()
-        self.num_generator_blocks = 3
-        num_latent_chunks = self.num_generator_blocks + 1
-        if z_dim % num_latent_chunks != 0:
+        if base_channels < 1 or num_classes < 1 or class_embedding_dim < 1:
             raise ValueError(
-                "z_dim must be divisible by the number of hierarchical "
-                f"latent chunks ({num_latent_chunks}), got {z_dim}."
+                "base_channels, num_classes, and class_embedding_dim must be positive."
+            )
+        if image_size != IMAGENETTE_IMAGE_SIZE:
+            raise ValueError(
+                "BigGANGenerator currently implements only 128x128 output."
+            )
+        block_resolutions = (8, 16, 32, 64, 128)
+        if attention_resolution not in block_resolutions:
+            raise ValueError(
+                f"attention_resolution must be one of {block_resolutions}."
+            )
+
+        self.num_generator_blocks = len(block_resolutions)
+        num_latent_chunks = self.num_generator_blocks + 1
+        if z_dim < 1 or z_dim % num_latent_chunks != 0:
+            raise ValueError(
+                "z_dim must be positive and divisible by the six hierarchical "
+                f"latent chunks, got {z_dim}."
             )
 
         self.z_dim = z_dim
+        self.num_classes = num_classes
+        self.image_size = image_size
         self.latent_chunk_dim = z_dim // num_latent_chunks
+        self.attention_after_block = block_resolutions.index(attention_resolution)
         condition_dim = class_embedding_dim + self.latent_chunk_dim
+        channels = [
+            base_channels * 16,
+            base_channels * 16,
+            base_channels * 8,
+            base_channels * 4,
+            base_channels * 2,
+            base_channels,
+        ]
 
         self.class_embedding = nn.Embedding(
-            num_classes, class_embedding_dim
-        )  # labels: (B,) -> e_y: (B, class_embedding_dim)
+            num_classes,
+            class_embedding_dim,
+        )
         self.input = spectral_norm(
             nn.Linear(
                 self.latent_chunk_dim,
-                base_channels * 8 * 4 * 4,
+                channels[0] * 4 * 4,
             )
         )
-        self.block1 = BigGANGeneratorResidualBlock(
-            base_channels * 8,
-            base_channels * 4,
-            condition_dim,
+        self.blocks = nn.ModuleList(
+            BigGANGeneratorResidualBlock(
+                in_channels,
+                out_channels,
+                condition_dim,
+            )
+            for in_channels, out_channels in pairwise(channels)
         )
-        self.block2 = BigGANGeneratorResidualBlock(
-            base_channels * 4,
-            base_channels * 2,
-            condition_dim,
-        )
-        self.attention = SelfAttention(base_channels * 2)
-        self.block3 = BigGANGeneratorResidualBlock(
-            base_channels * 2,
-            base_channels,
-            condition_dim,
-        )
-        self.output_norm = nn.BatchNorm2d(base_channels)
-        self.output = spectral_norm(nn.Conv2d(base_channels, 3, 3, padding=1))
+        attention_channels = channels[self.attention_after_block + 1]
+        self.attention = SelfAttention(attention_channels)
+        self.output_norm = nn.BatchNorm2d(channels[-1])
+        self.output = spectral_norm(nn.Conv2d(channels[-1], 3, 3, padding=1))
 
     def forward(self, noise, labels):
-        # noise shape: (B, z_dim), labels shape: (B,)
         if noise.ndim != 2 or noise.shape[1] != self.z_dim:
             raise ValueError(
                 f"Expected noise with shape (batch, {self.z_dim}), "
                 f"got {tuple(noise.shape)}."
             )
-        # Split noise into z_0 for the input projection and z_1 through z_3
-        # for the three generator blocks.
-        latent_chunks = noise.split(self.latent_chunk_dim, dim=1)  # (B, z_dim/4) * 4
+        validate_class_labels(labels, noise.shape[0])
 
-        class_condition = self.class_embedding(labels)  # (B, class_embedding_dim)
+        latent_chunks = noise.split(self.latent_chunk_dim, dim=1)
+        class_condition = self.class_embedding(labels)
         block_conditions = [
-            torch.cat([class_condition, chunk], dim=1)
-            for chunk in latent_chunks[1:]
-        ]  # (B, class_embedding_dim + z_dim/4) * 3
+            torch.cat([class_condition, chunk], dim=1) for chunk in latent_chunks[1:]
+        ]
 
-        hidden = self.input(latent_chunks[0])  # (B, 8C * 4 * 4)
-        hidden = hidden.view(noise.shape[0], -1, 4, 4)     # (B, 8C, 4, 4)
-        hidden = self.block1(hidden, block_conditions[0])  # (B, 4C, 8, 8)
-        hidden = self.block2(hidden, block_conditions[1])  # (B, 2C, 16, 16)
-        hidden = self.attention(hidden)                    # (B, 2C, 16, 16)
-        hidden = self.block3(hidden, block_conditions[2])  # (B, C, 32, 32)
+        hidden = self.input(latent_chunks[0]).view(
+            noise.shape[0],
+            -1,
+            4,
+            4,
+        )
+        for index, (block, condition) in enumerate(zip(self.blocks, block_conditions)):
+            hidden = block(hidden, condition)
+            if index == self.attention_after_block:
+                hidden = self.attention(hidden)
         hidden = F.relu(self.output_norm(hidden), inplace=True)
-        return torch.tanh(self.output(hidden))  # (B, 3, 32, 32)
+        return torch.tanh(self.output(hidden))
 
 
 class BigGANDiscriminator(SAGANDiscriminator):
-    """SAGAN projection discriminator reused by the compact BigGAN lesson."""
+    """BigGAN's wide projection discriminator with 64x64 attention."""
+
+    def __init__(
+        self,
+        num_classes=IMAGENETTE_NUM_CLASSES,
+        base_channels=64,
+        image_size=IMAGENETTE_IMAGE_SIZE,
+        attention_resolution=64,
+    ):
+        super().__init__(
+            num_classes=num_classes,
+            base_channels=base_channels,
+            image_size=image_size,
+            attention_resolution=attention_resolution,
+        )
+
+
+# Keep old imports working while the lesson now presents the model as BigGAN.
+CompactBigGANGenerator = BigGANGenerator
 
 
 def initialize_orthogonal_weights(module):
@@ -153,18 +194,13 @@ def initialize_orthogonal_weights(module):
     if weight is None:
         weight = module.weight
     nn.init.orthogonal_(weight)
-    if getattr(module, "bias", None) is not None:
-        nn.init.zeros_(module.bias)
+    bias = getattr(module, "bias", None)
+    if isinstance(bias, torch.Tensor):
+        nn.init.zeros_(bias)
 
 
 def modified_orthogonal_regularization(module, strength=1e-4):
-    """Return BigGAN's filter-wise modified orthogonal regularizer.
-
-    For tall matrices, the equivalent column-Gram identity avoids allocating
-    a potentially large filter-by-filter matrix without changing the loss or
-    its gradient. The factor of one half matches the gradient update in the
-    reference BigGAN implementation.
-    """
+    """Return BigGAN's filter-wise modified orthogonal regularizer."""
     if strength < 0:
         raise ValueError("strength must be non-negative.")
     first_parameter = next(module.parameters())
@@ -173,24 +209,13 @@ def modified_orthogonal_regularization(module, strength=1e-4):
     for name, parameter in module.named_parameters():
         if parameter.ndim < 2 or "class_embedding" in name:
             continue
-        # Flatten each output filter/neuron into one row:
-        # Conv2d: (C_out, C_in, k_h, k_w) -> (C_out, C_in * k_h * k_w)
-        # Linear: (C_out, C_in) remains unchanged.
         matrix = parameter.flatten(start_dim=1)
         if matrix.shape[0] <= matrix.shape[1]:
-            # Row Gram matrix: G = W @ W^T, where G[i, j] = w_i · w_j.
-            gram = matrix @ matrix.transpose(0, 1)  # (C_out, C_out)
-            # Remove the diagonal, which contains each row's squared L2 norm.
-            off_diagonal = gram - torch.diag_embed(
-                torch.diagonal(gram)
-            )
-            # Penalize squared inner products between distinct rows:
-            # sum_{i != j} (w_i · w_j)^2.
+            gram = matrix @ matrix.transpose(0, 1)
+            off_diagonal = gram - torch.diag_embed(torch.diagonal(gram))
             penalty = penalty + off_diagonal.square().sum()
         else:
-            # For a tall matrix, use the smaller column Gram matrix: W^T @ W.
-            column_gram = matrix.transpose(0, 1) @ matrix  # (D, D)
-            # Remove the row-Gram diagonal contribution: sum_i ||w_i||_2^4.
+            column_gram = matrix.transpose(0, 1) @ matrix
             row_norm_fourth = matrix.square().sum(dim=1).square().sum()
             penalty = penalty + column_gram.square().sum() - row_norm_fourth
 
@@ -207,7 +232,7 @@ def truncated_normal(shape, truncation, device):
     while invalid.any():
         samples[invalid] = torch.randn_like(samples[invalid])
         invalid = samples.abs() > truncation
-    return samples  # x ~ N(0, 1), |x| <= t
+    return samples
 
 
 def orthogonal_scratch_minimal(weight, gain=1.0):
@@ -236,6 +261,7 @@ def orthogonal_scratch_minimal(weight, gain=1.0):
 
 __all__ = [
     "BigGANDiscriminator",
+    "BigGANGenerator",
     "BigGANGeneratorResidualBlock",
     "CompactBigGANGenerator",
     "ConditionalBatchNorm2d",

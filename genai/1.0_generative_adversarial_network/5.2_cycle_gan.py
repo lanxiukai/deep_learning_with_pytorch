@@ -6,7 +6,7 @@ in dl_utils/gan/cyclegan.py.
 
 Data:
     data/celeba/{black,blond}, prepared by
-    tool_scripts/download_dataset.py.
+    tool_scripts/download_dataset.py --dataset celeba.
 
 Outputs:
     output/gan/cyclegan/training/, reset at the start of every run. The directory
@@ -125,7 +125,7 @@ def main():
         raise FileNotFoundError(
             "CycleGAN requires the local CelebA splits at data/celeba/black "
             "and data/celeba/blond. Run: "
-            "python tool_scripts/download_dataset.py"
+            "python tool_scripts/download_dataset.py --dataset celeba"
         )
 
     save_dataset_samples(

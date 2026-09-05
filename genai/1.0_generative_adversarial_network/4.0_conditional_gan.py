@@ -1,7 +1,8 @@
 """Train a conditional WGAN-GP to generate faces with or without glasses.
 
 Adapted from "Generative Deep Learning", 2nd ed.
-Data: data/glasses-256, prepared by tool_scripts/download_dataset.py.
+Data: data/glasses-256, prepared by
+tool_scripts/download_dataset.py --dataset glasses.
 Outputs: output/gan/cgan/.
 Checkpoint evaluation: 4.1_conditional_gan_evaluation.py.
 
@@ -66,7 +67,7 @@ def main():
         raise FileNotFoundError(
             f"Resized dataset cache not found: {CACHED_DATA_DIR}\n"
             "Create it with:\n"
-            "python tool_scripts/download_dataset.py"
+            "python tool_scripts/download_dataset.py --dataset glasses"
         )
     dataset = image_folder_dataset(
         CACHED_DATA_DIR,

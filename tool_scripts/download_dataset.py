@@ -1,4 +1,4 @@
-"""Download and prepare one or all datasets used by the lessons."""
+"""Download and prepare all, one, or several lesson datasets in sequence."""
 
 from __future__ import annotations
 
@@ -16,11 +16,19 @@ from dl_utils.data.dataset_preparation import (
     prepare_celeba_cyclegan_splits,
 )
 from dl_utils.data.downloads import download, download_extract
+from dl_utils.data.imagenette import (
+    IMAGENETTE_128_MAX_SOURCE_PIXELS,
+    IMAGENETTE_128_MIN_SOURCE_EDGE,
+    download_imagenette_320,
+    imagenette_128_is_ready,
+    prepare_imagenette_128_cache,
+)
 from dl_utils.data.vision import vision_loaders
 from dl_utils.filesystem.project_root import infer_project_root
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data"
+DEFAULT_IMAGENETTE_WORKERS = min(32, os.cpu_count() or 1)
 
 
 def _download_mnist() -> None:
@@ -63,7 +71,7 @@ def _download_time_machine() -> None:
     print(f"The Time Machine Dataset has been downloaded: {lines[0]}")
 
 
-def _download_celeba(*, prepare_cyclegan: bool = False) -> None:
+def _download_celeba() -> None:
     celeba_dir = DATA_DIR / "celeba"
     downloaded = download_kaggle_dataset(
         "jessicali9530/celeba-dataset",
@@ -72,7 +80,7 @@ def _download_celeba(*, prepare_cyclegan: bool = False) -> None:
     )
     if not downloaded:
         raise RuntimeError("kagglehub is required to download CelebA")
-    if prepare_cyclegan and not prepare_celeba_cyclegan_splits(celeba_dir):
+    if not prepare_celeba_cyclegan_splits(celeba_dir):
         raise RuntimeError("CelebA CycleGAN split preparation failed")
     print(f"The CelebA Dataset is ready: {celeba_dir}")
 
@@ -142,6 +150,30 @@ def _download_pokemon() -> None:
     print(f"The Pokemon Dataset has been downloaded: {data_dir}")
 
 
+def _download_imagenette(
+    workers: int,
+    min_source_edge: int,
+    max_source_pixels: int,
+) -> None:
+    source_root = DATA_DIR / "imagenette-320"
+    cache_root = DATA_DIR / "imagenette-128"
+    if imagenette_128_is_ready(
+        cache_root,
+        min_source_edge=min_source_edge,
+        max_source_pixels=max_source_pixels,
+    ):
+        print(f"The Imagenette-128 train and validation data are ready: {cache_root}")
+        return
+    download_imagenette_320(source_root)
+    prepare_imagenette_128_cache(
+        source_root,
+        cache_root,
+        workers=workers,
+        min_source_edge=min_source_edge,
+        max_source_pixels=max_source_pixels,
+    )
+
+
 DOWNLOADERS: dict[str, Callable[[], None]] = {
     "mnist": _download_mnist,
     "fashion-mnist": _download_fashion_mnist,
@@ -155,45 +187,106 @@ DOWNLOADERS: dict[str, Callable[[], None]] = {
     "fra-eng": _download_fra_eng,
     "pokemon": _download_pokemon,
 }
+DATASET_ORDER = (*DOWNLOADERS, "imagenette")
+
+
+def _resolve_dataset_names(selected: Sequence[str] | None) -> tuple[str, ...]:
+    """Resolve CLI selections while preserving their first-seen order."""
+    if selected is None:
+        return DATASET_ORDER
+    names = tuple(selected)
+    if names == ("all",):
+        return DATASET_ORDER
+    if "all" in names:
+        raise ValueError("'all' cannot be combined with dataset names")
+    return tuple(dict.fromkeys(names))
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dataset",
-        choices=("all", *DOWNLOADERS),
-        default="all",
-        help="dataset to download (default: all)",
+        dest="datasets",
+        action="extend",
+        nargs="+",
+        choices=("all", *DATASET_ORDER),
+        metavar="NAME",
+        help=(
+            "one or more datasets to prepare in the given order; may be "
+            "repeated (default: all datasets in the documented order). "
+            f"Available names: {', '.join(DATASET_ORDER)}"
+        ),
     )
     parser.add_argument(
-        "--prepare-celeba-cyclegan",
-        action="store_true",
-        help="also create the black/blond CelebA splits",
+        "--imagenette-workers",
+        type=int,
+        default=DEFAULT_IMAGENETTE_WORKERS,
+        metavar="N",
+        help=(
+            "parallel workers used to build data/imagenette-128 "
+            f"(default: {DEFAULT_IMAGENETTE_WORKERS})"
+        ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--imagenette-min-source-edge",
+        type=int,
+        default=IMAGENETTE_128_MIN_SOURCE_EDGE,
+        metavar="PIXELS",
+        help=(
+            "exclude Imagenette sources with a shorter edge below this value "
+            f"(default: {IMAGENETTE_128_MIN_SOURCE_EDGE})"
+        ),
+    )
+    parser.add_argument(
+        "--imagenette-max-source-pixels",
+        type=int,
+        default=IMAGENETTE_128_MAX_SOURCE_PIXELS,
+        metavar="PIXELS",
+        help=(
+            "exclude Imagenette sources above this total pixel count "
+            f"(default: {IMAGENETTE_128_MAX_SOURCE_PIXELS})"
+        ),
+    )
+    args = parser.parse_args(argv)
+    try:
+        args.datasets = _resolve_dataset_names(args.datasets)
+    except ValueError as error:
+        parser.error(str(error))
+    if (
+        min(
+            args.imagenette_workers,
+            args.imagenette_min_source_edge,
+            args.imagenette_max_source_pixels,
+        )
+        < 1
+    ):
+        parser.error("Imagenette workers and source-size limits must be positive")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
-    names = tuple(DOWNLOADERS) if args.dataset == "all" else (args.dataset,)
+    print(f"Preparation order: {', '.join(args.datasets)}")
     failures: list[str] = []
-    for name in names:
+    for index, name in enumerate(args.datasets, start=1):
+        print(f"[{index}/{len(args.datasets)}] Preparing {name}...")
         try:
-            if name == "celeba":
-                _download_celeba(
-                    prepare_cyclegan=(
-                        args.prepare_celeba_cyclegan or args.dataset == "all"
-                    )
+            if name == "imagenette":
+                _download_imagenette(
+                    args.imagenette_workers,
+                    args.imagenette_min_source_edge,
+                    args.imagenette_max_source_pixels,
                 )
             else:
                 DOWNLOADERS[name]()
-        # Providers raise heterogeneous exceptions; "all" should report each.
+        # Providers raise heterogeneous exceptions; a sequence should report each.
         except Exception as error:  # noqa: BLE001
             failures.append(name)
             print(f"Failed to prepare {name}: {error}")
 
     if failures:
         raise SystemExit(f"Dataset preparation failed: {', '.join(failures)}")
+    print(f"Prepared {len(args.datasets)} dataset(s) successfully.")
 
 
 if __name__ == "__main__":

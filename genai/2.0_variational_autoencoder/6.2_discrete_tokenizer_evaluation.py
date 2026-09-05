@@ -1,4 +1,4 @@
-"""Compare VQ-VAE and FSQ with their frozen priors on held-out CIFAR-10.
+"""Compare VQ-VAE and FSQ with their frozen priors on Imagenette-128.
 
 Tokenizer evidence:
 
@@ -15,8 +15,8 @@ projection.  It is a consistent Fréchet proxy for this comparison, not the
 canonical TensorFlow FID implementation.
 
 Data:
-    data/cifar10 test split, prepared by tool_scripts/download_dataset.py.
-    CIFAR-10 class labels are ignored.
+    data/imagenette-128/val/<WNID>/*.JPEG, prepared by
+    tool_scripts/download_dataset.py --dataset imagenette.
 
 Checkpoints:
     output/vae/vq_vae/{tokenizer.pth,pixelcnn_prior.pth}: VQ-VAE system
@@ -28,25 +28,25 @@ Outputs:
     output/vae/discrete_tokenizer_evaluation/<system>_real_and_reconstruction.png
     output/vae/discrete_tokenizer_evaluation/<system>_prior_samples.png
 
-Evaluation data -- CIFAR-10 test:
-Available images:                      10,000
+Evaluation data -- Imagenette validation:
+Available images:                       3,925
 Batch size:                                64
-Reconstruction examples:                2,048
-Generated examples:                       256
-Generation batch size:                     32
+Reconstruction examples:                1,024
+Generated examples:                       100
+Generation batch size:                     10
 Sampling temperature:                     1.0
 Projected Inception feature dimensions:    256
 
 Default dimensions:
-Evaluation input:                       32x32 RGB
-Generated image:                        32x32 RGB
-Latent token grid:                       8x8 indices
+Evaluation input:                     128x128 RGB
+Generated image:                      128x128 RGB
+Latent token grid:                      16x16 indices
 
 Model size:
-VQ-VAE tokenizer / prior:               1.19 M / 1.84 M parameters
-VQ-VAE system total:                    3.02 M parameters
-FSQ tokenizer / prior:                  1.08 M / 2.12 M parameters
-FSQ system total:                       3.19 M parameters
+VQ-VAE tokenizer / prior:               1.71 M / 1.84 M parameters
+VQ-VAE system total:                    3.55 M parameters
+FSQ tokenizer / prior:                  1.60 M / 2.12 M parameters
+FSQ system total:                       3.72 M parameters
 Frozen Inception-v3 evaluator:         25.11 M parameters
 """
 
@@ -65,10 +65,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
-from dl_utils.data.cifar10 import (
-    make_cifar10_loader,
-    normalized_cifar10_transform,
-)
+from dl_utils.data.imagenette import make_imagenette_loader
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import model_state_fingerprint
@@ -78,52 +75,63 @@ from dl_utils.vae.image_quality import (
     frechet_distance,
 )
 from dl_utils.vae.quantization import (
-    VQVAE32,
-    FSQAutoencoder32,
+    VQVAE,
+    FSQAutoencoder,
     TokenUsageAccumulator,
 )
 from dl_utils.vae.token_prior import PixelCNNPrior
 
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
+IMAGE_SIZE = 128
+NUM_CLASSES = 10
 
 
 @dataclass
 class DiscreteSystem:
     name: str
-    tokenizer: VQVAE32 | FSQAutoencoder32
+    tokenizer: VQVAE | FSQAutoencoder
     prior: PixelCNNPrior | None
+    image_size: int
 
     @property
     def has_complete_prior(self) -> bool:
         return self.prior is not None
 
+    @property
+    def latent_grid_size(self) -> int:
+        return self.image_size // (2**self.tokenizer.downsample_steps)
+
     def reconstruct_and_tokens(
         self, x: Tensor
     ) -> tuple[Tensor, list[tuple[str, Tensor, int]], dict[str, Tensor]]:
-        if isinstance(self.tokenizer, VQVAE32):
+        if isinstance(self.tokenizer, VQVAE):
             reconstruction, indices, _, diagnostics = self.tokenizer(x)
-            return reconstruction, [
-                ("tokens", indices, self.tokenizer.quantizer.codebook_size)
-            ], {
-                "quantization_mse": diagnostics["quantization_mse"]
-            }
+            return (
+                reconstruction,
+                [("tokens", indices, self.tokenizer.quantizer.codebook_size)],
+                {"quantization_mse": diagnostics["quantization_mse"]},
+            )
         reconstruction, indices, diagnostics = self.tokenizer(x)
-        return reconstruction, [
-            ("tokens", indices, self.tokenizer.quantizer.codebook_size)
-        ], {
-            "quantization_mse": diagnostics["quantization_mse"]
-        }
+        return (
+            reconstruction,
+            [("tokens", indices, self.tokenizer.quantizer.codebook_size)],
+            {"quantization_mse": diagnostics["quantization_mse"]},
+        )
 
     def prior_losses(
-        self, token_levels: list[tuple[str, Tensor, int]]
+        self,
+        token_levels: list[tuple[str, Tensor, int]],
+        labels: Tensor,
     ) -> dict[str, Tensor]:
         if not self.has_complete_prior:
             return {}
         assert self.prior is not None
         indices = token_levels[0][1]
+        class_labels = labels if self.prior.num_classes > 0 else None
         return {
-            "tokens": F.cross_entropy(self.prior(indices), indices)
+            "tokens": F.cross_entropy(self.prior(indices, labels=class_labels), indices)
         }
 
     @torch.inference_mode()
@@ -132,32 +140,35 @@ class DiscreteSystem:
         count: int,
         *,
         device: torch.device,
+        labels: Tensor,
         temperature: float,
     ) -> Tensor:
         if not self.has_complete_prior:
             raise RuntimeError("the system does not have its complete prior")
         assert self.prior is not None
+        class_labels = labels if self.prior.num_classes > 0 else None
         indices = self.prior.sample(
             count,
-            8,
-            8,
+            self.latent_grid_size,
+            self.latent_grid_size,
             device=device,
+            labels=class_labels,
             temperature=temperature,
         )
         return self.tokenizer.decode_indices(indices)
 
 
-def make_test_loader(
-    args: argparse.Namespace, device: torch.device
-) -> DataLoader:
-    return make_cifar10_loader(
-        PROJECT_ROOT / "data" / "cifar10",
+def make_test_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
+    return make_imagenette_loader(
+        args.data_dir,
         args.batch_size,
         device,
-        train=False,
-        transform=normalized_cifar10_transform(horizontal_flip=False),
+        split="val",
+        image_size=IMAGE_SIZE,
+        horizontal_flip=False,
         num_workers=args.workers,
         shuffle=False,
+        preprocessed=True,
         drop_last=False,
     )
 
@@ -169,14 +180,18 @@ def _load_prior(
     expected_model_name: str,
     tokenizer_interface_id: str,
 ) -> PixelCNNPrior:
-    checkpoint = torch.load(
-        path, map_location=device, weights_only=True
-    )
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
     if checkpoint.get("model_name") != expected_model_name:
         raise ValueError(
             f"{path} has model_name={checkpoint.get('model_name')!r}; "
             f"expected {expected_model_name!r}"
         )
+    if (
+        checkpoint.get("dataset") != "imagenette-128"
+        or checkpoint.get("image_size") != IMAGE_SIZE
+        or checkpoint.get("conditioning") != "class_conditional"
+    ):
+        raise ValueError(f"{path} is not an Imagenette-128 conditional prior")
     prior = PixelCNNPrior(**checkpoint["model_config"]).to(device)
     prior.load_state_dict(checkpoint["state_dict"])
     if checkpoint.get("tokenizer_interface_id") != tokenizer_interface_id:
@@ -193,26 +208,25 @@ def load_single_level_system(
 ) -> DiscreteSystem | None:
     if not tokenizer_path.exists():
         return None
-    checkpoint = torch.load(
-        tokenizer_path, map_location=device, weights_only=True
-    )
+    checkpoint = torch.load(tokenizer_path, map_location=device, weights_only=True)
     model_name = checkpoint.get("model_name")
+    if (
+        checkpoint.get("dataset") != "imagenette-128"
+        or checkpoint.get("image_size") != IMAGE_SIZE
+    ):
+        raise ValueError(f"{tokenizer_path} is not an Imagenette-128 tokenizer")
     if model_name == "vq_vae_tokenizer":
-        tokenizer: VQVAE32 | FSQAutoencoder32 = VQVAE32(
-            **checkpoint["model_config"]
-        )
+        tokenizer: VQVAE | FSQAutoencoder = VQVAE(**checkpoint["model_config"])
         expected_prior_name = "vq_vae_pixelcnn_prior"
     elif model_name == "fsq_tokenizer":
-        tokenizer = FSQAutoencoder32(**checkpoint["model_config"])
+        tokenizer = FSQAutoencoder(**checkpoint["model_config"])
         expected_prior_name = "fsq_pixelcnn_prior"
     else:
         raise ValueError(f"{tokenizer_path} is not a supported tokenizer")
     tokenizer.load_state_dict(checkpoint["state_dict"])
     tokenizer_interface_id = model_state_fingerprint(tokenizer)
     if checkpoint.get("interface_id") != tokenizer_interface_id:
-        raise ValueError(
-            f"{tokenizer_path} has no valid tokenizer interface identity"
-        )
+        raise ValueError(f"{tokenizer_path} has no valid tokenizer interface identity")
     prior = None
     if prior_path.exists():
         prior = _load_prior(
@@ -225,6 +239,7 @@ def load_single_level_system(
         name,
         tokenizer.to(device).eval().requires_grad_(False),
         prior,
+        IMAGE_SIZE,
     )
 
 
@@ -270,9 +285,7 @@ def real_feature_moments(
         features = feature_extractor(x)
         full.update(features)
         if generation_count < generation_examples:
-            count = min(
-                x.shape[0], generation_examples - generation_count
-            )
+            count = min(x.shape[0], generation_examples - generation_count)
             generation_reference.update(features[:count])
             generation_count += count
         examples += x.shape[0]
@@ -300,19 +313,16 @@ def evaluate_tokenizer(
     examples = 0
     comparison = None
     level_positions: dict[str, int] = {}
-    for x, _ in loader:
+    for x, labels in loader:
         remaining = max_examples - examples
         if remaining <= 0:
             break
         x = x[:remaining].to(device, non_blocking=True)
-        reconstruction, levels, quantization = (
-            system.reconstruct_and_tokens(x)
-        )
+        labels = labels[:remaining].to(device, non_blocking=True)
+        reconstruction, levels, quantization = system.reconstruct_and_tokens(x)
         if comparison is None:
             comparison = torch.cat((x[:16], reconstruction[:16])).cpu()
-        reconstruction_moments.update(
-            feature_extractor(reconstruction)
-        )
+        reconstruction_moments.update(feature_extractor(reconstruction))
         distortion_sum += float((reconstruction - x).square().sum())
         element_count += x.numel()
         for name, indices, vocabulary_size in levels:
@@ -323,14 +333,10 @@ def evaluate_tokenizer(
             usage[name].update(indices)
         for name, value in quantization.items():
             quantization_totals[name] = (
-                quantization_totals.get(name, 0.0)
-                + float(value) * x.shape[0]
+                quantization_totals.get(name, 0.0) + float(value) * x.shape[0]
             )
-        for name, value in system.prior_losses(levels).items():
-            prior_totals[name] = (
-                prior_totals.get(name, 0.0)
-                + float(value) * x.shape[0]
-            )
+        for name, value in system.prior_losses(levels, labels).items():
+            prior_totals[name] = prior_totals.get(name, 0.0) + float(value) * x.shape[0]
         examples += x.shape[0]
 
     mse = distortion_sum / element_count
@@ -339,14 +345,10 @@ def evaluate_tokenizer(
     fixed_bits_per_image = 0
     for name, accumulator in usage.items():
         statistics = accumulator.statistics()
-        entropy_bits = (
-            float(statistics["token_entropy_nats"]) / math.log(2)
-        )
+        entropy_bits = float(statistics["token_entropy_nats"]) / math.log(2)
         positions = level_positions[name]
         marginal_bits_per_image += positions * entropy_bits
-        fixed_bits_per_image += positions * math.ceil(
-            math.log2(vocabulary_sizes[name])
-        )
+        fixed_bits_per_image += positions * math.ceil(math.log2(vocabulary_sizes[name]))
         level_metrics[name] = {
             "vocabulary_size": vocabulary_sizes[name],
             "positions": positions,
@@ -360,34 +362,28 @@ def evaluate_tokenizer(
     if prior_totals:
         assert system.prior is not None
         per_level = {
-            name: value / examples / math.log(2)
-            for name, value in prior_totals.items()
+            name: value / examples / math.log(2) for name, value in prior_totals.items()
         }
         prior_bits_per_image = sum(
-            level_positions[name] * bits
-            for name, bits in per_level.items()
+            level_positions[name] * bits for name, bits in per_level.items()
         )
         prior_metrics = {
             "bits_per_token_by_level": per_level,
             "bits_per_image": prior_bits_per_image,
             "parameter_count": sum(
-                parameter.numel()
-                for parameter in system.prior.parameters()
+                parameter.numel() for parameter in system.prior.parameters()
             ),
         }
     assert comparison is not None
     return {
         "examples": examples,
         "mse": mse,
-        "psnr_for_minus_one_to_one_range": (
-            10.0 * math.log10(4.0 / max(mse, 1e-12))
-        ),
+        "psnr_for_minus_one_to_one_range": (10.0 * math.log10(4.0 / max(mse, 1e-12))),
         "projected_inception_reconstruction_frechet": frechet_distance(
             real_moments, reconstruction_moments
         ),
         "quantization_mse": {
-            name: value / examples
-            for name, value in quantization_totals.items()
+            name: value / examples for name, value in quantization_totals.items()
         },
         "token_levels": level_metrics,
         "marginal_entropy_bits_per_image": marginal_bits_per_image,
@@ -414,9 +410,17 @@ def evaluate_generation(
     generated = 0
     while generated < examples:
         count = min(batch_size, examples - generated)
+        labels = torch.arange(
+            generated,
+            generated + count,
+            device=device,
+        ).remainder(NUM_CLASSES)
         start = time.perf_counter()
         images = system.sample(
-            count, device=device, temperature=temperature
+            count,
+            device=device,
+            labels=labels,
+            temperature=temperature,
         )
         if device.type == "cuda":
             torch.cuda.synchronize()
@@ -441,34 +445,30 @@ def evaluate(args: argparse.Namespace) -> None:
     loader = make_test_loader(args, device)
     systems = load_systems(args, device)
     if not systems:
-        raise FileNotFoundError(
-            "no tokenizer checkpoint exists; run 6.0 or 6.1 first"
-        )
+        raise FileNotFoundError("no tokenizer checkpoint exists; run 6.0 or 6.1 first")
     projection_dim = (
-        None if args.inception_projection_dim == 0
-        else args.inception_projection_dim
+        None if args.inception_projection_dim == 0 else args.inception_projection_dim
     )
     feature_extractor = TorchvisionInceptionFeatures(
         projection_dim=projection_dim,
         projection_seed=args.feature_seed,
     ).to(device)
     feature_dim = feature_extractor.feature_dim
-    real_reconstruction_moments, real_generation_moments = (
-        real_feature_moments(
-            loader,
-            feature_extractor,
-            feature_dim=feature_dim,
-            max_examples=args.max_examples,
-            generation_examples=args.generation_examples,
-            device=device,
-        )
+    real_reconstruction_moments, real_generation_moments = real_feature_moments(
+        loader,
+        feature_extractor,
+        feature_dim=feature_dim,
+        max_examples=args.max_examples,
+        generation_examples=args.generation_examples,
+        device=device,
     )
     out_dir = OUTPUT_ROOT / "discrete_tokenizer_evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
     model_results: dict[str, object] = {}
     results: dict[str, object] = {
         "protocol": {
-            "dataset": "CIFAR-10 test",
+            "dataset": "imagenette-128 validation",
+            "conditioning": "class_conditional",
             "max_reconstruction_examples": args.max_examples,
             "generation_examples": args.generation_examples,
             "feature_extractor": "torchvision Inception-v3 pool features",
@@ -545,14 +545,13 @@ def smoke_test() -> None:
         ),
         batch_size=4,
     )
-    tokenizer = VQVAE32(
-        hidden_channels=32, embedding_dim=8, codebook_size=16
-    )
+    tokenizer = VQVAE(hidden_channels=32, embedding_dim=8, codebook_size=16)
     prior = PixelCNNPrior(16, hidden_channels=16, layers=2)
     system = DiscreteSystem(
         "smoke",
         tokenizer.eval(),
         prior.eval(),
+        32,
     )
     features = TinyFeatures()
     real, generated_reference = real_feature_moments(
@@ -594,14 +593,13 @@ def smoke_test() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--max-examples", type=int, default=2_048)
-    parser.add_argument("--generation-examples", type=int, default=256)
-    parser.add_argument("--generation-batch-size", type=int, default=32)
+    parser.add_argument("--max-examples", type=int, default=1_024)
+    parser.add_argument("--generation-examples", type=int, default=100)
+    parser.add_argument("--generation-batch-size", type=int, default=10)
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument(
-        "--inception-projection-dim", type=int, default=256
-    )
+    parser.add_argument("--inception-projection-dim", type=int, default=256)
     parser.add_argument("--feature-seed", type=int, default=2026)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=123)
