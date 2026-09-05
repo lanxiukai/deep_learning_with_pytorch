@@ -15,8 +15,10 @@ from torch.nn.utils import spectral_norm
 
 from dl_utils.gan.sagan import SAGANDiscriminator, SelfAttention
 from dl_utils.gan.sn_gan import (
+    GENERATOR_128_BLOCK_RESOLUTIONS,
     IMAGENETTE_IMAGE_SIZE,
     IMAGENETTE_NUM_CLASSES,
+    generator_128_channels,
     validate_class_labels,
 )
 
@@ -84,13 +86,13 @@ class BigGANGenerator(nn.Module):
             raise ValueError(
                 "BigGANGenerator currently implements only 128x128 output."
             )
-        block_resolutions = (8, 16, 32, 64, 128)
-        if attention_resolution not in block_resolutions:
+        if attention_resolution not in GENERATOR_128_BLOCK_RESOLUTIONS:
             raise ValueError(
-                f"attention_resolution must be one of {block_resolutions}."
+                "attention_resolution must be one of "
+                f"{GENERATOR_128_BLOCK_RESOLUTIONS}."
             )
 
-        self.num_generator_blocks = len(block_resolutions)
+        self.num_generator_blocks = len(GENERATOR_128_BLOCK_RESOLUTIONS)
         num_latent_chunks = self.num_generator_blocks + 1
         if z_dim < 1 or z_dim % num_latent_chunks != 0:
             raise ValueError(
@@ -102,16 +104,11 @@ class BigGANGenerator(nn.Module):
         self.num_classes = num_classes
         self.image_size = image_size
         self.latent_chunk_dim = z_dim // num_latent_chunks
-        self.attention_after_block = block_resolutions.index(attention_resolution)
+        self.attention_after_block = GENERATOR_128_BLOCK_RESOLUTIONS.index(
+            attention_resolution
+        )
         condition_dim = class_embedding_dim + self.latent_chunk_dim
-        channels = [
-            base_channels * 16,
-            base_channels * 16,
-            base_channels * 8,
-            base_channels * 4,
-            base_channels * 2,
-            base_channels,
-        ]
+        channels = generator_128_channels(base_channels)
 
         self.class_embedding = nn.Embedding(
             num_classes,
@@ -156,7 +153,9 @@ class BigGANGenerator(nn.Module):
             4,
             4,
         )
-        for index, (block, condition) in enumerate(zip(self.blocks, block_conditions)):
+        for index, (block, condition) in enumerate(
+            zip(self.blocks, block_conditions, strict=True)
+        ):
             hidden = block(hidden, condition)
             if index == self.attention_after_block:
                 hidden = self.attention(hidden)

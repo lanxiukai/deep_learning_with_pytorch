@@ -2,10 +2,27 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Iterable
+from typing import Protocol
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torchvision.models import Inception_V3_Weights, inception_v3
+
+
+class ConditionalImageSampler(Protocol):
+    """Interface shared by evaluated discrete generative systems."""
+
+    def sample(
+        self,
+        count: int,
+        *,
+        device: torch.device,
+        labels: Tensor,
+        temperature: float,
+    ) -> Tensor: ...
 
 
 def structural_similarity_index(
@@ -29,21 +46,20 @@ def structural_similarity_index(
     if window_size < 1 or window_size % 2 == 0:
         raise ValueError("window_size must be a positive odd integer")
     padding = window_size // 2
-    mean_prediction = F.avg_pool2d(
-        prediction, window_size, stride=1, padding=padding
+    mean_prediction = F.avg_pool2d(prediction, window_size, stride=1, padding=padding)
+    mean_target = F.avg_pool2d(target, window_size, stride=1, padding=padding)
+    covariance = (
+        F.avg_pool2d(prediction * target, window_size, stride=1, padding=padding)
+        - mean_prediction * mean_target
     )
-    mean_target = F.avg_pool2d(
-        target, window_size, stride=1, padding=padding
+    prediction_variance = (
+        F.avg_pool2d(prediction.square(), window_size, stride=1, padding=padding)
+        - mean_prediction.square()
     )
-    covariance = F.avg_pool2d(
-        prediction * target, window_size, stride=1, padding=padding
-    ) - mean_prediction * mean_target
-    prediction_variance = F.avg_pool2d(
-        prediction.square(), window_size, stride=1, padding=padding
-    ) - mean_prediction.square()
-    target_variance = F.avg_pool2d(
-        target.square(), window_size, stride=1, padding=padding
-    ) - mean_target.square()
+    target_variance = (
+        F.avg_pool2d(target.square(), window_size, stride=1, padding=padding)
+        - mean_target.square()
+    )
     prediction_variance = prediction_variance.clamp_min(0.0)
     target_variance = target_variance.clamp_min(0.0)
     c1 = (0.01 * value_range) ** 2
@@ -92,9 +108,10 @@ class TorchvisionInceptionFeatures(nn.Module):
             self.feature_dim = 2048
         else:
             generator = torch.Generator().manual_seed(projection_seed)
-            projection = torch.randn(
-                2048, projection_dim, generator=generator
-            ) / projection_dim**0.5
+            projection = (
+                torch.randn(2048, projection_dim, generator=generator)
+                / projection_dim**0.5
+            )
             self.feature_dim = projection_dim
         self.register_buffer("projection", projection)
 
@@ -124,9 +141,7 @@ class FeatureMoments:
         self.feature_dim = feature_dim
         self.count = 0
         self.total = torch.zeros(feature_dim, dtype=torch.float64)
-        self.outer_total = torch.zeros(
-            feature_dim, feature_dim, dtype=torch.float64
-        )
+        self.outer_total = torch.zeros(feature_dim, feature_dim, dtype=torch.float64)
 
     def update(self, features: Tensor) -> None:
         if features.ndim != 2 or features.shape[1] != self.feature_dim:
@@ -140,19 +155,47 @@ class FeatureMoments:
         if self.count < 2:
             raise ValueError("at least two feature vectors are required")
         mean = self.total / self.count
-        covariance = (
-            self.outer_total
-            - self.count * torch.outer(mean, mean)
-        ) / (self.count - 1)
+        covariance = (self.outer_total - self.count * torch.outer(mean, mean)) / (
+            self.count - 1
+        )
         return mean, covariance
+
+
+@torch.inference_mode()
+def collect_reference_feature_moments(
+    loader: Iterable[tuple[Tensor, Tensor]],
+    feature_extractor: nn.Module,
+    *,
+    feature_dim: int,
+    reconstruction_examples: int,
+    generation_examples: int,
+    device: torch.device,
+) -> tuple[FeatureMoments, FeatureMoments]:
+    """Collect the two real-image references shared by tokenizer evaluations."""
+    reconstruction_reference = FeatureMoments(feature_dim)
+    generation_reference = FeatureMoments(feature_dim)
+    examples = 0
+    generation_count = 0
+    for images, _ in loader:
+        remaining = reconstruction_examples - examples
+        if remaining <= 0:
+            break
+        images = images[:remaining].to(device, non_blocking=True)
+        features = feature_extractor(images)
+        reconstruction_reference.update(features)
+        if generation_count < generation_examples:
+            count = min(images.shape[0], generation_examples - generation_count)
+            generation_reference.update(features[:count])
+            generation_count += count
+        examples += images.shape[0]
+    return reconstruction_reference, generation_reference
 
 
 def _symmetric_matrix_square_root(matrix: Tensor) -> Tensor:
     matrix = 0.5 * (matrix + matrix.transpose(0, 1))
     eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
     return (
-        eigenvectors
-        * eigenvalues.clamp_min(0).sqrt().unsqueeze(0)
+        eigenvectors * eigenvalues.clamp_min(0).sqrt().unsqueeze(0)
     ) @ eigenvectors.transpose(0, 1)
 
 
@@ -172,9 +215,12 @@ def frechet_distance(
     covariance_b = covariance_b + covariance_epsilon * identity
     root_a = _symmetric_matrix_square_root(covariance_a)
     middle = root_a @ covariance_b @ root_a
-    trace_root = torch.linalg.eigvalsh(
-        0.5 * (middle + middle.transpose(0, 1))
-    ).clamp_min(0).sqrt().sum()
+    trace_root = (
+        torch.linalg.eigvalsh(0.5 * (middle + middle.transpose(0, 1)))
+        .clamp_min(0)
+        .sqrt()
+        .sum()
+    )
     difference = mean_a - mean_b
     distance = (
         difference.dot(difference)
@@ -185,9 +231,66 @@ def frechet_distance(
     return float(distance.clamp_min(0))
 
 
+@torch.inference_mode()
+def evaluate_conditional_generation(
+    system: ConditionalImageSampler,
+    feature_extractor: nn.Module,
+    real_moments: FeatureMoments,
+    *,
+    examples: int,
+    batch_size: int,
+    num_classes: int,
+    temperature: float,
+    device: torch.device,
+    saved_examples: int = 64,
+) -> tuple[dict[str, float], Tensor]:
+    """Sample balanced classes and compare their feature distribution."""
+    if min(examples, batch_size, num_classes, saved_examples) < 1:
+        raise ValueError("sample counts, batch size, and num_classes must be positive")
+    generated_moments = FeatureMoments(real_moments.feature_dim)
+    sample_batches: list[Tensor] = []
+    saved = 0
+    elapsed = 0.0
+    generated = 0
+    while generated < examples:
+        count = min(batch_size, examples - generated)
+        labels = torch.arange(
+            generated,
+            generated + count,
+            device=device,
+        ).remainder(num_classes)
+        start = time.perf_counter()
+        images = system.sample(
+            count,
+            device=device,
+            labels=labels,
+            temperature=temperature,
+        )
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elapsed += time.perf_counter() - start
+        generated_moments.update(feature_extractor(images))
+        if saved < saved_examples:
+            save_count = min(saved_examples - saved, images.shape[0])
+            sample_batches.append(images[:save_count].cpu())
+            saved += save_count
+        generated += count
+    return {
+        "projected_inception_frechet": frechet_distance(
+            real_moments, generated_moments
+        ),
+        "seconds": elapsed,
+        "images_per_second": examples / max(elapsed, 1e-12),
+        "temperature": temperature,
+    }, torch.cat(sample_batches)
+
+
 __all__ = [
+    "ConditionalImageSampler",
     "FeatureMoments",
     "TorchvisionInceptionFeatures",
+    "collect_reference_feature_moments",
+    "evaluate_conditional_generation",
     "frechet_distance",
     "structural_similarity_index",
 ]

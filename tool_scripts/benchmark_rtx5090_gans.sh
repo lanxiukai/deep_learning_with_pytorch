@@ -9,6 +9,7 @@ models_csv="sn_gan,sagan,biggan"
 steps=10
 warmup_steps=5
 batch_size=""
+generator_batch_size=""
 precision="bf16"
 data_dir=""
 num_workers=4
@@ -27,6 +28,8 @@ Options:
   --steps N              Timed discriminator steps per model (default: 10)
   --warmup-steps N       Warmup steps per model (default: 5)
   --batch-size N         Override each lesson's RTX 5090 batch default
+  --generator-batch-size N
+                         Override the generated-image batch independently
   --precision MODE       bf16 (default) or fp32
   --data-dir PATH        Use Imagenette-128 instead of synthetic images
   --num-workers N        Imagenette DataLoader workers (default: 4)
@@ -69,6 +72,11 @@ while (($# > 0)); do
             batch_size="$2"
             shift 2
             ;;
+        --generator-batch-size)
+            (($# >= 2)) || die "--generator-batch-size requires a value"
+            generator_batch_size="$2"
+            shift 2
+            ;;
         --precision)
             (($# >= 2)) || die "--precision requires a value"
             precision="$2"
@@ -102,6 +110,10 @@ done
 [[ "$num_workers" =~ ^[0-9]+$ ]] || die "--num-workers must be non-negative"
 if [[ -n "$batch_size" ]]; then
     [[ "$batch_size" =~ ^[1-9][0-9]*$ ]] || die "--batch-size must be positive"
+fi
+if [[ -n "$generator_batch_size" ]]; then
+    [[ "$generator_batch_size" =~ ^[1-9][0-9]*$ ]] || \
+        die "--generator-batch-size must be positive"
 fi
 case "$precision" in
     bf16|fp32) ;;
@@ -145,6 +157,8 @@ for model in "${models[@]}"; do
         --json-output "$output_dir/$model.json"
     )
     [[ -z "$batch_size" ]] || command+=(--batch-size "$batch_size")
+    [[ -z "$generator_batch_size" ]] || \
+        command+=(--generator-batch-size "$generator_batch_size")
     [[ -z "$data_dir" ]] || command+=(--data-dir "$data_dir")
     printf '[rtx5090-benchmark] Starting %s\n' "$model"
     "${command[@]}" 2>&1 | tee "$output_dir/$model.log"

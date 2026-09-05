@@ -21,6 +21,24 @@ from dl_utils.data.imagenette import (
     uniform_dequantize_uint8,
 )
 
+GENERATOR_128_BLOCK_RESOLUTIONS = (8, 16, 32, 64, 128)
+DISCRIMINATOR_128_BLOCK_RESOLUTIONS = (64, 32, 16, 8, 4, 4)
+_GENERATOR_128_CHANNEL_MULTIPLIERS = (16, 16, 8, 4, 2, 1)
+
+
+def generator_128_channels(base_channels):
+    """Return the shared 4-to-128 generator channel schedule."""
+    if base_channels < 1:
+        raise ValueError("base_channels must be positive.")
+    return tuple(
+        base_channels * multiplier for multiplier in _GENERATOR_128_CHANNEL_MULTIPLIERS
+    )
+
+
+def discriminator_128_channels(base_channels):
+    """Return the reverse 128-to-4 discriminator channel schedule."""
+    return tuple(reversed(generator_128_channels(base_channels)))
+
 
 def _maybe_spectral_norm(module, enabled):
     return spectral_norm(module) if enabled else module
@@ -141,14 +159,7 @@ class SNGenerator(nn.Module):
         self.z_dim = z_dim
         self.num_classes = num_classes
         self.image_size = image_size
-        channels = [
-            base_channels * 16,
-            base_channels * 16,
-            base_channels * 8,
-            base_channels * 4,
-            base_channels * 2,
-            base_channels,
-        ]
+        channels = generator_128_channels(base_channels)
         self.input = nn.Linear(z_dim, channels[0] * 4 * 4)
         blocks = [
             SNGeneratorResidualBlock(
@@ -242,14 +253,7 @@ class SNDiscriminator(nn.Module):
             raise ValueError("SNDiscriminator currently implements only 128x128 input.")
         self.num_classes = num_classes
         self.image_size = image_size
-        channels = [
-            base_channels,
-            base_channels * 2,
-            base_channels * 4,
-            base_channels * 8,
-            base_channels * 16,
-            base_channels * 16,
-        ]
+        channels = discriminator_128_channels(base_channels)
         self.blocks = nn.ModuleList(
             [SNDiscriminatorResidualBlock(3, channels[0], first=True)]
             + [
@@ -369,6 +373,8 @@ def spectral_norm_scratch_minimal(
 
 
 __all__ = [
+    "DISCRIMINATOR_128_BLOCK_RESOLUTIONS",
+    "GENERATOR_128_BLOCK_RESOLUTIONS",
     "IMAGENETTE_IMAGE_SIZE",
     "IMAGENETTE_NUM_CLASSES",
     "CategoricalConditionalBatchNorm2d",
@@ -376,7 +382,9 @@ __all__ = [
     "SNDiscriminatorResidualBlock",
     "SNGenerator",
     "SNGeneratorResidualBlock",
+    "discriminator_128_channels",
     "discriminator_hinge_loss",
+    "generator_128_channels",
     "generator_hinge_loss",
     "init_spectral_norm_state",
     "spectral_norm_scratch_minimal",

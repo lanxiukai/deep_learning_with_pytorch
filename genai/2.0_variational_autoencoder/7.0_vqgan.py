@@ -80,7 +80,11 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
-from dl_utils.data.imagenette import make_imagenette_loader
+from dl_utils.data.imagenette import (
+    IMAGENETTE_IMAGE_SIZE,
+    IMAGENETTE_NUM_CLASSES,
+    make_imagenette_train_validation_loaders,
+)
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.sn_gan import (
     discriminator_hinge_loss,
@@ -107,8 +111,8 @@ from dl_utils.vae.token_prior import (
 
 PROJECT_ROOT = infer_project_root()
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
-IMAGE_SIZE = 128
-NUM_CLASSES = 10
+IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
+NUM_CLASSES = IMAGENETTE_NUM_CLASSES
 DOWNSAMPLE_STEPS = 4
 LATENT_GRID_SIZE = IMAGE_SIZE // (2**DOWNSAMPLE_STEPS)
 TOKENS_PER_IMAGE = LATENT_GRID_SIZE**2
@@ -237,11 +241,15 @@ def smoke_test() -> None:
     )
     assert all(
         torch.equal(before, parameter)
-        for before, parameter in zip(discriminator_before, discriminator.parameters())
+        for before, parameter in zip(
+            discriminator_before, discriminator.parameters(), strict=True
+        )
     )
     assert all(
         torch.equal(before, parameter)
-        for before, parameter in zip(perceptual_before, perceptual.parameters())
+        for before, parameter in zip(
+            perceptual_before, perceptual.parameters(), strict=True
+        )
     )
     model_before_discriminator = [
         parameter.detach().clone() for parameter in model.parameters()
@@ -256,7 +264,9 @@ def smoke_test() -> None:
     )
     assert all(
         torch.equal(before, parameter)
-        for before, parameter in zip(model_before_discriminator, model.parameters())
+        for before, parameter in zip(
+            model_before_discriminator, model.parameters(), strict=True
+        )
     )
     fixed_model = VQPerceptualAutoencoder(
         latent_channels=8,
@@ -332,35 +342,6 @@ def smoke_test() -> None:
         f"D={d_metrics['discriminator'].item():.3f}, "
         f"prior={prior_loss.item():.3f}, "
         f"adversarial scale={metrics['adversarial_scale'].item():.3f}"
-    )
-
-
-def make_loaders(
-    args: argparse.Namespace, device: torch.device
-) -> tuple[DataLoader, DataLoader]:
-    return (
-        make_imagenette_loader(
-            args.data_dir,
-            args.batch_size,
-            device,
-            split="train",
-            image_size=IMAGE_SIZE,
-            horizontal_flip=False,
-            num_workers=args.workers,
-            preprocessed=True,
-        ),
-        make_imagenette_loader(
-            args.data_dir,
-            args.batch_size,
-            device,
-            split="val",
-            image_size=IMAGE_SIZE,
-            horizontal_flip=False,
-            num_workers=args.workers,
-            shuffle=False,
-            preprocessed=True,
-            drop_last=False,
-        ),
     )
 
 
@@ -443,7 +424,7 @@ def validate_prior(
             break
         x = x[:remaining].to(device, non_blocking=True)
         labels = labels[:remaining].to(device, non_blocking=True)
-        _, indices, _, _ = tokenizer.encode(x)
+        indices = tokenizer.encode_indices(x)
         logits, targets = prior.teacher_forcing(indices, labels)
         loss = F.cross_entropy(logits.flatten(0, 1), targets.flatten())
         nll += float(loss) * x.shape[0]
@@ -647,7 +628,7 @@ def train_prior(
             x = x.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             with torch.inference_mode():
-                _, indices, _, _ = tokenizer.encode(x)
+                indices = tokenizer.encode_indices(x)
             logits, targets = prior.teacher_forcing(indices, labels)
             loss = F.cross_entropy(logits.flatten(0, 1), targets.flatten())
             optimizer.zero_grad(set_to_none=True)
@@ -744,7 +725,13 @@ def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = output_directory(args.run_name)
     out_dir.mkdir(parents=True, exist_ok=True)
-    train_loader, validation_loader = make_loaders(args, device)
+    train_loader, validation_loader = make_imagenette_train_validation_loaders(
+        args.data_dir,
+        args.batch_size,
+        device,
+        image_size=IMAGE_SIZE,
+        num_workers=args.workers,
+    )
     path = out_dir / "tokenizer.pth"
     if args.stage in {"tokenizer", "all"}:
         tokenizer = train_tokenizer(

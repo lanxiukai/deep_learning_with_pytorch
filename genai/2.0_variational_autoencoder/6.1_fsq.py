@@ -61,7 +61,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
-from dl_utils.data.imagenette import make_imagenette_loader
+from dl_utils.data.imagenette import (
+    IMAGENETTE_IMAGE_SIZE,
+    IMAGENETTE_NUM_CLASSES,
+    make_imagenette_train_validation_loaders,
+)
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
@@ -69,12 +73,18 @@ from dl_utils.training.checkpoints import (
     save_model_weights,
 )
 from dl_utils.vae.quantization import FSQAutoencoder, TokenUsageAccumulator
-from dl_utils.vae.token_prior import PixelCNNPrior, make_fixed_class_labels
+from dl_utils.vae.token_prior import (
+    PixelCNNPrior,
+    evaluate_pixelcnn_prior,
+    make_fixed_class_labels,
+    sample_pixelcnn_prior_images,
+    train_pixelcnn_prior_epoch,
+)
 
 PROJECT_ROOT = infer_project_root()
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
-IMAGE_SIZE = 128
-NUM_CLASSES = 10
+IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
+NUM_CLASSES = IMAGENETTE_NUM_CLASSES
 DOWNSAMPLE_STEPS = 3
 LATENT_GRID_SIZE = IMAGE_SIZE // (2**DOWNSAMPLE_STEPS)
 TOKENS_PER_IMAGE = LATENT_GRID_SIZE**2
@@ -135,35 +145,6 @@ def smoke_test() -> None:
     )
 
 
-def make_loaders(
-    args: argparse.Namespace, device: torch.device
-) -> tuple[DataLoader, DataLoader]:
-    return (
-        make_imagenette_loader(
-            args.data_dir,
-            args.batch_size,
-            device,
-            split="train",
-            image_size=IMAGE_SIZE,
-            horizontal_flip=False,
-            num_workers=args.workers,
-            preprocessed=True,
-        ),
-        make_imagenette_loader(
-            args.data_dir,
-            args.batch_size,
-            device,
-            split="val",
-            image_size=IMAGE_SIZE,
-            horizontal_flip=False,
-            num_workers=args.workers,
-            shuffle=False,
-            preprocessed=True,
-            drop_last=False,
-        ),
-    )
-
-
 @torch.inference_mode()
 def evaluate_tokenizer(
     model: FSQAutoencoder,
@@ -197,33 +178,6 @@ def evaluate_tokenizer(
         "fixed_length_bits_per_image": (
             TOKENS_PER_IMAGE * math.ceil(math.log2(vocabulary_size))
         ),
-    }
-
-
-@torch.inference_mode()
-def evaluate_prior(
-    tokenizer: FSQAutoencoder,
-    prior: PixelCNNPrior,
-    loader: DataLoader,
-    *,
-    device: torch.device,
-) -> dict[str, float]:
-    tokenizer.eval()
-    prior.eval()
-    nll = 0.0
-    examples = 0
-    for x, labels in loader:
-        x = x.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-        _, indices, _ = tokenizer.encode(x)
-        loss = F.cross_entropy(prior(indices, labels=labels), indices)
-        nll += float(loss) * x.shape[0]
-        examples += x.shape[0]
-    nll /= examples
-    return {
-        "nll_nats_per_token": nll,
-        "bits_per_token": nll / math.log(2),
-        "bits_per_image": TOKENS_PER_IMAGE * nll / math.log(2),
     }
 
 
@@ -339,44 +293,40 @@ def train_prior(
     ).to(device)
     optimizer = torch.optim.Adam(prior.parameters(), lr=args.prior_lr)
     for epoch in range(1, args.prior_epochs + 1):
-        prior.train()
-        nll_sum = 0.0
-        examples = 0
-        for x, labels in train_loader:
-            x = x.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            with torch.inference_mode():
-                _, indices, _ = tokenizer.encode(x)
-            loss = F.cross_entropy(prior(indices, labels=labels), indices)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-            nll_sum += loss.item() * x.shape[0]
-            examples += x.shape[0]
-        nll = nll_sum / examples
+        nll = train_pixelcnn_prior_epoch(
+            tokenizer,
+            prior,
+            train_loader,
+            optimizer,
+            device,
+        )
         print(
             f"prior {epoch:03d}: train nll={nll:.4f}, "
             f"train bits/token={nll / math.log(2):.3f}"
         )
         if epoch == 1 or epoch % args.sample_every == 0:
-            with torch.inference_mode():
-                prior.eval()
-                labels = make_fixed_class_labels(NUM_CLASSES, SAMPLES_PER_CLASS, device)
-                indices = prior.sample(
-                    labels.shape[0],
-                    LATENT_GRID_SIZE,
-                    LATENT_GRID_SIZE,
-                    device=device,
-                    labels=labels,
-                    temperature=args.temperature,
-                )
-                samples = tokenizer.decode_indices(indices)
-                save_image(
-                    samples.mul(0.5).add(0.5),
-                    out_dir / f"prior_{epoch:03d}.png",
-                    nrow=5,
-                )
-    validation = evaluate_prior(tokenizer, prior, validation_loader, device=device)
+            prior.eval()
+            labels = make_fixed_class_labels(NUM_CLASSES, SAMPLES_PER_CLASS, device)
+            samples = sample_pixelcnn_prior_images(
+                tokenizer,
+                prior,
+                labels,
+                grid_size=LATENT_GRID_SIZE,
+                device=device,
+                temperature=args.temperature,
+            )
+            save_image(
+                samples.mul(0.5).add(0.5),
+                out_dir / f"prior_{epoch:03d}.png",
+                nrow=5,
+            )
+    validation = evaluate_pixelcnn_prior(
+        tokenizer,
+        prior,
+        validation_loader,
+        tokens_per_image=TOKENS_PER_IMAGE,
+        device=device,
+    )
     tokenizer_interface_id = model_state_fingerprint(tokenizer)
     prior_config = {
         "vocabulary_size": vocabulary_size,
@@ -406,7 +356,13 @@ def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vae" / "fsq"
     out_dir.mkdir(parents=True, exist_ok=True)
-    train_loader, validation_loader = make_loaders(args, device)
+    train_loader, validation_loader = make_imagenette_train_validation_loaders(
+        args.data_dir,
+        args.batch_size,
+        device,
+        image_size=IMAGE_SIZE,
+        num_workers=args.workers,
+    )
     path = out_dir / "tokenizer.pth"
     if args.stage in {"tokenizer", "all"}:
         tokenizer = train_tokenizer(

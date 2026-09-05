@@ -13,6 +13,8 @@ import torch
 
 from dl_utils.data.imagenette import (
     IMAGENETTE_CLASS_NAMES,
+    IMAGENETTE_IMAGE_SIZE,
+    IMAGENETTE_NUM_CLASSES,
     make_imagenette_dataset,
 )
 from dl_utils.filesystem.directories import reset_dir
@@ -31,8 +33,8 @@ DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
 DEFAULT_OUTPUT_ROOT = Path(
     os.environ.get("DL_OUTPUT_ROOT", PROJECT_ROOT / "output" / "gan")
 )
-IMAGE_SIZE = 128
-NUM_CLASSES = 10
+IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
+NUM_CLASSES = IMAGENETTE_NUM_CLASSES
 DISPLAY_CLASS_INDICES = tuple(range(NUM_CLASSES))
 EVALUATION_SEED = 10_042
 MODEL_EVALUATION_SEEDS = {

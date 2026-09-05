@@ -95,6 +95,8 @@ require_no_args() {
 
 cloud_preflight() {
     local require_data="$1"
+    local data_dir="${2:-}"
+    local gpu_name
     command -v uv >/dev/null 2>&1 || \
         die "uv is unavailable; run setup_cloud_gpu.sh"
     command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
@@ -105,7 +107,7 @@ cloud_preflight() {
     uv run --locked --no-sync python -c \
         'import torch; assert torch.cuda.is_available(), "CUDA unavailable"; assert torch.cuda.is_bf16_supported(), "BF16 unavailable"'
     if [[ "$require_data" == true ]]; then
-        IMAGENETTE_ROOT="$training_data_dir" uv run --locked --no-sync python -c \
+        IMAGENETTE_ROOT="$data_dir" uv run --locked --no-sync python -c \
             'import os; from dl_utils.data.imagenette import imagenette_128_is_ready; root=os.environ["IMAGENETTE_ROOT"]; assert imagenette_128_is_ready(root), f"Imagenette-128 is not ready: {root}"'
     fi
     log "preflight passed: $gpu_name"
@@ -188,7 +190,6 @@ REMOTE
 
 run_smoke() {
     require_no_args smoke "$@"
-    training_data_dir="$DEFAULT_DATA_DIR"
     cloud_preflight false
     bash "$SCRIPT_DIR/benchmark_rtx5090_gans.sh" \
         --steps 5 \
@@ -197,7 +198,6 @@ run_smoke() {
 }
 
 run_benchmark() {
-    training_data_dir="$DEFAULT_DATA_DIR"
     cloud_preflight false
     exec bash "$SCRIPT_DIR/benchmark_rtx5090_gans.sh" "$@"
 }
@@ -216,6 +216,7 @@ train_worker() {
     local precision="$7"
     local data_dir="$8"
     local script checkpoint log_file
+    local -a command
     validate_model "$model"
     script="$(lesson_path "$model")"
     checkpoint="$OUTPUT_ROOT/$model/checkpoints/latest.pth"
@@ -315,8 +316,7 @@ run_train() {
         die "--generator-batch-size applies only to sn_gan"
     fi
 
-    training_data_dir="$data_dir"
-    cloud_preflight true
+    cloud_preflight true "$data_dir"
     command -v tmux >/dev/null 2>&1 || die "tmux is unavailable"
     tmux_server_exists && \
         die "a managed GAN session is active; inspect it with status"
@@ -375,6 +375,7 @@ run_stop() {
 run_download() {
     local host="vast-dl"
     local apply=false
+    local -a rsync_args
     while (($# > 0)); do
         case "$1" in
             --host)

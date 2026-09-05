@@ -14,11 +14,15 @@ from torch import nn
 from torch.nn.utils import spectral_norm
 
 from dl_utils.gan.sn_gan import (
+    DISCRIMINATOR_128_BLOCK_RESOLUTIONS,
+    GENERATOR_128_BLOCK_RESOLUTIONS,
     IMAGENETTE_IMAGE_SIZE,
     IMAGENETTE_NUM_CLASSES,
     CategoricalConditionalBatchNorm2d,
     SNDiscriminatorResidualBlock,
     SNGeneratorResidualBlock,
+    discriminator_128_channels,
+    generator_128_channels,
     validate_class_labels,
 )
 
@@ -139,24 +143,19 @@ class SAGANGenerator(nn.Module):
             raise ValueError("z_dim, base_channels, and num_classes must be positive.")
         if image_size != IMAGENETTE_IMAGE_SIZE:
             raise ValueError("SAGANGenerator currently implements only 128x128 output.")
-        block_resolutions = (8, 16, 32, 64, 128)
-        if attention_resolution not in block_resolutions:
+        if attention_resolution not in GENERATOR_128_BLOCK_RESOLUTIONS:
             raise ValueError(
-                f"attention_resolution must be one of {block_resolutions}."
+                "attention_resolution must be one of "
+                f"{GENERATOR_128_BLOCK_RESOLUTIONS}."
             )
 
         self.z_dim = z_dim
         self.num_classes = num_classes
         self.image_size = image_size
-        self.attention_after_block = block_resolutions.index(attention_resolution)
-        channels = [
-            base_channels * 16,
-            base_channels * 16,
-            base_channels * 8,
-            base_channels * 4,
-            base_channels * 2,
-            base_channels,
-        ]
+        self.attention_after_block = GENERATOR_128_BLOCK_RESOLUTIONS.index(
+            attention_resolution
+        )
+        channels = generator_128_channels(base_channels)
         self.input = spectral_norm(nn.Linear(z_dim, channels[0] * 4 * 4))
         blocks = [
             SAGANGeneratorResidualBlock(
@@ -212,21 +211,15 @@ class SAGANDiscriminator(nn.Module):
             raise ValueError(
                 "SAGANDiscriminator currently implements only 128x128 input."
             )
-        block_resolutions = (64, 32, 16, 8, 4, 4)
-        if attention_resolution not in set(block_resolutions):
+        if attention_resolution not in DISCRIMINATOR_128_BLOCK_RESOLUTIONS:
             raise ValueError("attention_resolution must be one of (4, 8, 16, 32, 64).")
 
         self.num_classes = num_classes
         self.image_size = image_size
-        self.attention_after_block = block_resolutions.index(attention_resolution)
-        channels = [
-            base_channels,
-            base_channels * 2,
-            base_channels * 4,
-            base_channels * 8,
-            base_channels * 16,
-            base_channels * 16,
-        ]
+        self.attention_after_block = DISCRIMINATOR_128_BLOCK_RESOLUTIONS.index(
+            attention_resolution
+        )
+        channels = discriminator_128_channels(base_channels)
         self.blocks = nn.ModuleList(
             [
                 SNDiscriminatorResidualBlock(

@@ -63,7 +63,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -74,7 +73,11 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
-from dl_utils.data.imagenette import make_imagenette_loader
+from dl_utils.data.imagenette import (
+    IMAGENETTE_IMAGE_SIZE,
+    IMAGENETTE_NUM_CLASSES,
+    make_imagenette_loader,
+)
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
@@ -84,6 +87,8 @@ from dl_utils.training.checkpoints import (
 from dl_utils.vae.image_quality import (
     FeatureMoments,
     TorchvisionInceptionFeatures,
+    collect_reference_feature_moments,
+    evaluate_conditional_generation,
     frechet_distance,
     structural_similarity_index,
 )
@@ -99,8 +104,8 @@ from dl_utils.vae.token_prior import CausalTransformerPrior, PixelCNNPrior
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
-IMAGE_SIZE = 128
-NUM_CLASSES = 10
+IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
+NUM_CLASSES = IMAGENETTE_NUM_CLASSES
 
 Tokenizer = VQPerceptualAutoencoder | VQVAE
 TokenPrior = CausalTransformerPrior | PixelCNNPrior
@@ -390,35 +395,6 @@ def load_systems(
 
 
 @torch.inference_mode()
-def real_feature_moments(
-    loader: DataLoader,
-    feature_extractor: nn.Module,
-    *,
-    feature_dim: int,
-    max_examples: int,
-    generation_examples: int,
-    device: torch.device,
-) -> tuple[FeatureMoments, FeatureMoments]:
-    reconstruction_reference = FeatureMoments(feature_dim)
-    generation_reference = FeatureMoments(feature_dim)
-    examples = 0
-    generation_count = 0
-    for x, _ in loader:
-        remaining = max_examples - examples
-        if remaining <= 0:
-            break
-        x = x[:remaining].to(device, non_blocking=True)
-        features = feature_extractor(x)
-        reconstruction_reference.update(features)
-        if generation_count < generation_examples:
-            count = min(x.shape[0], generation_examples - generation_count)
-            generation_reference.update(features[:count])
-            generation_count += count
-        examples += x.shape[0]
-    return reconstruction_reference, generation_reference
-
-
-@torch.inference_mode()
 def evaluate_reconstruction(
     system: EvaluatedSystem,
     loader: DataLoader,
@@ -539,56 +515,6 @@ def evaluate_reconstruction(
     }, comparison
 
 
-@torch.inference_mode()
-def evaluate_generation(
-    system: EvaluatedSystem,
-    feature_extractor: nn.Module,
-    real_moments: FeatureMoments,
-    *,
-    feature_dim: int,
-    examples: int,
-    batch_size: int,
-    temperature: float,
-    device: torch.device,
-) -> tuple[dict[str, float], Tensor]:
-    generated_moments = FeatureMoments(feature_dim)
-    sample_batches: list[Tensor] = []
-    saved_examples = 0
-    elapsed = 0.0
-    generated = 0
-    while generated < examples:
-        count = min(batch_size, examples - generated)
-        labels = torch.arange(
-            generated,
-            generated + count,
-            device=device,
-        ).remainder(NUM_CLASSES)
-        start = time.perf_counter()
-        images = system.sample(
-            count,
-            device=device,
-            labels=labels,
-            temperature=temperature,
-        )
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        elapsed += time.perf_counter() - start
-        generated_moments.update(feature_extractor(images))
-        if saved_examples < 64:
-            save_count = min(64 - saved_examples, images.shape[0])
-            sample_batches.append(images[:save_count].cpu())
-            saved_examples += save_count
-        generated += count
-    return {
-        "projected_inception_frechet": frechet_distance(
-            real_moments, generated_moments
-        ),
-        "seconds": elapsed,
-        "images_per_second": examples / max(elapsed, 1e-12),
-        "temperature": temperature,
-    }, torch.cat(sample_batches)
-
-
 def _artifact_stem(name: str) -> str:
     return "".join(
         character if character.isalnum() or character in {"-", "_"} else "-"
@@ -650,11 +576,11 @@ def evaluate(args: argparse.Namespace) -> None:
     ).to(device)
     perceptual = build_perceptual_loss("lpips", device)
     feature_dim = feature_extractor.feature_dim
-    real_reconstruction, real_generation = real_feature_moments(
+    real_reconstruction, real_generation = collect_reference_feature_moments(
         loader,
         feature_extractor,
         feature_dim=feature_dim,
-        max_examples=args.max_examples,
+        reconstruction_examples=args.max_examples,
         generation_examples=args.generation_examples,
         device=device,
     )
@@ -704,13 +630,13 @@ def evaluate(args: argparse.Namespace) -> None:
         )
         generation: dict[str, float] | None = None
         if system.has_complete_prior:
-            generation, images = evaluate_generation(
+            generation, images = evaluate_conditional_generation(
                 system,
                 feature_extractor,
                 real_generation,
-                feature_dim=feature_dim,
                 examples=args.generation_examples,
                 batch_size=args.generation_batch_size,
+                num_classes=NUM_CLASSES,
                 temperature=args.temperature,
                 device=device,
             )
@@ -881,11 +807,11 @@ def smoke_test() -> None:
         )
         features = TinyFeatures()
         perceptual = RandomFeaturePerceptualLoss(channels=4)
-        real, generated_reference = real_feature_moments(
+        real, generated_reference = collect_reference_feature_moments(
             loader,
             features,
             feature_dim=features.feature_dim,
-            max_examples=8,
+            reconstruction_examples=8,
             generation_examples=2,
             device=device,
         )
@@ -899,13 +825,13 @@ def smoke_test() -> None:
             max_examples=8,
             device=device,
         )
-        generation, images = evaluate_generation(
+        generation, images = evaluate_conditional_generation(
             system,
             features,
             generated_reference,
-            feature_dim=features.feature_dim,
             examples=2,
             batch_size=2,
+            num_classes=NUM_CLASSES,
             temperature=1.0,
             device=device,
         )

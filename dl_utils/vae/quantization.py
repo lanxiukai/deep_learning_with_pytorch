@@ -298,6 +298,10 @@ class VQVAE(nn.Module):
     def encode(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         return self.quantizer(self.encoder(x))
 
+    def encode_indices(self, x: Tensor) -> Tensor:
+        """Encode images and return only their discrete token grid."""
+        return self.encode(x)[1]
+
     def decode_indices(self, indices: Tensor) -> Tensor:
         return self.decoder(self.quantizer.lookup(indices))
 
@@ -339,6 +343,10 @@ class FSQAutoencoder(nn.Module):
 
     def encode(self, x: Tensor) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         return self.quantizer(self.encoder(x))
+
+    def encode_indices(self, x: Tensor) -> Tensor:
+        """Encode images and return only their discrete token grid."""
+        return self.encode(x)[1]
 
     def decode_indices(self, indices: Tensor) -> Tensor:
         return self.decoder(self.quantizer.indices_to_values(indices))

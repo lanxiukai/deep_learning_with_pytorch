@@ -29,9 +29,10 @@ from tqdm import tqdm
 
 from dl_utils.data.imagenette import (
     IMAGENETTE_CLASS_NAMES,
+    IMAGENETTE_IMAGE_SIZE,
+    IMAGENETTE_NUM_CLASSES,
     make_imagenette_loader,
 )
-from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.conditional_training import train_conditional_hinge_epoch
 from dl_utils.gan.sagan import (
@@ -60,10 +61,10 @@ DEFAULT_OUTPUT_ROOT = Path(
 NUM_EPOCHS = 20
 BATCH_SIZE = 16
 NUM_WORKERS = 8
-NUM_CLASSES = 10
+NUM_CLASSES = IMAGENETTE_NUM_CLASSES
 Z_DIM = 128
 BASE_CHANNELS = 64
-IMAGE_SIZE = 128
+IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
 ATTENTION_RESOLUTION = 32
 GENERATOR_LR = 1e-4
 DISCRIMINATOR_LR = 4e-4
@@ -94,11 +95,6 @@ DISCRIMINATOR_CONFIG = {
 def main(args):
     output_dir = args.output_root / "sagan"
     training_dir = output_dir / "training"
-    checkpoint_dir = output_dir / "checkpoints"
-    if args.resume_from is None:
-        reset_dir(str(output_dir))
-    training_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     set_seed(SEED)
     device = try_gpu()
@@ -173,7 +169,6 @@ def main(args):
     )
     start_epoch, state = session.start(
         args.resume_from,
-        reset_output_dir=False,
         initial_state={
             "loss_history": {
                 "epoch": [],
@@ -185,6 +180,7 @@ def main(args):
             "discriminator_steps": 0,
         },
     )
+    training_dir.mkdir(parents=True, exist_ok=True)
     loss_history = state["loss_history"]
     fixed_noise = state["fixed_noise"].to(device)
     fixed_labels = state["fixed_labels"].to(device)
@@ -207,7 +203,8 @@ def main(args):
         f"Imagenette batches/epoch={len(loader):,}"
     )
     print(
-        f"Planned optimizer updates: D={planned_d_steps:,}, G={planned_g_steps:,} (1:1)"
+        f"Planned optimizer updates: D={planned_d_steps:,}, "
+        f"G={planned_g_steps:,} ({DISCRIMINATOR_UPDATES_PER_GENERATOR}:1)"
     )
 
     with tqdm(

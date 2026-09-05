@@ -17,8 +17,8 @@ def show_images(imgs, num_rows, num_cols, titles=None, scale=1.5, cmap=None):
     figsize = (num_cols * scale, num_rows * scale)
     _, raw_axes = _plt.subplots(num_rows, num_cols, figsize=figsize)
     axes: Any = raw_axes
-    axes = axes.flatten() if hasattr(axes, 'flatten') else [axes]
-    for i, (ax, img) in enumerate(zip(axes, imgs)):
+    axes = axes.flatten() if hasattr(axes, "flatten") else [axes]
+    for i, (ax, img) in enumerate(zip(axes, imgs, strict=False)):
         if torch.is_tensor(img):
             # Tensor image
             ax.imshow(img.cpu().numpy(), cmap=cmap)
@@ -54,12 +54,16 @@ def save_grid(
         if hw is not None:
             H, W = int(hw[0]), int(hw[1])
             if H * W != V:
-                raise ValueError(f"save_grid: hw={hw} implies V={H*W}, but got V={V}.")
+                raise ValueError(
+                    f"save_grid: hw={hw} implies V={H * W}, but got V={V}."
+                )
             images = images.reshape(-1, 1, H, W)
         else:
             side = math.isqrt(V)
             if side * side != V:
-                raise ValueError(f"save_grid: cannot infer square image shape from V={V}. Pass hw=(H,W).")
+                raise ValueError(
+                    f"save_grid: cannot infer square image shape from V={V}. Pass hw=(H,W)."
+                )
             images = images.reshape(-1, 1, side, side)
 
     # Make a grid using torchvision then plot with matplotlib (portable)
@@ -89,23 +93,17 @@ def save_image_row_grid(
     if len(image_rows) == 0 or len(image_rows[0]) == 0:
         raise ValueError("image_rows must contain at least one image.")
     if len(image_rows) != len(row_labels):
-        raise ValueError(
-            "image_rows and row_labels must have the same length."
-        )
+        raise ValueError("image_rows and row_labels must have the same length.")
 
     num_columns = len(image_rows[0])
     if any(len(images) != num_columns for images in image_rows):
         raise ValueError("All image rows must have the same length.")
     if column_labels is not None and len(column_labels) != num_columns:
-        raise ValueError(
-            "column_labels must have one label for every image column."
-        )
+        raise ValueError("column_labels must have one label for every image column.")
 
     has_decorations = title is not None or column_labels is not None
     figure_height = (
-        2.0 * len(image_rows) + 0.5
-        if has_decorations
-        else 2.1 * len(image_rows)
+        2.0 * len(image_rows) + 0.5 if has_decorations else 2.1 * len(image_rows)
     )
     # ``Animator`` enables pyplot's global interactive mode.  Temporarily turn
     # it off so this save-only figure never creates a visible GUI window.
@@ -118,7 +116,7 @@ def save_image_row_grid(
         )
         try:
             for row_index, (images, label) in enumerate(
-                zip(image_rows, row_labels)
+                zip(image_rows, row_labels, strict=True)
             ):
                 axes[row_index, 0].set_ylabel(
                     label,
@@ -141,9 +139,7 @@ def save_image_row_grid(
                     axes[row_index, column_index].set_xticks([])
                     axes[row_index, column_index].set_yticks([])
                     if has_decorations:
-                        for spine in (
-                            axes[row_index, column_index].spines.values()
-                        ):
+                        for spine in axes[row_index, column_index].spines.values():
                             spine.set_visible(False)
                     if row_index == 0 and column_labels is not None:
                         axes[row_index, column_index].set_title(
@@ -201,9 +197,7 @@ def save_fixed_noise_samples(
         f"z {row * columns + 1:02d}-{(row + 1) * columns:02d}"
         for row in range(len(image_rows))
     ]
-    display_title = (
-        title if epoch is None else f"{title} - epoch {epoch:03d}"
-    )
+    display_title = title if epoch is None else f"{title} - epoch {epoch:03d}"
     save_image_row_grid(
         image_rows,
         row_labels,
@@ -249,10 +243,7 @@ def save_training_samples(
     )
 
     cpu_labels = labels.cpu()
-    image_rows = [
-        samples[cpu_labels == class_index]
-        for class_index in class_indices
-    ]
+    image_rows = [samples[cpu_labels == class_index] for class_index in class_indices]
     save_image_row_grid(
         image_rows,
         [name.title() for name in class_names],

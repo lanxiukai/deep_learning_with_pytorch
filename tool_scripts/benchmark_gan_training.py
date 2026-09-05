@@ -7,24 +7,25 @@ import json
 import math
 import time
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 
 import torch
 
-from dl_utils.data.imagenette import make_imagenette_loader
+from dl_utils.data.imagenette import (
+    IMAGENETTE_IMAGE_SIZE,
+    IMAGENETTE_NUM_CLASSES,
+    make_imagenette_loader,
+)
 from dl_utils.gan.biggan import (
     BigGANDiscriminator,
     BigGANGenerator,
     initialize_orthogonal_weights,
     modified_orthogonal_regularization,
 )
+from dl_utils.gan.conditional_training import train_conditional_hinge_step
 from dl_utils.gan.sagan import SAGANDiscriminator, SAGANGenerator
-from dl_utils.gan.sn_gan import (
-    SNDiscriminator,
-    SNGenerator,
-    discriminator_hinge_loss,
-    generator_hinge_loss,
-)
+from dl_utils.gan.sn_gan import SNDiscriminator, SNGenerator
 from dl_utils.training.accelerator import (
     configure_device,
     make_fused_adam,
@@ -33,11 +34,12 @@ from dl_utils.training.accelerator import (
 from dl_utils.training.optimization import update_ema
 
 MODEL_DEFAULT_BATCH_SIZES = {
-    "sn_gan": 16,
-    "sagan": 16,
-    "biggan": 8,
+    "sn_gan": (16, 32),
+    "sagan": (16, 16),
+    "biggan": (8, 8),
 }
-NUM_CLASSES = 10
+NUM_CLASSES = IMAGENETTE_NUM_CLASSES
+IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
 
 
 def build_model(model_name, device, base_channels):
@@ -45,7 +47,7 @@ def build_model(model_name, device, base_channels):
     common = {
         "num_classes": NUM_CLASSES,
         "base_channels": base_channels,
-        "image_size": 128,
+        "image_size": IMAGE_SIZE,
     }
     if model_name == "sn_gan":
         z_dim = 128
@@ -122,8 +124,8 @@ def make_real_batch_source(args, device, batch_size):
                 torch.rand(
                     batch_size,
                     3,
-                    128,
-                    128,
+                    IMAGE_SIZE,
+                    IMAGE_SIZE,
                     device=device,
                     generator=random_generator,
                 )
@@ -176,7 +178,13 @@ def benchmark(args):
         raise RuntimeError(f"Expected an RTX 5090, found {gpu_name!r}.")
     configure_device(device)
     precision = resolve_training_precision(device, args.precision)
-    batch_size = args.batch_size or MODEL_DEFAULT_BATCH_SIZES[args.model]
+    default_batch_size, default_generator_batch_size = MODEL_DEFAULT_BATCH_SIZES[
+        args.model
+    ]
+    batch_size = args.batch_size or default_batch_size
+    generator_batch_size = args.generator_batch_size or (
+        batch_size if args.batch_size is not None else default_generator_batch_size
+    )
     torch.manual_seed(args.seed)
 
     (
@@ -192,65 +200,50 @@ def benchmark(args):
     last_loss_tensors = {}
     discriminator_steps = 0
     generator_steps = 0
+    generator_regularizer = None
+    after_generator_step = None
+    if averaged_generator is not None:
+        generator_regularizer = partial(
+            modified_orthogonal_regularization,
+            strength=1e-4,
+        )
+        after_generator_step = partial(
+            update_ema,
+            averaged_generator,
+            generator,
+            decay=0.9999,
+        )
 
     def train_step():
         nonlocal discriminator_steps, generator_steps, last_loss_tensors
         real, labels = next_real_batch()
-        current_batch_size = real.shape[0]
-        optimizer_d.zero_grad(set_to_none=True)
-        with precision.autocast():
-            noise = torch.randn(current_batch_size, z_dim, device=device)
-            fake_labels = torch.randint(
-                NUM_CLASSES,
-                (current_batch_size,),
-                device=device,
-            )
-            with torch.no_grad():
-                fake = generator(noise, fake_labels)
-            loss_d = discriminator_hinge_loss(
-                discriminator(real, labels),
-                discriminator(fake, fake_labels),
-            )
-        precision.backward_step(loss_d, optimizer_d)
-        discriminator_steps += 1
-        last_loss_tensors["discriminator"] = loss_d.detach()
-
-        if discriminator_steps % update_ratio == 0:
-            optimizer_g.zero_grad(set_to_none=True)
-            sampled_labels = torch.randint(
-                NUM_CLASSES,
-                (current_batch_size,),
-                device=device,
-            )
-            noise = torch.randn(current_batch_size, z_dim, device=device)
-            discriminator.requires_grad_(False)
-            try:
-                with precision.autocast():
-                    fake = generator(noise, sampled_labels)
-                    adversarial = generator_hinge_loss(
-                        discriminator(fake, sampled_labels)
-                    )
-                regularization = adversarial.new_zeros(())
-                if args.model == "biggan":
-                    regularization = modified_orthogonal_regularization(
-                        generator,
-                        strength=1e-4,
-                    )
-                loss_g = adversarial.float() + regularization
-                precision.backward_step(loss_g, optimizer_g)
-                if averaged_generator is not None:
-                    update_ema(
-                        averaged_generator,
-                        generator,
-                        decay=0.9999,
-                    )
-            finally:
-                discriminator.requires_grad_(True)
+        result = train_conditional_hinge_step(
+            generator,
+            discriminator,
+            real,
+            labels,
+            optimizer_g,
+            optimizer_d,
+            device,
+            precision,
+            z_dim=z_dim,
+            num_classes=NUM_CLASSES,
+            generator_batch_size=generator_batch_size,
+            discriminator_steps=discriminator_steps,
+            discriminator_updates_per_generator=update_ratio,
+            generator_regularizer=generator_regularizer,
+            after_generator_step=after_generator_step,
+        )
+        discriminator_steps = result.discriminator_steps
+        last_loss_tensors["discriminator"] = result.discriminator
+        if result.generator_total is not None:
+            assert result.generator_adversarial is not None
+            assert result.generator_regularization is not None
             generator_steps += 1
             last_loss_tensors.update(
-                generator=loss_g.detach(),
-                generator_adversarial=adversarial.detach(),
-                generator_regularization=regularization.detach(),
+                generator=result.generator_total,
+                generator_adversarial=result.generator_adversarial,
+                generator_regularization=result.generator_regularization,
             )
 
     for _ in range(args.warmup_steps):
@@ -279,7 +272,8 @@ def benchmark(args):
         "precision": precision.name,
         "base_channels": args.base_channels,
         "batch_size": batch_size,
-        "resolution": 128,
+        "generator_batch_size": generator_batch_size,
+        "resolution": IMAGE_SIZE,
         "warmup_steps": args.warmup_steps,
         "timed_discriminator_steps": discriminator_steps - timed_start_d,
         "timed_generator_steps": generator_steps - timed_start_g,
@@ -310,6 +304,7 @@ def parse_args():
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--generator-batch-size", type=int)
     parser.add_argument("--base-channels", type=int, default=64)
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--device", default="cuda:0")
@@ -326,6 +321,8 @@ def parse_args():
     positive_values = [args.steps, args.base_channels]
     if args.batch_size is not None:
         positive_values.append(args.batch_size)
+    if args.generator_batch_size is not None:
+        positive_values.append(args.generator_batch_size)
     if min(positive_values) < 1 or args.warmup_steps < 0:
         parser.error("steps, batch-size, and channels must be positive")
     if args.num_workers < 0:

@@ -212,6 +212,41 @@ def make_imagenette_loader(
     )
 
 
+def make_imagenette_train_validation_loaders(
+    root: str | Path,
+    batch_size: int,
+    device: torch.device,
+    *,
+    image_size: int = IMAGENETTE_IMAGE_SIZE,
+    horizontal_flip: bool = False,
+    num_workers: int = 0,
+    preprocessed: bool = True,
+) -> tuple[DataLoader, DataLoader]:
+    """Create the matched train/validation pair used by tokenizer lessons."""
+    train_loader = make_imagenette_loader(
+        root,
+        batch_size,
+        device,
+        split="train",
+        image_size=image_size,
+        horizontal_flip=horizontal_flip,
+        num_workers=num_workers,
+        preprocessed=preprocessed,
+    )
+    validation_loader = make_imagenette_loader(
+        root,
+        batch_size,
+        device,
+        split="val",
+        image_size=image_size,
+        num_workers=num_workers,
+        shuffle=False,
+        preprocessed=preprocessed,
+        drop_last=False,
+    )
+    return train_loader, validation_loader
+
+
 def _read_json(path: Path) -> dict | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -705,6 +740,7 @@ __all__ = [
     "imagenette_320_is_ready",
     "make_imagenette_dataset",
     "make_imagenette_loader",
+    "make_imagenette_train_validation_loaders",
     "prepare_imagenette_128_cache",
     "prepare_imagenette_320_archive",
     "resolve_imagenette_split_dir",

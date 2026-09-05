@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
+from typing import Protocol
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.optim import Optimizer
+
+
+class IndexTokenizer(Protocol):
+    """Minimal interface shared by VQ-VAE and FSQ tokenizers."""
+
+    def encode_indices(self, images: Tensor) -> Tensor: ...
+
+    def decode_indices(self, indices: Tensor) -> Tensor: ...
 
 
 def _validate_class_labels(
@@ -166,6 +177,85 @@ class PixelCNNPrior(nn.Module):
         return indices
 
 
+def train_pixelcnn_prior_epoch(
+    tokenizer: IndexTokenizer,
+    prior: PixelCNNPrior,
+    loader: Iterable[tuple[Tensor, Tensor]],
+    optimizer: Optimizer,
+    device: torch.device,
+) -> float:
+    """Train one causal-prior epoch over frozen tokenizer indices."""
+    prior.train()
+    nll_sum = 0.0
+    examples = 0
+    for images, labels in loader:
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        with torch.inference_mode():
+            indices = tokenizer.encode_indices(images)
+        class_labels = labels if prior.num_classes > 0 else None
+        loss = F.cross_entropy(prior(indices, labels=class_labels), indices)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        nll_sum += loss.item() * images.shape[0]
+        examples += images.shape[0]
+    return nll_sum / examples
+
+
+@torch.inference_mode()
+def evaluate_pixelcnn_prior(
+    tokenizer: IndexTokenizer,
+    prior: PixelCNNPrior,
+    loader: Iterable[tuple[Tensor, Tensor]],
+    *,
+    tokens_per_image: int,
+    device: torch.device,
+) -> dict[str, float]:
+    """Measure conditional PixelCNN NLL for one frozen tokenizer."""
+    prior.eval()
+    nll_sum = 0.0
+    examples = 0
+    for images, labels in loader:
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        indices = tokenizer.encode_indices(images)
+        class_labels = labels if prior.num_classes > 0 else None
+        loss = F.cross_entropy(prior(indices, labels=class_labels), indices)
+        nll_sum += float(loss) * images.shape[0]
+        examples += images.shape[0]
+    nll = nll_sum / examples
+    return {
+        "nll_nats_per_token": nll,
+        "bits_per_token": nll / math.log(2),
+        "bits_per_image": tokens_per_image * nll / math.log(2),
+    }
+
+
+@torch.inference_mode()
+def sample_pixelcnn_prior_images(
+    tokenizer: IndexTokenizer,
+    prior: PixelCNNPrior,
+    labels: Tensor,
+    *,
+    grid_size: int,
+    device: torch.device,
+    temperature: float,
+) -> Tensor:
+    """Sample a square token grid and decode it to an image batch."""
+    labels = labels.to(device)
+    class_labels = labels if prior.num_classes > 0 else None
+    indices = prior.sample(
+        labels.shape[0],
+        grid_size,
+        grid_size,
+        device=device,
+        labels=class_labels,
+        temperature=temperature,
+    )
+    return tokenizer.decode_indices(indices)
+
+
 class CausalTransformerPrior(nn.Module):
     """Teacher-forced causal Transformer over a fixed-length token sequence."""
 
@@ -275,7 +365,11 @@ class CausalTransformerPrior(nn.Module):
 
 __all__ = [
     "CausalTransformerPrior",
+    "IndexTokenizer",
     "MaskedConv2d",
     "PixelCNNPrior",
+    "evaluate_pixelcnn_prior",
     "make_fixed_class_labels",
+    "sample_pixelcnn_prior_images",
+    "train_pixelcnn_prior_epoch",
 ]

@@ -17,7 +17,6 @@ from dl_utils.training.checkpoints import (
     save_periodic_checkpoint,
 )
 
-
 __all__ = ["TrainingSession"]
 
 
@@ -46,9 +45,7 @@ class TrainingSession:
         if checkpoint_every_epochs < 1:
             raise ValueError("checkpoint_every_epochs must be positive.")
         if archive_every_epochs is not None and archive_every_epochs < 1:
-            raise ValueError(
-                "archive_every_epochs must be positive or None."
-            )
+            raise ValueError("archive_every_epochs must be positive or None.")
         if not models:
             raise ValueError("models must not be empty.")
         if not optimizers:
@@ -63,14 +60,12 @@ class TrainingSession:
         self.archive_every_epochs = archive_every_epochs
         self.metadata = dict(metadata or {})
         self.model_metadata = {
-            name: dict(values)
-            for name, values in (model_metadata or {}).items()
+            name: dict(values) for name, values in (model_metadata or {}).items()
         }
         unknown_models = sorted(set(self.model_metadata) - set(self.models))
         if unknown_models:
             raise ValueError(
-                "model_metadata contains unknown models: "
-                f"{unknown_models}."
+                f"model_metadata contains unknown models: {unknown_models}."
             )
 
         self._checkpoint_metadata = {
@@ -86,23 +81,16 @@ class TrainingSession:
         resume_from: str | PathLike[str] | None = None,
         *,
         initial_state: Mapping[str, Any] | None = None,
-        reset_output_dir: bool = True,
     ) -> tuple[int, dict[str, Any]]:
-        """Prepare output and return ``(start_epoch, training_state)``.
-
-        Set ``reset_output_dir=False`` when the caller has already cleaned
-        the run-specific artifact directories before starting the session.
-        """
+        """Prepare output and return ``(start_epoch, training_state)``."""
         if self._started:
-            raise RuntimeError(
-                "TrainingSession.start() may only be called once."
-            )
+            raise RuntimeError("TrainingSession.start() may only be called once.")
 
         resume_path = Path(resume_from) if resume_from is not None else None
         if resume_path is not None and not resume_path.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {resume_path}.")
 
-        if resume_path is None and reset_output_dir:
+        if resume_path is None:
             reset_dir(str(self.output_dir))
         else:
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -121,9 +109,7 @@ class TrainingSession:
         )
         resumed_epoch = checkpoint["epoch"]
         if resumed_epoch > self.total_epochs:
-            raise ValueError(
-                "Checkpoint epoch exceeds the configured total epochs."
-            )
+            raise ValueError("Checkpoint epoch exceeds the configured total epochs.")
         saved_state = dict(checkpoint["training_state"])
         if initial_state is not None and set(saved_state) != set(default_state):
             raise ValueError(
@@ -145,9 +131,7 @@ class TrainingSession:
         self._require_started()
         expected_epoch = self._last_epoch + 1
         if epoch != expected_epoch:
-            raise ValueError(
-                f"Expected completed epoch {expected_epoch}, got {epoch}."
-            )
+            raise ValueError(f"Expected completed epoch {expected_epoch}, got {epoch}.")
         result = save_periodic_checkpoint(
             self.checkpoint_dir,
             epoch=epoch,
@@ -171,8 +155,7 @@ class TrainingSession:
         self._require_started()
         if self._last_epoch != self.total_epochs:
             raise RuntimeError(
-                "Cannot save final weights before all configured epochs "
-                "have completed."
+                "Cannot save final weights before all configured epochs have completed."
             )
 
         shared_metadata = {
