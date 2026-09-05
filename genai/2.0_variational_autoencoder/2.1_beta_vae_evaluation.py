@@ -14,10 +14,10 @@ Checkpoints:
     output/vae/beta_vae/beta_vae.pth: required beta-VAE
 
 Outputs:
-    output/vae/beta_vae_evaluation/metrics.json: rate-distortion report
-    output/vae/beta_vae_evaluation/beta_comparison.png: summary figure
-    output/vae/beta_vae_evaluation/<model>/real_and_posterior_mean_reconstruction.png
-    output/vae/beta_vae_evaluation/<model>/matched_standard_normal_prior_samples.png
+    output/vae/beta_vae/evaluation/metrics.json: rate-distortion report
+    output/vae/beta_vae/evaluation/beta_comparison.png: summary figure
+    output/vae/beta_vae/evaluation/<model>/real_and_posterior_mean_reconstruction.png
+    output/vae/beta_vae/evaluation/<model>/matched_standard_normal_prior_samples.png
 
 Evaluation data -- glasses-256:
 Available images:             4,500
@@ -65,7 +65,7 @@ OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "glasses-256"
 DEFAULT_STANDARD_CHECKPOINT = OUTPUT_ROOT / "vae" / "vae.pth"
 DEFAULT_BETA_CHECKPOINT = OUTPUT_ROOT / "beta_vae" / "beta_vae.pth"
-DEFAULT_OUTPUT_DIR = OUTPUT_ROOT / "beta_vae_evaluation"
+DEFAULT_OUTPUT_DIR = OUTPUT_ROOT / "beta_vae" / "evaluation"
 
 NUM_COMPARISON_IMAGES = 8
 NUM_PRIOR_SAMPLES = 18
