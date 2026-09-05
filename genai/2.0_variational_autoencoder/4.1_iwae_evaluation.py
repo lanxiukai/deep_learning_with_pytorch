@@ -51,6 +51,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.vae.inference import (
@@ -229,7 +230,7 @@ def evaluate(args: argparse.Namespace) -> None:
             "no default checkpoint exists; run 4.0_iwae.py first"
         )
     out_dir = OUTPUT_ROOT / "iwae_evaluation"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(out_dir))
     results: dict[str, object] = {
         "protocol": {
             "dataset": "MNIST test",

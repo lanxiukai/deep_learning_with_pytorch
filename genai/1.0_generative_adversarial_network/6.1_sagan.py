@@ -2,11 +2,12 @@
 
 Relative to ``6.0_sn_gan.py``, SAGAN adds generator spectral normalization,
 wide discriminator residual blocks, and non-local attention at 32x32. The
-default architecture uses the paper's ``z=128`` and ``ch=64`` values, Adam
-``beta=(0, 0.9)``, TTUR learning rates ``G=1e-4`` and ``D=4e-4``, and one D
-update per G update. The reference global batch is adapted to batch 16 for one
-RTX 5090, and 20 epochs provide a teaching-scale Imagenette run; use the CLI
-to tune the budget rather than widening the network.
+Imagenette teaching defaults use ``z=128``, ``ch=32``, batches of 32, Adam
+``beta=(0, 0.9)``, and one D update per G update. Both learning rates are
+``1e-4``: the previous ``D=4e-4`` run lost image discrimination and collapsed
+to repeated templates. A narrower network, random horizontal flips, and 40
+epochs keep the lesson affordable while giving it more data exposure. These
+are small-dataset tuning choices, not the paper's large-batch TTUR recipe.
 
 Data:
     data/imagenette-128/train/<WNID>/*.JPEG, prepared explicitly with
@@ -33,6 +34,7 @@ from dl_utils.data.imagenette import (
     IMAGENETTE_NUM_CLASSES,
     make_imagenette_loader,
 )
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.conditional_training import train_conditional_hinge_epoch
 from dl_utils.gan.sagan import (
@@ -58,16 +60,16 @@ DEFAULT_OUTPUT_ROOT = Path(
     os.environ.get("DL_OUTPUT_ROOT", PROJECT_ROOT / "output" / "gan")
 )
 
-NUM_EPOCHS = 20
-BATCH_SIZE = 16
+NUM_EPOCHS = 40
+BATCH_SIZE = 32
 NUM_WORKERS = 8
 NUM_CLASSES = IMAGENETTE_NUM_CLASSES
 Z_DIM = 128
-BASE_CHANNELS = 64
+BASE_CHANNELS = 32
 IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
 ATTENTION_RESOLUTION = 32
 GENERATOR_LR = 1e-4
-DISCRIMINATOR_LR = 4e-4
+DISCRIMINATOR_LR = 1e-4
 DISCRIMINATOR_UPDATES_PER_GENERATOR = 1
 DISPLAY_CLASS_INDICES = tuple(range(NUM_CLASSES))
 SAMPLES_PER_CLASS = 4
@@ -75,7 +77,7 @@ SAMPLE_EVERY_EPOCHS = 1
 CHECKPOINT_EVERY_EPOCHS = 1
 ARCHIVE_EVERY_EPOCHS = 5
 SEED = 42
-FORMAT_VERSION = 11
+FORMAT_VERSION = 12
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
@@ -104,7 +106,7 @@ def main(args):
         args.data_dir,
         args.batch_size,
         device,
-        horizontal_flip=False,
+        horizontal_flip=True,
         num_workers=args.num_workers,
         preprocessed=True,
     )
@@ -137,6 +139,9 @@ def main(args):
         "discriminator_conditioning": "projection",
         "precision": precision.name,
         "batch_size": args.batch_size,
+        "generator_lr": GENERATOR_LR,
+        "discriminator_lr": DISCRIMINATOR_LR,
+        "horizontal_flip": True,
         "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,
     }
     session = TrainingSession(
@@ -180,7 +185,8 @@ def main(args):
             "discriminator_steps": 0,
         },
     )
-    training_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume_from is None:
+        reset_dir(str(training_dir))
     loss_history = state["loss_history"]
     fixed_noise = state["fixed_noise"].to(device)
     fixed_labels = state["fixed_labels"].to(device)

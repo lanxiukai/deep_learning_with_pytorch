@@ -37,10 +37,10 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.diffusion.diffusion_ddpm import GaussianDiffusion, PredictionType
 from dl_utils.diffusion.diffusion_unet import DiffusionUNet
-
+from dl_utils.filesystem.directories import reset_dir
+from dl_utils.filesystem.project_root import infer_project_root
 
 PROJECT_ROOT = infer_project_root()
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
@@ -383,7 +383,8 @@ def train(args: argparse.Namespace) -> None:
             device,
         )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume_from is None or not args.output_dir.exists():
+        reset_dir(str(args.output_dir))
     first_clean, _ = next(iter(loader))
     save_forward_process(
         diffusion,

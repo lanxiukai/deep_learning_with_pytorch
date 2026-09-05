@@ -30,10 +30,10 @@ import torch
 from torch import Tensor
 from torchvision.utils import save_image
 
-from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.diffusion.diffusion_ddpm import GaussianDiffusion, PredictionType
 from dl_utils.diffusion.diffusion_unet import DiffusionUNet
-
+from dl_utils.filesystem.directories import reset_dir
+from dl_utils.filesystem.project_root import infer_project_root
 
 PROJECT_ROOT = infer_project_root()
 DEFAULT_CHECKPOINT = (
@@ -261,7 +261,7 @@ def main() -> None:
         device=device,
         generator=initial_generator,
     )
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(args.output_dir))
 
     requested = ("ddpm", "ddim") if args.sampler == "both" else (args.sampler,)
     outputs: dict[str, Tensor] = {}

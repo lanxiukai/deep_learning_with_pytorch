@@ -1,14 +1,15 @@
-"""Train a 64-channel BigGAN on Imagenette at 128x128.
+"""Train a compact BigGAN on Imagenette at 128x128.
 
 This lesson keeps SAGAN's conditional ResNet, attention, spectral
 normalization, projection discriminator, and hinge loss, then adds BigGAN's
 shared class embedding, six-way hierarchical ``z=120``, orthogonal
 initialization, modified orthogonal regularization, two D updates per G
-update, and a ``0.9999`` generator EMA. Adam uses the paper's ``G=5e-5``,
-``D=2e-4``, and ``beta=(0, 0.999)`` settings. The 64-channel baseline and
-batch 8 are deliberate single-RTX-5090 choices. The 20-epoch default is a
-teaching-scale Imagenette budget; larger distributed training details are not
-silently approximated.
+update, and a generator EMA. The teaching defaults use ``ch=32``, attention
+at 32x32, batches of 32, and 40 epochs. Both Adam learning rates are ``1e-4``
+with ``beta=(0, 0.9)``. EMA decay ``0.999`` has a half-life of about 693 G
+updates, so it can follow this short run; ``0.9999`` retained too much of the
+initial generator in the previous budget. These small-dataset settings keep
+BigGAN's main additions visible without its costly large-batch recipe.
 
 Data:
     data/imagenette-128/train/<WNID>/*.JPEG, prepared explicitly with
@@ -37,6 +38,7 @@ from dl_utils.data.imagenette import (
     IMAGENETTE_NUM_CLASSES,
     make_imagenette_loader,
 )
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.biggan import (
     BigGANDiscriminator,
@@ -64,27 +66,27 @@ DEFAULT_OUTPUT_ROOT = Path(
     os.environ.get("DL_OUTPUT_ROOT", PROJECT_ROOT / "output" / "gan")
 )
 
-NUM_EPOCHS = 20
-BATCH_SIZE = 8
+NUM_EPOCHS = 40
+BATCH_SIZE = 32
 NUM_WORKERS = 8
 NUM_CLASSES = IMAGENETTE_NUM_CLASSES
 Z_DIM = 120
-BASE_CHANNELS = 64
+BASE_CHANNELS = 32
 CLASS_EMBEDDING_DIM = 128
 IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
-ATTENTION_RESOLUTION = 64
-GENERATOR_LR = 5e-5
-DISCRIMINATOR_LR = 2e-4
+ATTENTION_RESOLUTION = 32
+GENERATOR_LR = 1e-4
+DISCRIMINATOR_LR = 1e-4
 DISCRIMINATOR_UPDATES_PER_GENERATOR = 2
 ORTHOGONAL_REGULARIZATION_STRENGTH = 1e-4
-EMA_DECAY = 0.9999
+EMA_DECAY = 0.999
 DISPLAY_CLASS_INDICES = tuple(range(NUM_CLASSES))
 SAMPLES_PER_CLASS = 4
 SAMPLE_EVERY_EPOCHS = 1
 CHECKPOINT_EVERY_EPOCHS = 1
 ARCHIVE_EVERY_EPOCHS = 5
 SEED = 42
-FORMAT_VERSION = 10
+FORMAT_VERSION = 11
 
 MODEL_CONFIG = {
     "z_dim": Z_DIM,
@@ -114,7 +116,7 @@ def main(args):
         args.data_dir,
         args.batch_size,
         device,
-        horizontal_flip=False,
+        horizontal_flip=True,
         num_workers=args.num_workers,
         preprocessed=True,
     )
@@ -133,13 +135,13 @@ def main(args):
         generator.parameters(),
         device=device,
         lr=GENERATOR_LR,
-        betas=(0.0, 0.999),
+        betas=(0.0, 0.9),
     )
     optimizer_d = make_fused_adam(
         discriminator.parameters(),
         device=device,
         lr=DISCRIMINATOR_LR,
-        betas=(0.0, 0.999),
+        betas=(0.0, 0.9),
     )
 
     run_metadata = {
@@ -150,6 +152,9 @@ def main(args):
         "discriminator_conditioning": "projection",
         "precision": precision.name,
         "batch_size": args.batch_size,
+        "generator_lr": GENERATOR_LR,
+        "discriminator_lr": DISCRIMINATOR_LR,
+        "horizontal_flip": True,
         "update_ratio": DISCRIMINATOR_UPDATES_PER_GENERATOR,
         "ema_decay": EMA_DECAY,
         "orthogonal_regularization_strength": (ORTHOGONAL_REGULARIZATION_STRENGTH),
@@ -207,7 +212,8 @@ def main(args):
             "discriminator_steps": 0,
         },
     )
-    training_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume_from is None:
+        reset_dir(str(training_dir))
     loss_history = state["loss_history"]
     fixed_noise = state["fixed_noise"].to(device)
     fixed_labels = state["fixed_labels"].to(device)

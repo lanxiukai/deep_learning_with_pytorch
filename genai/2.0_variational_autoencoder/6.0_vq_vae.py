@@ -72,6 +72,7 @@ from dl_utils.data.imagenette import (
     IMAGENETTE_NUM_CLASSES,
     make_imagenette_train_validation_loaders,
 )
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
@@ -360,7 +361,6 @@ def train_prior(
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vae" / "vq_vae"
-    out_dir.mkdir(parents=True, exist_ok=True)
     train_loader, validation_loader = make_imagenette_train_validation_loaders(
         args.data_dir,
         args.batch_size,
@@ -370,6 +370,7 @@ def train(args: argparse.Namespace) -> None:
     )
     checkpoint_path = out_dir / "tokenizer.pth"
     if args.stage in {"tokenizer", "all"}:
+        reset_dir(str(out_dir))
         tokenizer = train_tokenizer(
             args, train_loader, validation_loader, device, out_dir
         )
@@ -377,6 +378,11 @@ def train(args: argparse.Namespace) -> None:
         if not checkpoint_path.is_file():
             raise FileNotFoundError("train --stage tokenizer before the prior")
         tokenizer = load_tokenizer(checkpoint_path, device)
+        # The tokenizer is an input to this stage; keep its handoff checkpoint.
+        tokenizer_checkpoint = checkpoint_path.read_bytes()
+        reset_dir(str(out_dir))
+        checkpoint_path.write_bytes(tokenizer_checkpoint)
+        del tokenizer_checkpoint
     if args.stage in {"prior", "all"}:
         train_prior(
             args,

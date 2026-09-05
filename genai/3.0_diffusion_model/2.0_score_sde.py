@@ -38,10 +38,10 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.diffusion.diffusion_score_sde import VPSDE, sample_vp_sde
 from dl_utils.diffusion.diffusion_unet import DiffusionUNet
-
+from dl_utils.filesystem.directories import reset_dir
+from dl_utils.filesystem.project_root import infer_project_root
 
 PROJECT_ROOT = infer_project_root()
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
@@ -277,7 +277,8 @@ def train_model(
             device,
         )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume_from is None or not args.output_dir.exists():
+        reset_dir(str(args.output_dir))
     first_clean, _ = next(iter(loader))
     save_forward_process(
         sde,
@@ -324,7 +325,8 @@ def generate_samples(
     args: argparse.Namespace,
     device: torch.device,
 ) -> None:
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    sample_dir = args.output_dir / "samples"
+    reset_dir(str(sample_dir))
     initial_generator = torch.Generator(device=device).manual_seed(args.seed)
     initial_noise = torch.randn(
         args.sample_count,
@@ -368,11 +370,11 @@ def generate_samples(
         )
         outputs[sampler] = samples.cpu()
         save_sample_grid(
-            samples.cpu(), args.output_dir / f"{sampler}_samples.png"
+            samples.cpu(), sample_dir / f"{sampler}_samples.png"
         )
         save_trajectory(
             trajectory,
-            args.output_dir / f"{sampler}_trajectory.png",
+            sample_dir / f"{sampler}_trajectory.png",
             args.trajectory_count,
         )
 
@@ -382,10 +384,10 @@ def generate_samples(
         )
         save_image(
             comparison.mul(0.5).add(0.5),
-            args.output_dir / "reverse_sde_vs_probability_flow.png",
+            sample_dir / "reverse_sde_vs_probability_flow.png",
             nrow=args.sample_count,
         )
-    print(f"saved samples to {args.output_dir}")
+    print(f"saved samples to {sample_dir}")
 
 
 def smoke_test() -> None:

@@ -58,6 +58,7 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
 from dl_utils.data.factor_shapes import FactorShapes32
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.vae.vae_common import (
@@ -377,7 +378,7 @@ def evaluate(args: argparse.Namespace) -> None:
         args, split_seed=split_seeds.pop(), device=device
     )
     out_root = OUTPUT_ROOT / "hierarchical_vae_evaluation"
-    out_root.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(out_root))
     results: dict[str, object] = {
         "protocol": {
             "dataset": "FactorShapes32 test",
@@ -403,7 +404,7 @@ def evaluate(args: argparse.Namespace) -> None:
             device=device,
         )
         model_out_dir = out_root / name
-        model_out_dir.mkdir(parents=True, exist_ok=True)
+        reset_dir(str(model_out_dir))
         metrics.update(
             save_counterfactual_grids(
                 model,

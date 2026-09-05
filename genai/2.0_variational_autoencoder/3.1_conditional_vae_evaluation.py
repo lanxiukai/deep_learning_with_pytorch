@@ -60,6 +60,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.vae.conditional import (
@@ -358,7 +359,7 @@ def evaluate(args: argparse.Namespace) -> None:
         )
 
     out_dir = DEFAULT_ROOT / "evaluation"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(out_dir))
     results: dict[str, object] = {
         "classifier_test_accuracy": classifier_accuracy,
         "real_reference": real_diversity_reference(

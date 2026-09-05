@@ -2,20 +2,20 @@
 Kaggle House Price Prediction
 '''
 
-import os
 
 import numpy as np
 import pandas as pd
 import torch
 from torch import nn
+
 from dl_utils.data.downloads import download
 from dl_utils.data.vision import load_array
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.plot.figures import plot
 
-
 _output_dir = infer_project_root() / 'output' / 'kaggle_house'
-_output_dir.mkdir(parents=True, exist_ok=True)
+reset_dir(str(_output_dir))
 
 def get_net():
     net = nn.Sequential(nn.Linear(in_features, 1))

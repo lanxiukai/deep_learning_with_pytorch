@@ -78,6 +78,7 @@ from dl_utils.data.imagenette import (
     IMAGENETTE_NUM_CLASSES,
     make_imagenette_loader,
 )
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import (
@@ -584,7 +585,7 @@ def evaluate(args: argparse.Namespace) -> None:
         generation_examples=args.generation_examples,
         device=device,
     )
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(args.output_dir))
     model_results: dict[str, dict[str, object]] = {}
     results: dict[str, object] = {
         "protocol": {

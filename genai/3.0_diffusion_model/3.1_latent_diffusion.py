@@ -30,12 +30,12 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.diffusion.diffusion_ddpm import GaussianDiffusion
 from dl_utils.diffusion.diffusion_unet import DiffusionUNet
+from dl_utils.filesystem.directories import reset_dir
+from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.training.checkpoints import model_state_fingerprint
 from dl_utils.vae.perceptual_autoencoder import KLPerceptualAutoencoder32
-
 
 PROJECT_ROOT = infer_project_root()
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
@@ -267,7 +267,8 @@ def train_model(
         optimizer.load_state_dict(checkpoint["optimizer_state"])
         start_epoch = int(checkpoint["epoch"]) + 1
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume_from is None or not args.output_dir.exists():
+        reset_dir(str(args.output_dir))
     parameter_count = sum(p.numel() for p in denoiser.parameters())
     print(
         f"device={device} denoiser={parameter_count / 1e6:.2f}M "
@@ -387,13 +388,14 @@ def generate(
         generator=generator,
     )
     images = autoencoder.decode_latent(latents, latent_scale=latent_scale)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    sample_dir = args.output_dir / "samples"
+    reset_dir(str(sample_dir))
     save_image(
         images.mul(0.5).add(0.5),
-        args.output_dir / f"{args.sampler}_samples.png",
+        sample_dir / f"{args.sampler}_samples.png",
         nrow=max(1, round(math.sqrt(args.sample_count))),
     )
-    print(f"saved decoded samples to {args.output_dir}")
+    print(f"saved decoded samples to {sample_dir}")
     return images
 
 

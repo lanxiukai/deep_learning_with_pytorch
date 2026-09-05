@@ -300,7 +300,7 @@ def analyze(args: argparse.Namespace) -> None:
     reset_dir(str(args.output))
     for run_name, comparison, prior_samples in artifacts:
         run_dir = args.output / run_name
-        run_dir.mkdir(parents=True, exist_ok=True)
+        reset_dir(str(run_dir))
         save_image(
             comparison,
             run_dir / "real_and_posterior_mean_reconstruction.png",

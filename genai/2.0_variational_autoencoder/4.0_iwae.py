@@ -54,6 +54,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import save_model_weights
@@ -193,7 +194,7 @@ def train_one(
         else f"k{particles}"
     )
     out_dir = PROJECT_ROOT / "output" / "vae" / "iwae" / run_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(out_dir))
 
     iterator = iter(train_loader)
     report_interval = max(1, len(train_loader))

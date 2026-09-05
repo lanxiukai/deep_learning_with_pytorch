@@ -29,9 +29,9 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.diffusion.diffusion_unet import DiffusionUNet
-
+from dl_utils.filesystem.directories import reset_dir
+from dl_utils.filesystem.project_root import infer_project_root
 
 PROJECT_ROOT = infer_project_root()
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "cifar10"
@@ -371,7 +371,8 @@ def train_model(
         optimizer.load_state_dict(checkpoint["optimizer_state"])
         start_epoch = int(checkpoint["epoch"]) + 1
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume_from is None or not args.output_dir.exists():
+        reset_dir(str(args.output_dir))
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(
         f"device={device} parameters={parameter_count / 1e6:.2f}M "
@@ -454,18 +455,19 @@ def generate(
         return_trajectory=True,
         trajectory_frames=args.trajectory_frames,
     )
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    sample_dir = args.output_dir / "samples"
+    reset_dir(str(sample_dir))
     save_image(
         samples.mul(0.5).add(0.5),
-        args.output_dir / f"{args.solver}_samples.png",
+        sample_dir / f"{args.solver}_samples.png",
         nrow=max(1, round(math.sqrt(args.sample_count))),
     )
     save_trajectory(
         trajectory,
-        args.output_dir / f"{args.solver}_trajectory.png",
+        sample_dir / f"{args.solver}_trajectory.png",
         args.trajectory_count,
     )
-    print(f"saved samples to {args.output_dir}; NFE={nfe}")
+    print(f"saved samples to {sample_dir}; NFE={nfe}")
     return samples
 
 

@@ -66,6 +66,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import save_model_weights
@@ -212,7 +213,7 @@ def train_cvae(
 ) -> None:
     variant = "learned-prior" if learned_prior else "standard-prior"
     out_dir = PROJECT_ROOT / "output" / "vae" / "conditional_vae" / variant
-    out_dir.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(out_dir))
     model_config = {
         "num_classes": 10,
         "latent_dim": args.latent_dim,
@@ -279,7 +280,7 @@ def train_deterministic(
     device: torch.device,
 ) -> None:
     out_dir = PROJECT_ROOT / "output" / "vae" / "conditional_vae" / "deterministic"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(out_dir))
     model_config = {
         "num_classes": 10,
         "condition_dim": args.condition_dim,

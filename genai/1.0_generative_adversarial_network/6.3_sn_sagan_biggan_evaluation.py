@@ -43,9 +43,9 @@ MODEL_EVALUATION_SEEDS = {
     "biggan": EVALUATION_SEED + 3,
 }
 MODEL_SPECS = (
-    ("sn_gan", "SN-GAN", SNGenerator, "6.0_sn_gan.py", 8, None),
-    ("sagan", "SAGAN", SAGANGenerator, "6.1_sagan.py", 11, None),
-    ("biggan", "BigGAN EMA", BigGANGenerator, "6.2_biggan.py", 10, "ema"),
+    ("sn_gan", "SN-GAN", SNGenerator, "6.0_sn_gan.py", 9, None),
+    ("sagan", "SAGAN", SAGANGenerator, "6.1_sagan.py", 12, None),
+    ("biggan", "BigGAN EMA", BigGANGenerator, "6.2_biggan.py", 11, "ema"),
 )
 
 

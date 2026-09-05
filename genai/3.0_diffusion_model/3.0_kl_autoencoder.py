@@ -27,6 +27,7 @@ from dl_utils.data.cifar10 import (
     make_cifar10_loader,
     normalized_cifar10_transform,
 )
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
 from dl_utils.gan.sn_gan import (
     discriminator_hinge_loss,
@@ -49,7 +50,6 @@ from dl_utils.vae.vae_common import (
     diagonal_gaussian_kl_from_logvar,
     reparameterize_logvar,
 )
-
 
 PROJECT_ROOT = infer_project_root()
 
@@ -381,7 +381,7 @@ def make_loaders(
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "diffusion" / "kl_autoencoder"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    reset_dir(str(out_dir))
     train_loader, statistics_loader, validation_loader = make_loaders(args, device)
     config = {
         "latent_channels": args.latent_channels,

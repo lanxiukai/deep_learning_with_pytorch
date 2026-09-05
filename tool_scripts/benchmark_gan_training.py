@@ -17,6 +17,7 @@ from dl_utils.data.imagenette import (
     IMAGENETTE_NUM_CLASSES,
     make_imagenette_loader,
 )
+from dl_utils.filesystem.directories import reset_dir
 from dl_utils.gan.biggan import (
     BigGANDiscriminator,
     BigGANGenerator,
@@ -34,9 +35,9 @@ from dl_utils.training.accelerator import (
 from dl_utils.training.optimization import update_ema
 
 MODEL_DEFAULT_BATCH_SIZES = {
-    "sn_gan": (16, 32),
-    "sagan": (16, 16),
-    "biggan": (8, 8),
+    "sn_gan": (32, 32),
+    "sagan": (32, 32),
+    "biggan": (32, 32),
 }
 NUM_CLASSES = IMAGENETTE_NUM_CLASSES
 IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
@@ -55,7 +56,7 @@ def build_model(model_name, device, base_channels):
         discriminator = SNDiscriminator(**common).to(device)
         generator_lr = discriminator_lr = 2e-4
         betas = (0.0, 0.9)
-        update_ratio = 5
+        update_ratio = 1
         averaged_generator = None
     elif model_name == "sagan":
         z_dim = 128
@@ -68,7 +69,7 @@ def build_model(model_name, device, base_channels):
             attention_resolution=32,
             **common,
         ).to(device)
-        generator_lr, discriminator_lr = 1e-4, 4e-4
+        generator_lr = discriminator_lr = 1e-4
         betas = (0.0, 0.9)
         update_ratio = 1
         averaged_generator = None
@@ -77,18 +78,18 @@ def build_model(model_name, device, base_channels):
         generator = BigGANGenerator(
             z_dim=z_dim,
             class_embedding_dim=128,
-            attention_resolution=64,
+            attention_resolution=32,
             **common,
         ).to(device)
         discriminator = BigGANDiscriminator(
-            attention_resolution=64,
+            attention_resolution=32,
             **common,
         ).to(device)
         generator.apply(initialize_orthogonal_weights)
         discriminator.apply(initialize_orthogonal_weights)
         averaged_generator = deepcopy(generator).eval().requires_grad_(False)
-        generator_lr, discriminator_lr = 5e-5, 2e-4
-        betas = (0.0, 0.999)
+        generator_lr = discriminator_lr = 1e-4
+        betas = (0.0, 0.9)
         update_ratio = 2
 
     optimizer_g = make_fused_adam(
@@ -147,6 +148,7 @@ def make_real_batch_source(args, device, batch_size):
         batch_size,
         device,
         dequantize=args.model == "sn_gan",
+        horizontal_flip=True,
         num_workers=args.num_workers,
         preprocessed=True,
     )
@@ -211,7 +213,7 @@ def benchmark(args):
             update_ema,
             averaged_generator,
             generator,
-            decay=0.9999,
+            decay=0.999,
         )
 
     def train_step():
@@ -286,7 +288,9 @@ def benchmark(args):
         "data": "imagenette-128" if args.data_dir is not None else "synthetic",
     }
     if args.json_output is not None:
-        args.json_output.parent.mkdir(parents=True, exist_ok=True)
+        # This run owns one JSON file; its parent may hold other benchmarks.
+        if not args.json_output.parent.exists():
+            reset_dir(str(args.json_output.parent))
         args.json_output.write_text(
             json.dumps(result, indent=2) + "\n",
             encoding="utf-8",
@@ -305,7 +309,7 @@ def parse_args():
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--generator-batch-size", type=int)
-    parser.add_argument("--base-channels", type=int, default=64)
+    parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--data-dir", type=Path)

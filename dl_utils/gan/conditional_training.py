@@ -71,12 +71,12 @@ def train_conditional_hinge_step(
     optimizer_d.zero_grad(set_to_none=True)
     with precision.autocast():
         noise = torch.randn(batch_size, z_dim, device=device)
-        fake_labels = torch.randint(num_classes, (batch_size,), device=device)
+        # Match class counts so the D update focuses on image differences.
         with torch.no_grad():
-            fake = generator(noise, fake_labels)
+            fake = generator(noise, labels)
         loss_d = discriminator_hinge_loss(
             discriminator(real, labels),
-            discriminator(fake, fake_labels),
+            discriminator(fake, labels),
         )
     precision.backward_step(loss_d, optimizer_d)
 
