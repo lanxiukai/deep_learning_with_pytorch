@@ -88,8 +88,9 @@ latest unfinished checkpoint. The original `output/gan/*` model weights
 are not replaced.
 
 The shared resampling cache supports evaluation followed by backpropagation.
-Refinement also selects file-system tensor sharing and propagates it to
-DataLoader workers for the local Python/CUDA JPEG runtime.
+The encoded CelebA loader selects file-system tensor sharing in its workers
+for the local Python/CUDA JPEG runtime. This applies to both fresh training
+and refinement, without changing the parent process's sharing strategy.
 
 The evaluation and tuning code is retained for future VAE adaptation. The GAN
 quality evaluator already uses feature extraction and moment calculations from

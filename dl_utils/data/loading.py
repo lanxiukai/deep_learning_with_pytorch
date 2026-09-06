@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, Dataset
 
 
 def _initialize_worker_sharing(worker_id: int, *, strategy: str) -> None:
-    """Preserve the parent's selected tensor-sharing strategy in new workers."""
+    """Configure tensor sharing before a worker serializes batches."""
     torch.multiprocessing.set_sharing_strategy(strategy)
 
 
@@ -23,6 +23,7 @@ def make_device_aware_loader(
     drop_last: bool = False,
     prefetch_factor: int = 2,
     collate_fn=None,
+    worker_sharing_strategy: str | None = None,
 ) -> DataLoader:
     """Create a DataLoader with device-appropriate memory settings."""
     if batch_size < 1:
@@ -45,7 +46,11 @@ def make_device_aware_loader(
         loader_kwargs["prefetch_factor"] = prefetch_factor
         loader_kwargs["worker_init_fn"] = partial(
             _initialize_worker_sharing,
-            strategy=torch.multiprocessing.get_sharing_strategy(),
+            strategy=(
+                torch.multiprocessing.get_sharing_strategy()
+                if worker_sharing_strategy is None
+                else worker_sharing_strategy
+            ),
         )
     return DataLoader(
         **loader_kwargs,

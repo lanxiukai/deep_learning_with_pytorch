@@ -119,9 +119,6 @@ def refine_gan(args, *, model_name, lesson):
             "The refinement directory must not contain its source checkpoint."
         )
     torch.set_num_threads(4)
-    # CUDA JPEG batches contain many small tensors. Preserve this strategy in
-    # DataLoader workers, including those started through Python's forkserver.
-    torch.multiprocessing.set_sharing_strategy("file_system")
     root = Path(infer_project_root())
     torch.hub.set_dir(str(root / ".cache" / "torch" / "hub"))
     run = prepare_gan_run(

@@ -144,6 +144,9 @@ def make_encoded_celeba_loader(
         drop_last=drop_last,
         prefetch_factor=prefetch_factor,
         collate_fn=_collate_encoded,
+        # Raw JPEG tensors fail descriptor-based IPC in the local runtime.
+        # Select the transport in workers for every caller, including fresh runs.
+        worker_sharing_strategy="file_system",
     )
 
 
