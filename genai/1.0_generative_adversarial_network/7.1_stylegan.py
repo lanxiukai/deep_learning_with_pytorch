@@ -123,6 +123,8 @@ def train_phase(
     global_step,
     d_reg_every,
     reg_batch_shrink,
+    *,
+    r1_gamma=R1_GAMMA,
 ):
     """Train one progressive phase with BF16 main passes and FP32 R1."""
     metrics = MetricAccumulator(METRIC_NAMES, device=data.device)
@@ -181,7 +183,7 @@ def train_phase(
                 ),
                 real_for_r1,
             )
-            weighted_r1 = 0.5 * R1_GAMMA * d_reg_every * penalty_r1
+            weighted_r1 = 0.5 * r1_gamma * d_reg_every * penalty_r1
         precision.backward_step(
             loss_d_main.float() + weighted_r1,
             optimizer_d,
@@ -231,6 +233,13 @@ def train_phase(
 
 
 def main(args):
+    if args.refine_from is not None or args.refine_resume is not None:
+        from dl_utils.gan.refinement import refine_gan
+
+        if args.resume_from is not None:
+            raise ValueError("Use only one progressive or refinement resume mode.")
+        refine_gan(args, model_name="stylegan", lesson=globals())
+        return
     options = resolve_progressive_gan_options(
         phase_kimg=args.phase_kimg,
         batch_scale=args.batch_scale,
@@ -397,6 +406,9 @@ def parse_args():
         description="Train the progressive 128x128 CelebA StyleGAN."
     )
     parser.add_argument("--resume-from", type=Path, metavar="CHECKPOINT")
+    from dl_utils.gan.refinement import add_refinement_arguments
+
+    add_refinement_arguments(parser, model_name="stylegan")
     parser.add_argument("--phase-kimg", type=int)
     parser.add_argument("--batch-scale", type=int)
     parser.add_argument("--d-reg-every", type=int)

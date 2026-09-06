@@ -376,19 +376,22 @@ def _resample_weights(values, device_name, dtype, channels):
     kernel_sum = sum(values)
     if kernel_sum == 0:
         raise ValueError("resample kernel must have a non-zero sum.")
-    kernel = torch.tensor(
-        values,
-        device=torch.device(device_name),
-        dtype=dtype,
-    )
-    kernel = kernel[:, None] * kernel[None, :]
-    kernel = kernel / kernel_sum**2
-    return kernel.view(1, 1, len(values), len(values)).repeat(
-        channels,
-        1,
-        1,
-        1,
-    )
+    # A filter first requested during evaluation is also reused by training.
+    # Cached inference tensors cannot be saved by autograd for backward passes.
+    with torch.inference_mode(False):
+        kernel = torch.tensor(
+            values,
+            device=torch.device(device_name),
+            dtype=dtype,
+        )
+        kernel = kernel[:, None] * kernel[None, :]
+        kernel = kernel / kernel_sum**2
+        return kernel.view(1, 1, len(values), len(values)).repeat(
+            channels,
+            1,
+            1,
+            1,
+        )
 
 
 def filter2d(inputs, kernel=(1, 3, 3, 1)):

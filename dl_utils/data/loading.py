@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
 from torch.utils.data import DataLoader, Dataset
+
+
+def _initialize_worker_sharing(worker_id: int, *, strategy: str) -> None:
+    """Preserve the parent's selected tensor-sharing strategy in new workers."""
+    torch.multiprocessing.set_sharing_strategy(strategy)
 
 
 def make_device_aware_loader(
@@ -36,6 +43,10 @@ def make_device_aware_loader(
     }
     if num_workers > 0:
         loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["worker_init_fn"] = partial(
+            _initialize_worker_sharing,
+            strategy=torch.multiprocessing.get_sharing_strategy(),
+        )
     return DataLoader(
         **loader_kwargs,
     )

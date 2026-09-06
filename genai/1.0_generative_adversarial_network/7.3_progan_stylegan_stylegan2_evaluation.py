@@ -27,23 +27,24 @@ Outputs:
     output/gan/{progan,stylegan,stylegan2}/evaluation/latent_interpolation.png
 """
 
+import argparse
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from dl_utils.runtime.devices import try_gpu
-from dl_utils.runtime.randomness import set_seed
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.gan.inference import generate_in_batches
 from dl_utils.gan.progan import ProGANGenerator
 from dl_utils.gan.stylegan import StyleGANGenerator
 from dl_utils.gan.stylegan2 import StyleGenerator
-from dl_utils.gan.inference import generate_in_batches
 from dl_utils.plot.images import save_image_row_grid
+from dl_utils.runtime.devices import try_gpu
+from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import load_model_weights
-
 
 PROJECT_ROOT = infer_project_root()
 MODEL_OUT_DIRS = {
@@ -475,7 +476,15 @@ def save_interpolations(interpolations):
         )
 
 
-def main():
+def main(weights_root=None):
+    global MODEL_OUT_DIRS, EVALUATION_DIRS, MODEL_SPECS
+    if weights_root is not None:
+        MODEL_OUT_DIRS = {name: Path(weights_root) / name for name in MODEL_OUT_DIRS}
+        EVALUATION_DIRS = {name: directory / "evaluation" for name, directory in MODEL_OUT_DIRS.items()}
+        MODEL_SPECS = tuple(
+            (name, model_class, MODEL_OUT_DIRS[name] / f"{name}_generator.pth", script_name)
+            for name, model_class, _, script_name in MODEL_SPECS
+        )
     set_seed(SEED)
     device = try_gpu()
 
@@ -570,4 +579,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--weights-root", type=Path)
+    main(parser.parse_args().weights_root)

@@ -158,6 +158,11 @@ def train_epoch(
     precision,
     r1_batch_shrink,
     path_batch_shrink,
+    *,
+    r1_gamma=R1_GAMMA,
+    d_reg_every=D_REG_EVERY,
+    g_reg_every=G_REG_EVERY,
+    path_weight=PATH_WEIGHT,
 ):
     """Train one data epoch with separate lazy penalties."""
     metrics = MetricAccumulator(METRIC_NAMES, device=data.device)
@@ -194,7 +199,7 @@ def train_epoch(
         precision.backward_step(loss_d_main, optimizer_d)
 
         weighted_r1 = real.new_zeros(())
-        if global_step % D_REG_EVERY == 0:
+        if global_step % d_reg_every == 0:
             optimizer_d.zero_grad(set_to_none=True)
             reg_batch = max(1, current_batch // r1_batch_shrink)
             real_for_r1 = real[:reg_batch].detach().float().requires_grad_(True)
@@ -202,7 +207,7 @@ def train_epoch(
                 discriminator(real_for_r1),
                 real_for_r1,
             )
-            weighted_r1 = 0.5 * R1_GAMMA * D_REG_EVERY * penalty_r1
+            weighted_r1 = 0.5 * r1_gamma * d_reg_every * penalty_r1
             precision.backward_step(weighted_r1, optimizer_d)
 
         discriminator.requires_grad_(False)
@@ -224,7 +229,7 @@ def train_epoch(
             precision.backward_step(loss_g_main, optimizer_g)
 
             weighted_path = real.new_zeros(())
-            if global_step % G_REG_EVERY == 0:
+            if global_step % g_reg_every == 0:
                 optimizer_g.zero_grad(set_to_none=True)
                 path_batch = max(1, current_batch // path_batch_shrink)
                 path_z = torch.randn(
@@ -238,7 +243,7 @@ def train_epoch(
                     path_ws,
                     path_mean,
                 )
-                weighted_path = PATH_WEIGHT * G_REG_EVERY * penalty_path
+                weighted_path = path_weight * g_reg_every * penalty_path
                 precision.backward_step(weighted_path, optimizer_g)
             update_ema_by_images(
                 averaged_generator,
@@ -259,6 +264,13 @@ def train_epoch(
 
 
 def main(args):
+    if args.refine_from is not None or args.refine_resume is not None:
+        from dl_utils.gan.refinement import refine_gan
+
+        if args.resume_from is not None:
+            raise ValueError("Use only one fixed-resolution or refinement resume mode.")
+        refine_gan(args, model_name="stylegan2", lesson=globals())
+        return
     options = resolve_fixed_resolution_gan_options(
         total_kimg=args.total_kimg,
         batch_scale=args.batch_scale,
@@ -441,6 +453,9 @@ def parse_args():
         description="Train the full-resolution 128x128 CelebA StyleGAN2."
     )
     parser.add_argument("--resume-from", type=Path, metavar="CHECKPOINT")
+    from dl_utils.gan.refinement import add_refinement_arguments
+
+    add_refinement_arguments(parser, model_name="stylegan2")
     parser.add_argument("--total-kimg", type=int)
     parser.add_argument("--batch-scale", type=int)
     parser.add_argument("--r1-batch-shrink", type=int)
