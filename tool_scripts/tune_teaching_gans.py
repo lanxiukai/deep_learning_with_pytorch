@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from dl_utils.filesystem.project_root import infer_project_root
+from dl_utils.runtime.gpu_targets import GPU_TARGETS, resolve_gpu_target
 
 ROOT = Path(infer_project_root())
 LESSONS = ROOT / "genai" / "1.0_generative_adversarial_network"
@@ -289,6 +290,7 @@ def final_review(args, output, suite):
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--gpu", choices=tuple(GPU_TARGETS))
     parser.add_argument(
         "--output-dir", type=Path, default=Path("output/gan/teaching-tuning")
     )
@@ -312,6 +314,12 @@ def parse_args():
 
 
 def main(args):
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("A supported CUDA GPU is required.")
+    gpu_name = torch.cuda.get_device_name(0)
+    gpu_target = resolve_gpu_target(gpu_name, args.gpu)
     if min(args.round_kimg, args.checkpoint_kimg, args.rounds_per_profile) < 1:
         raise ValueError("Training budgets must be positive.")
     output = args.output_dir.resolve()
@@ -319,6 +327,7 @@ def main(args):
     config = {
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
+        if key != "gpu"
     }
     config["profiles"] = PROFILES
     # Normalize tuples to JSON lists before comparing a resumed search.
@@ -329,6 +338,8 @@ def main(args):
     write_json(config_path, config)
     suite = {
         "status": "training",
+        "gpu": gpu_name,
+        "gpu_target": gpu_target,
         "models": {},
         "config": config,
         "acceptance": "Metric targets screen candidates; final image grids require visual review.",

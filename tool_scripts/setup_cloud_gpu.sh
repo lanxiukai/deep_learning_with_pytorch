@@ -8,14 +8,14 @@ readonly PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 profile="core"
 state_dir="$PROJECT_ROOT/.cache/cloud-gpu"
 skip_system_packages=false
-skip_gpu_check=false
+gpu_target=""
 dry_run=false
 
 usage() {
     cat <<'EOF'
 Usage: bash tool_scripts/setup_cloud_gpu.sh [options]
 
-Prepare the repository's locked environment on an Ubuntu x86_64 RTX 5090
+Prepare the repository's locked environment on an Ubuntu x86_64 RTX 5080/5090
 cloud host. The script does not install NVIDIA drivers, the CUDA Toolkit,
 datasets, Codex, or editor extensions.
 
@@ -23,7 +23,7 @@ Options:
   --profile PROFILE          core (default), examples, or full
   --state-dir PATH           Persistent uv/Python cache directory
   --skip-system-packages     Do not install missing curl/git/rsync/tmux
-  --skip-gpu-check           Permit setup without a visible RTX 5090
+  --gpu MODEL                Require 5080 or 5090 (default: detect either)
   --dry-run                  Validate inputs and print planned actions
   -h, --help                 Show this help
 
@@ -35,11 +35,11 @@ EOF
 }
 
 log() {
-    printf '[rtx5090-setup] %s\n' "$*"
+    printf '[cloud-gpu-setup] %s\n' "$*"
 }
 
 die() {
-    printf '[rtx5090-setup] ERROR: %s\n' "$*" >&2
+    printf '[cloud-gpu-setup] ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -59,9 +59,10 @@ while (($# > 0)); do
             skip_system_packages=true
             shift
             ;;
-        --skip-gpu-check)
-            skip_gpu_check=true
-            shift
+        --gpu)
+            (($# >= 2)) || die "--gpu requires a value"
+            gpu_target="$2"
+            shift 2
             ;;
         --dry-run)
             dry_run=true
@@ -79,6 +80,10 @@ case "$profile" in
     core|examples|full) ;;
     *) die "profile must be one of: core, examples, full" ;;
 esac
+case "$gpu_target" in
+    ""|5080|5090) ;;
+    *) die "cloud GPU must be 5080 or 5090" ;;
+esac
 [[ "$state_dir" == /* ]] || state_dir="$PROJECT_ROOT/$state_dir"
 [[ "$(uname -s)" == "Linux" ]] || die "Linux is required"
 [[ "$(uname -m)" == "x86_64" ]] || die "x86_64 is required"
@@ -86,17 +91,16 @@ esac
 [[ -f "$PROJECT_ROOT/uv.lock" ]] || die "uv.lock not found"
 [[ -f "$PROJECT_ROOT/.python-version" ]] || die ".python-version not found"
 
-if [[ "$skip_gpu_check" == false ]]; then
-    command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
-    gpu_summary="$(nvidia-smi \
-        --query-gpu=name,memory.total,driver_version \
-        --format=csv,noheader | head -n 1)"
-    [[ "${gpu_summary^^}" == *"RTX 5090"* ]] || \
-        die "expected RTX 5090, found: $gpu_summary"
-    log "GPU preflight passed: $gpu_summary"
-else
-    log "GPU preflight skipped"
-fi
+command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
+gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
+case "${gpu_name^^}" in
+    *"RTX 5080") detected_gpu=5080 ;;
+    *"RTX 5090") detected_gpu=5090 ;;
+    *) die "expected cloud RTX 5080 or RTX 5090, found: $gpu_name" ;;
+esac
+[[ -z "$gpu_target" || "$gpu_target" == "$detected_gpu" ]] || \
+    die "expected RTX $gpu_target, found: $gpu_name"
+log "GPU preflight passed: $gpu_name"
 
 missing_packages=()
 for command_package in curl:curl git:git rsync:rsync tmux:tmux; do
@@ -163,10 +167,7 @@ case "$profile" in
 esac
 uv "${sync_args[@]}"
 
-if [[ "$skip_gpu_check" == false ]]; then
-    uv run --locked --no-sync python -c \
-        'import torch; assert torch.cuda.is_available(), "CUDA unavailable"; assert torch.cuda.is_bf16_supported(), "BF16 unavailable"; name=torch.cuda.get_device_name(0); assert "RTX 5090" in name.upper(), name; print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPU {name}; BF16=True")'
-fi
+uv run --locked --no-sync python tool_scripts/pytorch_test.py --gpu "$detected_gpu"
 
 log "setup completed"
-log "next: run 'bash tool_scripts/cloud_gan.sh smoke'"
+log "next: run a Python lesson or tool from the repository root"

@@ -1,7 +1,7 @@
 # Tool Scripts
 
 This README is the operating index for repository-level tools: dataset
-preparation, cloud GPU entry points, GAN benchmarks, environment inspection,
+preparation, cloud GPU entry points, model tuning, environment inspection,
 and standalone visualizations. Exact CLI options remain in each script's
 `--help` output.
 
@@ -25,11 +25,43 @@ bash tool_scripts/SCRIPT.sh --help
 | Inspect the local PyTorch/CUDA runtime | `pytorch_test.py` | Read-only |
 | Download or prepare a lesson dataset | `download_dataset.py` | Downloads data and may build derived caches |
 | Create a local visualization | `plot_fashion_mnist.py`, `sgd_animation.py`, or `word_frequency.py` | Downloads data when needed and writes under `output/` |
-| Prepare an existing cloud GPU host | `setup_cloud_gpu.sh` | Installs host prerequisites and synchronizes the project environment |
-| Provision, smoke-test, train, monitor, or download a cloud GAN run | `cloud_gan.sh` | Operates SN-GAN, SAGAN, or BigGAN on an existing RTX 5090 host |
-| Check CelebA-64 GAN throughput and finite losses | `benchmark_rtx5090_gans.sh` | Sequentially exercises the three lesson models and writes JSON results |
-| Implement a benchmark wrapper | `benchmark_gan_training.py` | Internal worker; prefer a shell wrapper |
+| Prepare an existing cloud RTX 5080/5090 host | `setup_cloud_gpu.sh` | Installs host prerequisites and synchronizes the project environment |
 | Tune the three 128x128 teaching GANs | `tune_teaching_gans.py` | Sequential continuation, validation-driven parameter changes, retained best checkpoints, and final evaluation |
+
+## GPU targets
+
+GPU tools support exactly these targets:
+
+| Target | GPU | Intended host |
+|---|---|---|
+| `4070ti` | NVIDIA GeForce RTX 4070 Ti | Local workstation |
+| `5080` | NVIDIA GeForce RTX 5080 | Cloud host |
+| `5090` | NVIDIA GeForce RTX 5090 | Cloud host |
+
+The Python runtime check and tuning tools detect the active GPU
+and reject other models. Pass `--gpu 4070ti`, `--gpu 5080`, or `--gpu 5090`
+to require a particular target. This selects a hardware check, not a new
+model architecture or training schedule.
+
+Check the local runtime:
+
+```bash
+uv run --locked --no-sync python tool_scripts/pytorch_test.py --gpu 4070ti
+```
+
+On an existing Ubuntu x86-64 cloud host with a working NVIDIA driver, run
+the general setup script from the repository root. It accepts only cloud
+targets and reads the Python version and dependencies from the project files:
+
+```bash
+bash tool_scripts/setup_cloud_gpu.sh --gpu 5080 --profile core --dry-run
+bash tool_scripts/setup_cloud_gpu.sh --gpu 5080 --profile core
+```
+
+Use `--gpu 5090` on a 5090 host. Setup installs missing host prerequisites,
+uv, the managed Python runtime, and locked project dependencies; it does not
+provision a provider instance or download datasets. Training and evaluation
+run through the Python lessons and tools directly.
 
 ## Teaching GAN refinement
 
@@ -104,10 +136,6 @@ have been copied and checked.
 - Dataset and visualization commands can write under `data/` and `output/`.
 - Cloud commands use an instance that already exists. They do not create, stop,
   or destroy provider resources, so billing remains your responsibility.
-- `cloud_gan.sh download` previews an rsync merge by default; pass `--apply`
-  only after reviewing the plan.
-- Fresh benchmark runs reset their selected output directory so each result
-  belongs to the current run.
 
 ## Dataset profiles
 
@@ -145,13 +173,3 @@ continues through the selected sequence after individual provider failures and
 reports all failed datasets at the end. Selecting CelebA always prepares the
 black/blond CycleGAN splits; selecting glasses always classifies, corrects, and
 builds the 256-pixel cache.
-
-## Cloud GAN runbook
-
-[CLOUD_GAN_RUNBOOK.md](CLOUD_GAN_RUNBOOK.md) contains the host requirements,
-provisioning and training lifecycle, benchmark interpretation, cleanup
-checklist, and troubleshooting guidance.
-
-For focused work, start with this README, then open only the relevant script or
-runbook section. Exact actions, flags, choices, and defaults belong to each
-script's `--help` output.
