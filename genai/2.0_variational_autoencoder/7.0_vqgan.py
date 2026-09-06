@@ -25,27 +25,29 @@ paired fidelity, reconstruction distributions, token rates, prior likelihood,
 and complete generation under one held-out protocol.
 
 Data:
-    data/imagenette-128/{train,val}/<WNID>/*.JPEG, prepared by
-    tool_scripts/download_dataset.py --dataset imagenette.
+    data/celeba (official train and validation splits), prepared by
+    tool_scripts/download_dataset.py --dataset celeba.
 
 Outputs:
     output/vae/vqgan[/<run-name>]/tokenizer_*.png: reconstructions
-    output/vae/vqgan[/<run-name>]/prior_*.png: one sample per Imagenette class
+    output/vae/vqgan[/<run-name>]/prior_*.png: one sample per Smiling label
     output/vae/vqgan[/<run-name>]/tokenizer.pth: tokenizer and discriminator
     output/vae/vqgan[/<run-name>]/transformer_prior.pth: token prior
 
-Training data -- Imagenette-128:
-Training images:               9,469
-Validation images:             3,925
+Training data -- CelebA-128:
+Training images:             162,770
+Validation images:            19,867
 Batch size:                       16
-Samples per epoch:             9,456 (591 full batches; drop_last=True)
+Samples per epoch:           162,768 (10,173 full batches; drop_last=True)
 Tokenizer epochs:                 30
 Prior epochs:                     30
-Optimizer updates:            17,730 tokenizer / 16,730 discriminator
-                              17,730 Transformer prior
-Note: the tokenizer remains label-free; class labels condition only the frozen-
-token Transformer. D starts at tokenizer step 1,000; 13 shuffled images are
+Optimizer updates:           305,190 tokenizer / 304,190 discriminator
+                             305,190 Transformer prior
+The tokenizer remains label-free; the frozen-token Transformer uses the binary
+Smiling attribute. D starts at tokenizer step 1,000. Two shuffled images are
 omitted per epoch, and validation uses the first 1,024 validation images.
+Both splits center-crop aligned faces to 178x178, resize to 128x128, and use
+no random horizontal flips.
 
 Default dimensions:
 Training input:             128x128 RGB
@@ -80,10 +82,10 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
-from dl_utils.data.imagenette import (
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    make_imagenette_train_validation_loaders,
+from dl_utils.data.celeba import (
+    CELEBA_SMILING_ATTRIBUTE,
+    CELEBA_SMILING_CLASSES,
+    make_aligned_celeba_train_validation_loaders,
 )
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
@@ -111,9 +113,9 @@ from dl_utils.vae.token_prior import (
 )
 
 PROJECT_ROOT = infer_project_root()
-DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
-IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
-NUM_CLASSES = IMAGENETTE_NUM_CLASSES
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "celeba"
+IMAGE_SIZE = 128
+NUM_CLASSES = len(CELEBA_SMILING_CLASSES)
 DOWNSAMPLE_STEPS = 4
 LATENT_GRID_SIZE = IMAGE_SIZE // (2**DOWNSAMPLE_STEPS)
 TOKENS_PER_IMAGE = LATENT_GRID_SIZE**2
@@ -471,6 +473,7 @@ def train_tokenizer(
         sums = torch.zeros(9, device=device)
         examples = 0
         usage = TokenUsageAccumulator(args.codebook_size)
+        preview = None
         for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             reconstruction, indices, metrics = vqgan_autoencoder_step(
@@ -509,6 +512,9 @@ def train_tokenizer(
             usage.update(indices)
             examples += x.shape[0]
             global_step += 1
+            preview = (x[:8].detach(), reconstruction[:8].detach())
+        if preview is None:
+            raise ValueError("training loader produced no batches; reduce batch size")
         means = (sums / examples).tolist()
         epoch_usage = usage.statistics()
         print(
@@ -521,7 +527,7 @@ def train_tokenizer(
         )
         if epoch == 1 or epoch % args.sample_every == 0:
             save_image(
-                torch.cat((x[:8], reconstruction[:8])).mul(0.5).add(0.5),
+                torch.cat(preview).mul(0.5).add(0.5),
                 out_dir / f"tokenizer_{epoch:03d}.png",
                 nrow=8,
             )
@@ -552,7 +558,7 @@ def train_tokenizer(
                 "completed_optimizer_steps": global_step,
                 "batch_size": args.batch_size,
                 "validation_examples": args.validation_examples,
-                "dataset": "imagenette-128",
+                "dataset": "celeba",
                 "image_shape": [3, IMAGE_SIZE, IMAGE_SIZE],
                 "horizontal_flip": False,
                 "pixel_loss": "l1",
@@ -578,8 +584,10 @@ def train_tokenizer(
     return model.eval().requires_grad_(False)
 
 
-def load_tokenizer(path: Path, device: torch.device) -> VQPerceptualAutoencoder:
-    checkpoint = torch.load(path, map_location=device, weights_only=True)
+def load_tokenizer(
+    checkpoint_path: Path, device: torch.device
+) -> VQPerceptualAutoencoder:
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if checkpoint.get("model_name") != "vqgan_tokenizer":
         raise ValueError("checkpoint is not a VQGAN tokenizer")
     if checkpoint.get("perceptual_loss") != "lpips-v0.1-vgg":
@@ -587,10 +595,10 @@ def load_tokenizer(path: Path, device: torch.device) -> VQPerceptualAutoencoder:
             "tokenizer was not trained with frozen learned LPIPS; retrain stage 1"
         )
     training_config = checkpoint.get("training_config", {})
-    if training_config.get("dataset") != "imagenette-128" or training_config.get(
+    if training_config.get("dataset") != "celeba" or training_config.get(
         "image_shape"
     ) != [3, IMAGE_SIZE, IMAGE_SIZE]:
-        raise ValueError("tokenizer is not the Imagenette-128 configuration")
+        raise ValueError("tokenizer is not the CelebA-128 configuration")
     model = VQPerceptualAutoencoder(**checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     if checkpoint.get("interface_id") != model_state_fingerprint(model):
@@ -628,7 +636,8 @@ def train_prior(
         for x, labels in train_loader:
             x = x.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-            with torch.inference_mode():
+            # Frozen tokens still participate in the prior's backward pass.
+            with torch.no_grad():
                 indices = tokenizer.encode_indices(x)
             logits, targets = prior.teacher_forcing(indices, labels)
             loss = F.cross_entropy(logits.flatten(0, 1), targets.flatten())
@@ -657,7 +666,7 @@ def train_prior(
                 save_image(
                     samples.mul(0.5).add(0.5),
                     out_dir / f"prior_{epoch:03d}.png",
-                    nrow=5,
+                    nrow=NUM_CLASSES,
                 )
     validation = validate_prior(
         tokenizer,
@@ -690,8 +699,10 @@ def train_prior(
                 "completed_optimizer_steps": optimizer_steps,
                 "batch_size": args.batch_size,
                 "validation_examples": args.validation_examples,
-                "dataset": "imagenette-128 tokens",
+                "dataset": "celeba",
                 "conditioning": "class_conditional",
+                "attribute": CELEBA_SMILING_ATTRIBUTE,
+                "class_names": list(CELEBA_SMILING_CLASSES),
                 "learning_rate": args.prior_lr,
             },
             "validation": validation,
@@ -725,14 +736,15 @@ def train(args: argparse.Namespace) -> None:
         raise ValueError("validation_examples must be positive")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = output_directory(args.run_name)
-    train_loader, validation_loader = make_imagenette_train_validation_loaders(
+    train_loader, validation_loader = make_aligned_celeba_train_validation_loaders(
         args.data_dir,
+        IMAGE_SIZE,
         args.batch_size,
         device,
-        image_size=IMAGE_SIZE,
         num_workers=args.workers,
+        attribute=CELEBA_SMILING_ATTRIBUTE,
     )
-    path = out_dir / "tokenizer.pth"
+    checkpoint_path = out_dir / "tokenizer.pth"
     if args.stage in {"tokenizer", "all"}:
         reset_dir(str(out_dir))
         tokenizer = train_tokenizer(
@@ -743,13 +755,13 @@ def train(args: argparse.Namespace) -> None:
             out_dir,
         )
     else:
-        if not path.is_file():
+        if not checkpoint_path.is_file():
             raise FileNotFoundError("train --stage tokenizer before the prior")
-        tokenizer = load_tokenizer(path, device)
+        tokenizer = load_tokenizer(checkpoint_path, device)
         # The tokenizer is an input to this stage; keep its handoff checkpoint.
-        tokenizer_checkpoint = path.read_bytes()
+        tokenizer_checkpoint = checkpoint_path.read_bytes()
         reset_dir(str(out_dir))
-        path.write_bytes(tokenizer_checkpoint)
+        checkpoint_path.write_bytes(tokenizer_checkpoint)
         del tokenizer_checkpoint
     if args.stage in {"prior", "all"}:
         train_prior(

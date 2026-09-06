@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch
 import torch.nn.functional as F
@@ -15,9 +15,9 @@ from torch.optim import Optimizer
 class IndexTokenizer(Protocol):
     """Minimal interface shared by VQ-VAE and FSQ tokenizers."""
 
-    def encode_indices(self, images: Tensor) -> Tensor: ...
+    def encode_indices(self, images: Tensor, /) -> Tensor: ...
 
-    def decode_indices(self, indices: Tensor) -> Tensor: ...
+    def decode_indices(self, indices: Tensor, /) -> Tensor: ...
 
 
 def _validate_class_labels(
@@ -51,7 +51,9 @@ def make_fixed_class_labels(
 class MaskedConv2d(nn.Conv2d):
     """PixelCNN mask: type A excludes the current token; B includes it."""
 
-    def __init__(self, mask_type: str, *args: object, **kwargs: object) -> None:
+    mask: Tensor
+
+    def __init__(self, mask_type: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         if mask_type not in {"A", "B"}:
             raise ValueError("mask_type must be 'A' or 'B'")
@@ -63,9 +65,9 @@ class MaskedConv2d(nn.Conv2d):
         mask[:, :, center_h, first_blocked:] = 0
         self.register_buffer("mask", mask)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, input: Tensor) -> Tensor:
         return F.conv2d(
-            x,
+            input,
             self.weight * self.mask,
             self.bias,
             self.stride,
@@ -191,7 +193,8 @@ def train_pixelcnn_prior_epoch(
     for images, labels in loader:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
-        with torch.inference_mode():
+        # The prior's embedding backward must be able to save these indices.
+        with torch.no_grad():
             indices = tokenizer.encode_indices(images)
         class_labels = labels if prior.num_classes > 0 else None
         loss = F.cross_entropy(prior(indices, labels=class_labels), indices)

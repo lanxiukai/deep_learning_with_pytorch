@@ -1,21 +1,22 @@
-"""Compare Imagenette-128 references with conditional GAN samples.
+"""Compare CelebA-64 validation faces with conditional GAN samples.
 
-Each available generator receives the same ten Imagenette class indices and
-model-specific evaluation noise. Missing checkpoints are reported and skipped
-so the three lessons can still be trained and inspected independently.
+Each generator receives eight fresh latent vectors, each used with both Smiling
+labels. The paired rows show the attribute's effect and within-class variation.
+Missing checkpoints are reported and skipped so lessons remain independent.
 """
 
 import argparse
 import os
 from pathlib import Path
+from typing import cast
 
 import torch
 
-from dl_utils.data.imagenette import (
-    IMAGENETTE_CLASS_NAMES,
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    make_imagenette_dataset,
+from dl_utils.data.celeba import (
+    CELEBA_SMILING_ATTRIBUTE,
+    CELEBA_SMILING_CLASSES,
+    CelebAAlignedDataset,
+    aligned_celeba_transform,
 )
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
@@ -29,13 +30,14 @@ from dl_utils.runtime.randomness import set_seed
 from dl_utils.training.checkpoints import load_model_weights
 
 PROJECT_ROOT = infer_project_root()
-DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "celeba"
 DEFAULT_OUTPUT_ROOT = Path(
     os.environ.get("DL_OUTPUT_ROOT", PROJECT_ROOT / "output" / "gan")
 )
-IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
-NUM_CLASSES = IMAGENETTE_NUM_CLASSES
+IMAGE_SIZE = 64
+NUM_CLASSES = len(CELEBA_SMILING_CLASSES)
 DISPLAY_CLASS_INDICES = tuple(range(NUM_CLASSES))
+SAMPLES_PER_CLASS = 8
 EVALUATION_SEED = 10_042
 MODEL_EVALUATION_SEEDS = {
     "sn_gan": EVALUATION_SEED + 1,
@@ -43,41 +45,43 @@ MODEL_EVALUATION_SEEDS = {
     "biggan": EVALUATION_SEED + 3,
 }
 MODEL_SPECS = (
-    ("sn_gan", "SN-GAN", SNGenerator, "6.0_sn_gan.py", 9, None),
-    ("sagan", "SAGAN", SAGANGenerator, "6.1_sagan.py", 12, None),
-    ("biggan", "BigGAN EMA", BigGANGenerator, "6.2_biggan.py", 11, "ema"),
+    ("sn_gan", "SN-GAN EMA", SNGenerator, "6.0_sn_gan.py", 13),
+    ("sagan", "SAGAN EMA", SAGANGenerator, "6.1_sagan.py", 15),
+    ("biggan", "BigGAN EMA", BigGANGenerator, "6.2_biggan.py", 13),
 )
 
 
-def load_imagenette_references(data_dir):
-    """Return one deterministic normalized image for each display class."""
-    dataset = make_imagenette_dataset(data_dir, preprocessed=True)
+def load_celeba_references(data_dir):
+    """Select eight held-out faces per label, without random augmentation."""
+    dataset = CelebAAlignedDataset(
+        data_dir,
+        split="validation",
+        transform=aligned_celeba_transform(IMAGE_SIZE),
+        attribute=CELEBA_SMILING_ATTRIBUTE,
+    )
     candidates = {class_index: [] for class_index in DISPLAY_CLASS_INDICES}
     for sample_index, class_index in enumerate(dataset.targets):
         if class_index in candidates:
             candidates[class_index].append(sample_index)
-    if any(not indices for indices in candidates.values()):
-        raise RuntimeError("The Imagenette tree is missing a display class.")
+    if any(len(indices) < SAMPLES_PER_CLASS for indices in candidates.values()):
+        raise RuntimeError("CelebA validation has too few faces for a display class.")
 
     random_generator = torch.Generator().manual_seed(EVALUATION_SEED)
-    selected_indices = [
-        indices[
-            int(
-                torch.randint(
-                    len(indices),
-                    (),
-                    generator=random_generator,
-                ).item()
-            )
-        ]
-        for indices in candidates.values()
-    ]
-    images = torch.stack([dataset[index][0] for index in selected_indices])
-    labels = torch.tensor(DISPLAY_CLASS_INDICES, dtype=torch.long)
-    class_names = [
-        IMAGENETTE_CLASS_NAMES[dataset.classes[index]]
-        for index in DISPLAY_CLASS_INDICES
-    ]
+    selected_indices = []
+    for indices in candidates.values():
+        selected_indices.extend(
+            indices[position]
+            for position in torch.randperm(len(indices), generator=random_generator)[
+                :SAMPLES_PER_CLASS
+            ].tolist()
+        )
+    images = torch.stack(
+        [cast(torch.Tensor, dataset[index][0]) for index in selected_indices]
+    )
+    labels = torch.tensor(DISPLAY_CLASS_INDICES, dtype=torch.long).repeat_interleave(
+        SAMPLES_PER_CLASS
+    )
+    class_names = list(CELEBA_SMILING_CLASSES)
     return images, labels, class_names
 
 
@@ -87,17 +91,18 @@ def load_generator(
     checkpoint_path,
     script_name,
     expected_format_version,
-    expected_weights,
     device,
 ):
-    """Load a generator produced by the current Imagenette lesson scripts."""
+    """Load a generator produced by the current CelebA lesson scripts."""
     expected_metadata = {
         "model_name": model_name,
         "format_version": expected_format_version,
         "conditioning": "class_conditional",
+        "dataset": "celeba",
+        "attribute": CELEBA_SMILING_ATTRIBUTE,
+        "class_names": list(CELEBA_SMILING_CLASSES),
+        "weights": "ema",
     }
-    if expected_weights is not None:
-        expected_metadata["weights"] = expected_weights
 
     def validate_config(model_config):
         if model_config.get("image_size") != IMAGE_SIZE:
@@ -133,17 +138,21 @@ def save_real_vs_generated(
     device,
     batch_size,
 ):
-    """Save one model's Imagenette reference-versus-sample comparison."""
+    """Save held-out faces and paired attribute-conditioned generations."""
     z_dim = model_config.get("z_dim")
     if not isinstance(z_dim, int) or z_dim < 1:
         raise ValueError(f"{model_name} checkpoint has an invalid z_dim.")
 
     random_generator = torch.Generator().manual_seed(MODEL_EVALUATION_SEEDS[model_name])
-    noise = torch.randn(
-        len(DISPLAY_CLASS_INDICES),
-        z_dim,
-        generator=random_generator,
-    ).to(device)
+    noise = (
+        torch.randn(
+            SAMPLES_PER_CLASS,
+            z_dim,
+            generator=random_generator,
+        )
+        .repeat(NUM_CLASSES, 1)
+        .to(device)
+    )
     generated_images = generate_in_batches(
         (noise, reference_labels.to(device)),
         batch_size,
@@ -154,7 +163,7 @@ def save_real_vs_generated(
         module=generator,
     )
     expected_shape = (
-        len(DISPLAY_CLASS_INDICES),
+        SAMPLES_PER_CLASS * len(DISPLAY_CLASS_INDICES),
         3,
         IMAGE_SIZE,
         IMAGE_SIZE,
@@ -164,12 +173,16 @@ def save_real_vs_generated(
             f"{model_name} generated {tuple(generated_images.shape)}; "
             f"expected {expected_shape}."
         )
+    row_shape = (NUM_CLASSES, SAMPLES_PER_CLASS, 3, IMAGE_SIZE, IMAGE_SIZE)
+    generated_rows = generated_images.reshape(row_shape)
+    reference_rows = reference_images.reshape(row_shape)
     save_image_row_grid(
-        [reference_images, generated_images],
-        ["Imagenette train", display_name],
+        [*reference_rows, *generated_rows],
+        [f"Validation: {name}" for name in class_names]
+        + [f"{display_name}: {name}" for name in class_names],
         output_path,
-        title=f"{display_name}: Imagenette-128 reference vs conditional sample",
-        column_labels=class_names,
+        title=f"{display_name}: CelebA-64 (paired generated rows share z)",
+        column_labels=[f"Sample {index + 1}" for index in range(SAMPLES_PER_CLASS)],
     )
 
 
@@ -193,14 +206,13 @@ def main(args):
 
     set_seed(EVALUATION_SEED)
     device = try_gpu()
-    references, labels, class_names = load_imagenette_references(args.data_dir)
+    references, labels, class_names = load_celeba_references(args.data_dir)
     for (
         model_name,
         display_name,
         model_class,
         script_name,
         format_version,
-        weights,
         checkpoint_path,
     ) in available_specs:
         evaluation_dir = args.output_root / model_name / "evaluation"
@@ -210,7 +222,6 @@ def main(args):
             checkpoint_path,
             script_name,
             format_version,
-            weights,
             device,
         )
         output_path = evaluation_dir / "real_vs_generated.png"
@@ -231,7 +242,7 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Evaluate Imagenette-128 SN-GAN, SAGAN, and BigGAN."
+        description="Evaluate CelebA-64 SN-GAN, SAGAN, and BigGAN."
     )
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)

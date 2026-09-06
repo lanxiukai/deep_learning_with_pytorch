@@ -1,9 +1,8 @@
-"""BigGAN components for a paper-oriented 128x128 teaching model.
+"""BigGAN components for compact 64px and 128px teaching models.
 
-The 64-channel default keeps the original 128x128 architecture, hierarchical
-120-dimensional latent input, shared 128-dimensional class embedding,
-64x64 attention, spectral normalization, and projection discriminator. It
-deliberately avoids the paper's costly 96-channel and 2,048-image scaling.
+Both resolutions retain hierarchical latent conditioning, a shared class
+embedding, attention, spectral normalization, and projection discrimination.
+The number of latent chunks follows the number of generator residual blocks.
 """
 
 from itertools import pairwise
@@ -15,10 +14,8 @@ from torch.nn.utils import spectral_norm
 
 from dl_utils.gan.sagan import SAGANDiscriminator, SelfAttention
 from dl_utils.gan.sn_gan import (
-    GENERATOR_128_BLOCK_RESOLUTIONS,
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    generator_128_channels,
+    generator_block_resolutions,
+    generator_channels,
     validate_class_labels,
 )
 
@@ -66,37 +63,31 @@ class BigGANGeneratorResidualBlock(nn.Module):
 
 
 class BigGANGenerator(nn.Module):
-    """128x128 BigGAN generator with hierarchical latent conditioning."""
+    """BigGAN generator with hierarchical latent conditioning."""
 
     def __init__(
         self,
         z_dim=120,
-        num_classes=IMAGENETTE_NUM_CLASSES,
+        num_classes=2,
         base_channels=64,
         class_embedding_dim=128,
-        image_size=IMAGENETTE_IMAGE_SIZE,
-        attention_resolution=64,
+        image_size=64,
+        attention_resolution=16,
     ):
         super().__init__()
         if base_channels < 1 or num_classes < 1 or class_embedding_dim < 1:
             raise ValueError(
                 "base_channels, num_classes, and class_embedding_dim must be positive."
             )
-        if image_size != IMAGENETTE_IMAGE_SIZE:
-            raise ValueError(
-                "BigGANGenerator currently implements only 128x128 output."
-            )
-        if attention_resolution not in GENERATOR_128_BLOCK_RESOLUTIONS:
-            raise ValueError(
-                "attention_resolution must be one of "
-                f"{GENERATOR_128_BLOCK_RESOLUTIONS}."
-            )
+        resolutions = generator_block_resolutions(image_size)
+        if attention_resolution not in resolutions:
+            raise ValueError(f"attention_resolution must be one of {resolutions}.")
 
-        self.num_generator_blocks = len(GENERATOR_128_BLOCK_RESOLUTIONS)
+        self.num_generator_blocks = len(resolutions)
         num_latent_chunks = self.num_generator_blocks + 1
         if z_dim < 1 or z_dim % num_latent_chunks != 0:
             raise ValueError(
-                "z_dim must be positive and divisible by the six hierarchical "
+                f"z_dim must be positive and divisible by the {num_latent_chunks} hierarchical "
                 f"latent chunks, got {z_dim}."
             )
 
@@ -104,11 +95,9 @@ class BigGANGenerator(nn.Module):
         self.num_classes = num_classes
         self.image_size = image_size
         self.latent_chunk_dim = z_dim // num_latent_chunks
-        self.attention_after_block = GENERATOR_128_BLOCK_RESOLUTIONS.index(
-            attention_resolution
-        )
+        self.attention_after_block = resolutions.index(attention_resolution)
         condition_dim = class_embedding_dim + self.latent_chunk_dim
-        channels = generator_128_channels(base_channels)
+        channels = generator_channels(base_channels, image_size)
 
         self.class_embedding = nn.Embedding(
             num_classes,
@@ -164,14 +153,14 @@ class BigGANGenerator(nn.Module):
 
 
 class BigGANDiscriminator(SAGANDiscriminator):
-    """BigGAN's wide projection discriminator with 64x64 attention."""
+    """BigGAN's wide projection discriminator with configurable attention."""
 
     def __init__(
         self,
-        num_classes=IMAGENETTE_NUM_CLASSES,
+        num_classes=2,
         base_channels=64,
-        image_size=IMAGENETTE_IMAGE_SIZE,
-        attention_resolution=64,
+        image_size=64,
+        attention_resolution=16,
     ):
         super().__init__(
             num_classes=num_classes,
@@ -179,10 +168,6 @@ class BigGANDiscriminator(SAGANDiscriminator):
             image_size=image_size,
             attention_resolution=attention_resolution,
         )
-
-
-# Keep old imports working while the lesson now presents the model as BigGAN.
-CompactBigGANGenerator = BigGANGenerator
 
 
 def initialize_orthogonal_weights(module):
@@ -262,7 +247,6 @@ __all__ = [
     "BigGANDiscriminator",
     "BigGANGenerator",
     "BigGANGeneratorResidualBlock",
-    "CompactBigGANGenerator",
     "ConditionalBatchNorm2d",
     "initialize_orthogonal_weights",
     "modified_orthogonal_regularization",

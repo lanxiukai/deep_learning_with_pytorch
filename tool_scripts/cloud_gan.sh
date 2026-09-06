@@ -5,17 +5,17 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 readonly SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
-readonly TMUX_SOCKET="imagenette-gan-cloud"
+readonly TMUX_SOCKET="celeba-gan-cloud"
 readonly REMOTE_PROJECT_ROOT="/workspace/deep-learning-with-pytorch"
 readonly OUTPUT_ROOT="$PROJECT_ROOT/output-vast-dl"
 readonly REMOTE_OUTPUT_ROOT="$REMOTE_PROJECT_ROOT/output-vast-dl"
-readonly DEFAULT_DATA_DIR="$PROJECT_ROOT/data/imagenette-128"
+readonly DEFAULT_DATA_DIR="$PROJECT_ROOT/data/celeba"
 
 usage() {
     cat <<'EOF'
 Usage: bash tool_scripts/cloud_gan.sh ACTION [options]
 
-Operate the Imagenette-128 SN-GAN, SAGAN, and BigGAN lessons on one cloud RTX
+Operate the CelebA-64 SN-GAN, SAGAN, and BigGAN lessons on one cloud RTX
 5090. The script never creates, stops, or destroys provider instances.
 
 Actions:
@@ -31,7 +31,7 @@ Actions:
 
 Provision options:
   --host HOST                 SSH config host (default: vast-dl)
-  --download-imagenette       Download and build Imagenette-128 remotely
+  --download-celeba           Download aligned CelebA remotely
 
 Train options:
   --model MODEL               sn_gan, sagan, or biggan
@@ -41,7 +41,7 @@ Train options:
   --generator-batch-size N    Override SN-GAN's generator batch only
   --num-workers N             DataLoader workers (default: 8)
   --precision MODE            bf16 (default) or fp32
-  --data-dir PATH             Imagenette-128 root (default: data/imagenette-128)
+  --data-dir PATH             Aligned CelebA root (default: data/celeba)
 
 Download options:
   --host HOST                 SSH config host (default: vast-dl)
@@ -50,11 +50,11 @@ EOF
 }
 
 log() {
-    printf '[cloud-imagenette-gan] %s\n' "$*"
+    printf '[cloud-celeba-gan] %s\n' "$*"
 }
 
 die() {
-    printf '[cloud-imagenette-gan] ERROR: %s\n' "$*" >&2
+    printf '[cloud-celeba-gan] ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -107,15 +107,15 @@ cloud_preflight() {
     uv run --locked --no-sync python -c \
         'import torch; assert torch.cuda.is_available(), "CUDA unavailable"; assert torch.cuda.is_bf16_supported(), "BF16 unavailable"'
     if [[ "$require_data" == true ]]; then
-        IMAGENETTE_ROOT="$data_dir" uv run --locked --no-sync python -c \
-            'import os; from dl_utils.data.imagenette import imagenette_128_is_ready; root=os.environ["IMAGENETTE_ROOT"]; assert imagenette_128_is_ready(root), f"Imagenette-128 is not ready: {root}"'
+        CELEBA_ROOT="$data_dir" uv run --locked --no-sync python -c \
+            'import os; from dl_utils.data.celeba import CelebAAlignedDataset; dataset=CelebAAlignedDataset(os.environ["CELEBA_ROOT"], attribute="Smiling"); print(f"CelebA training images: {len(dataset):,}")'
     fi
     log "preflight passed: $gpu_name"
 }
 
 provision_cloud() {
     local host="vast-dl"
-    local download_imagenette=false
+    local download_celeba=false
     while (($# > 0)); do
         case "$1" in
             --host)
@@ -123,8 +123,8 @@ provision_cloud() {
                 host="$2"
                 shift 2
                 ;;
-            --download-imagenette)
-                download_imagenette=true
+            --download-celeba)
+                download_celeba=true
                 shift
                 ;;
             -h|--help)
@@ -137,9 +137,9 @@ provision_cloud() {
     validate_host "$host"
     command -v ssh >/dev/null 2>&1 || die "ssh is unavailable"
     log "preparing $host:$REMOTE_PROJECT_ROOT"
-    ssh "$host" bash -se -- "$download_imagenette" <<'REMOTE'
+    ssh "$host" bash -se -- "$download_celeba" <<'REMOTE'
 set -Eeuo pipefail
-download_imagenette="$1"
+download_celeba="$1"
 project_root=/workspace/deep-learning-with-pytorch
 if ((EUID == 0)); then
     privilege=()
@@ -176,15 +176,16 @@ else
 fi
 cd "$project_root"
 bash tool_scripts/setup_cloud_gpu.sh --profile core
-if [[ "$download_imagenette" == true ]]; then
+if [[ "$download_celeba" == true ]]; then
+    uv sync --locked --no-dev --extra celeba
     uv run --locked --no-sync python tool_scripts/download_dataset.py \
-        --dataset imagenette
+        --dataset celeba
 fi
 REMOTE
-    if [[ "$download_imagenette" == true ]]; then
-        log "host setup and Imagenette-128 preparation completed"
+    if [[ "$download_celeba" == true ]]; then
+        log "host setup and CelebA-64 preparation completed"
     else
-        log "host setup completed; Imagenette was not downloaded"
+        log "host setup completed; CelebA was not downloaded"
     fi
 }
 
@@ -220,7 +221,7 @@ train_worker() {
     validate_model "$model"
     script="$(lesson_path "$model")"
     checkpoint="$OUTPUT_ROOT/$model/checkpoints/latest.pth"
-    log_file="$OUTPUT_ROOT/logs/$model.log"
+    log_file="$OUTPUT_ROOT/logs/$model/train.log"
     command=(
         uv run --locked --no-sync python -u "$script"
         --data-dir "$data_dir"
@@ -233,8 +234,10 @@ train_worker() {
     [[ -z "$generator_batch_size" ]] || \
         command+=(--generator-batch-size "$generator_batch_size")
     [[ "$resume" == false ]] || command+=(--resume-from "$checkpoint")
-    mkdir -p "$OUTPUT_ROOT/logs"
     cd "$PROJECT_ROOT"
+    GAN_LOG_DIR="$OUTPUT_ROOT/logs/$model" GAN_RESUME="$resume" \
+        uv run --locked --no-sync python -c \
+        'import os; from pathlib import Path; from dl_utils.filesystem.directories import reset_dir; path=Path(os.environ["GAN_LOG_DIR"]); reset_dir(str(path)) if os.environ["GAN_RESUME"] == "false" or not path.exists() else None'
     {
         printf '\n=== %s model=%s resume=%s ===\n' \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$model" "$resume"
@@ -349,7 +352,7 @@ run_status() {
             --format=csv,noheader
     fi
     if [[ -d "$OUTPUT_ROOT/logs" ]]; then
-        for log_file in "$OUTPUT_ROOT"/logs/*.log; do
+        for log_file in "$OUTPUT_ROOT"/logs/*/*.log; do
             [[ -f "$log_file" ]] || continue
             printf '\n==> %s <==\n' "$log_file"
             tail -n 12 "$log_file"

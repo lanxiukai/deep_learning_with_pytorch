@@ -82,7 +82,7 @@ class TrainingSession:
         *,
         initial_state: Mapping[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        """Prepare output and return ``(start_epoch, training_state)``."""
+        """Prepare output and restore the same recipe, optionally for more epochs."""
         if self._started:
             raise RuntimeError("TrainingSession.start() may only be called once.")
 
@@ -105,8 +105,15 @@ class TrainingSession:
             resume_path,
             models=self.models,
             optimizers=self.optimizers,
-            expected_metadata=self._checkpoint_metadata,
+            expected_metadata={
+                "run": self.metadata,
+                "models": self.model_metadata,
+            },
         )
+        if self.total_epochs < checkpoint["metadata"]["total_epochs"]:
+            raise ValueError(
+                "A resumed run may extend, but not shorten, its epoch budget."
+            )
         resumed_epoch = checkpoint["epoch"]
         if resumed_epoch > self.total_epochs:
             raise ValueError("Checkpoint epoch exceeds the configured total epochs.")

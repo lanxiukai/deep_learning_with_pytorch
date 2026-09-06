@@ -1,11 +1,10 @@
-"""Self-Attention GAN models for class-conditional 128x128 images.
+"""Self-Attention GAN models for class-conditional 64px and 128px images.
 
 SAGAN extends the preceding projection SN-GAN with spectral normalization in
-the generator and a non-local attention block at 32x32. The 64-channel model
-and five-stage 4-to-128 hierarchy follow the public paper implementation.
+the generator and a non-local attention block. Image size selects a four- or
+five-stage upsampling hierarchy; the attention resolution stays explicit.
 """
 
-from collections.abc import Sequence
 from itertools import pairwise
 
 import torch
@@ -14,15 +13,12 @@ from torch import nn
 from torch.nn.utils import spectral_norm
 
 from dl_utils.gan.sn_gan import (
-    DISCRIMINATOR_128_BLOCK_RESOLUTIONS,
-    GENERATOR_128_BLOCK_RESOLUTIONS,
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    CategoricalConditionalBatchNorm2d,
     SNDiscriminatorResidualBlock,
     SNGeneratorResidualBlock,
-    discriminator_128_channels,
-    generator_128_channels,
+    discriminator_block_resolutions,
+    discriminator_channels,
+    generator_block_resolutions,
+    generator_channels,
     validate_class_labels,
 )
 
@@ -40,47 +36,6 @@ def _initialize_sagan_weights(module):
             nn.init.ones_(module.weight)
         if module.bias is not None:
             nn.init.zeros_(module.bias)
-
-
-def make_fixed_class_latent_grid(
-    class_indices,
-    samples_per_class,
-    z_dim,
-    device,
-    *,
-    base_noise=None,
-):
-    """Repeat fixed latent columns for each requested class index.
-
-    Passing an integer preserves the original convenience API and selects
-    ``range(class_indices)``. A sequence can select a small, spread-out subset
-    of dataset classes for readable sample grids.
-    """
-    if isinstance(class_indices, int):
-        if class_indices < 1:
-            raise ValueError("class_indices must be positive.")
-        selected_classes = tuple(range(class_indices))
-    elif isinstance(class_indices, Sequence):
-        selected_classes = tuple(class_indices)
-        if not selected_classes:
-            raise ValueError("class_indices must not be empty.")
-    else:
-        raise TypeError("class_indices must be an integer or a sequence.")
-
-    if base_noise is None:
-        base_noise = torch.randn(samples_per_class, z_dim, device=device)
-    elif tuple(base_noise.shape) != (samples_per_class, z_dim):
-        raise ValueError(
-            "base_noise must have shape "
-            f"({samples_per_class}, {z_dim}), got {tuple(base_noise.shape)}."
-        )
-    else:
-        base_noise = base_noise.to(device)
-
-    classes = torch.tensor(selected_classes, dtype=torch.long, device=device)
-    labels = classes.repeat_interleave(samples_per_class)
-    noise = base_noise.repeat(len(selected_classes), 1)
-    return noise, labels
 
 
 class SelfAttention(nn.Module):
@@ -112,9 +67,6 @@ class SelfAttention(nn.Module):
         return inputs + self.gamma * self.output(attended)
 
 
-ConditionalBatchNorm2d = CategoricalConditionalBatchNorm2d
-
-
 class SAGANGeneratorResidualBlock(SNGeneratorResidualBlock):
     """Spectral-normalized conditional residual block with 2x upsampling."""
 
@@ -128,34 +80,28 @@ class SAGANGeneratorResidualBlock(SNGeneratorResidualBlock):
 
 
 class SAGANGenerator(nn.Module):
-    """Paper-oriented 128x128 SAGAN generator with 32x32 attention."""
+    """Conditional SAGAN generator with configurable resolution and attention."""
 
     def __init__(
         self,
         z_dim=128,
-        num_classes=IMAGENETTE_NUM_CLASSES,
+        num_classes=2,
         base_channels=64,
-        image_size=IMAGENETTE_IMAGE_SIZE,
-        attention_resolution=32,
+        image_size=64,
+        attention_resolution=16,
     ):
         super().__init__()
         if z_dim < 1 or base_channels < 1 or num_classes < 1:
             raise ValueError("z_dim, base_channels, and num_classes must be positive.")
-        if image_size != IMAGENETTE_IMAGE_SIZE:
-            raise ValueError("SAGANGenerator currently implements only 128x128 output.")
-        if attention_resolution not in GENERATOR_128_BLOCK_RESOLUTIONS:
-            raise ValueError(
-                "attention_resolution must be one of "
-                f"{GENERATOR_128_BLOCK_RESOLUTIONS}."
-            )
+        resolutions = generator_block_resolutions(image_size)
+        if attention_resolution not in resolutions:
+            raise ValueError(f"attention_resolution must be one of {resolutions}.")
 
         self.z_dim = z_dim
         self.num_classes = num_classes
         self.image_size = image_size
-        self.attention_after_block = GENERATOR_128_BLOCK_RESOLUTIONS.index(
-            attention_resolution
-        )
-        channels = generator_128_channels(base_channels)
+        self.attention_after_block = resolutions.index(attention_resolution)
+        channels = generator_channels(base_channels, image_size)
         self.input = spectral_norm(nn.Linear(z_dim, channels[0] * 4 * 4))
         blocks = [
             SAGANGeneratorResidualBlock(
@@ -199,27 +145,22 @@ class SAGANDiscriminator(nn.Module):
 
     def __init__(
         self,
-        num_classes=IMAGENETTE_NUM_CLASSES,
+        num_classes=2,
         base_channels=64,
-        image_size=IMAGENETTE_IMAGE_SIZE,
-        attention_resolution=32,
+        image_size=64,
+        attention_resolution=16,
     ):
         super().__init__()
         if base_channels < 1 or num_classes < 1:
             raise ValueError("base_channels and num_classes must be positive.")
-        if image_size != IMAGENETTE_IMAGE_SIZE:
-            raise ValueError(
-                "SAGANDiscriminator currently implements only 128x128 input."
-            )
-        if attention_resolution not in DISCRIMINATOR_128_BLOCK_RESOLUTIONS:
-            raise ValueError("attention_resolution must be one of (4, 8, 16, 32, 64).")
+        resolutions = discriminator_block_resolutions(image_size)
+        if attention_resolution not in resolutions:
+            raise ValueError(f"attention_resolution must be one of {resolutions}.")
 
         self.num_classes = num_classes
         self.image_size = image_size
-        self.attention_after_block = DISCRIMINATOR_128_BLOCK_RESOLUTIONS.index(
-            attention_resolution
-        )
-        channels = discriminator_128_channels(base_channels)
+        self.attention_after_block = resolutions.index(attention_resolution)
+        channels = discriminator_channels(base_channels, image_size)
         self.blocks = nn.ModuleList(
             [
                 SNDiscriminatorResidualBlock(
@@ -282,10 +223,8 @@ class SAGANDiscriminator(nn.Module):
 
 
 __all__ = [
-    "ConditionalBatchNorm2d",
     "SAGANDiscriminator",
     "SAGANGenerator",
     "SAGANGeneratorResidualBlock",
     "SelfAttention",
-    "make_fixed_class_latent_grid",
 ]

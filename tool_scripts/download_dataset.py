@@ -16,19 +16,11 @@ from dl_utils.data.dataset_preparation import (
     prepare_celeba_cyclegan_splits,
 )
 from dl_utils.data.downloads import download, download_extract
-from dl_utils.data.imagenette import (
-    IMAGENETTE_128_MAX_SOURCE_PIXELS,
-    IMAGENETTE_128_MIN_SOURCE_EDGE,
-    download_imagenette_320,
-    imagenette_128_is_ready,
-    prepare_imagenette_128_cache,
-)
 from dl_utils.data.vision import vision_loaders
 from dl_utils.filesystem.project_root import infer_project_root
 
 PROJECT_ROOT = infer_project_root()
 DATA_DIR = PROJECT_ROOT / "data"
-DEFAULT_IMAGENETTE_WORKERS = min(32, os.cpu_count() or 1)
 
 
 def _download_mnist() -> None:
@@ -150,30 +142,6 @@ def _download_pokemon() -> None:
     print(f"The Pokemon Dataset has been downloaded: {data_dir}")
 
 
-def _download_imagenette(
-    workers: int,
-    min_source_edge: int,
-    max_source_pixels: int,
-) -> None:
-    source_root = DATA_DIR / "imagenette-320"
-    cache_root = DATA_DIR / "imagenette-128"
-    if imagenette_128_is_ready(
-        cache_root,
-        min_source_edge=min_source_edge,
-        max_source_pixels=max_source_pixels,
-    ):
-        print(f"The Imagenette-128 train and validation data are ready: {cache_root}")
-        return
-    download_imagenette_320(source_root)
-    prepare_imagenette_128_cache(
-        source_root,
-        cache_root,
-        workers=workers,
-        min_source_edge=min_source_edge,
-        max_source_pixels=max_source_pixels,
-    )
-
-
 DOWNLOADERS: dict[str, Callable[[], None]] = {
     "mnist": _download_mnist,
     "fashion-mnist": _download_fashion_mnist,
@@ -187,7 +155,7 @@ DOWNLOADERS: dict[str, Callable[[], None]] = {
     "fra-eng": _download_fra_eng,
     "pokemon": _download_pokemon,
 }
-DATASET_ORDER = (*DOWNLOADERS, "imagenette")
+DATASET_ORDER = tuple(DOWNLOADERS)
 
 
 def _resolve_dataset_names(selected: Sequence[str] | None) -> tuple[str, ...]:
@@ -217,50 +185,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             f"Available names: {', '.join(DATASET_ORDER)}"
         ),
     )
-    parser.add_argument(
-        "--imagenette-workers",
-        type=int,
-        default=DEFAULT_IMAGENETTE_WORKERS,
-        metavar="N",
-        help=(
-            "parallel workers used to build data/imagenette-128 "
-            f"(default: {DEFAULT_IMAGENETTE_WORKERS})"
-        ),
-    )
-    parser.add_argument(
-        "--imagenette-min-source-edge",
-        type=int,
-        default=IMAGENETTE_128_MIN_SOURCE_EDGE,
-        metavar="PIXELS",
-        help=(
-            "exclude Imagenette sources with a shorter edge below this value "
-            f"(default: {IMAGENETTE_128_MIN_SOURCE_EDGE})"
-        ),
-    )
-    parser.add_argument(
-        "--imagenette-max-source-pixels",
-        type=int,
-        default=IMAGENETTE_128_MAX_SOURCE_PIXELS,
-        metavar="PIXELS",
-        help=(
-            "exclude Imagenette sources above this total pixel count "
-            f"(default: {IMAGENETTE_128_MAX_SOURCE_PIXELS})"
-        ),
-    )
     args = parser.parse_args(argv)
     try:
         args.datasets = _resolve_dataset_names(args.datasets)
     except ValueError as error:
         parser.error(str(error))
-    if (
-        min(
-            args.imagenette_workers,
-            args.imagenette_min_source_edge,
-            args.imagenette_max_source_pixels,
-        )
-        < 1
-    ):
-        parser.error("Imagenette workers and source-size limits must be positive")
     return args
 
 
@@ -271,14 +200,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     for index, name in enumerate(args.datasets, start=1):
         print(f"[{index}/{len(args.datasets)}] Preparing {name}...")
         try:
-            if name == "imagenette":
-                _download_imagenette(
-                    args.imagenette_workers,
-                    args.imagenette_min_source_edge,
-                    args.imagenette_max_source_pixels,
-                )
-            else:
-                DOWNLOADERS[name]()
+            DOWNLOADERS[name]()
         # Providers raise heterogeneous exceptions; a sequence should report each.
         except Exception as error:  # noqa: BLE001
             failures.append(name)

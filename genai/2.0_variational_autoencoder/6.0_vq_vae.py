@@ -20,25 +20,27 @@ stage saves only final weights, constructor metadata, and the tokenizer identity
 needed to prevent pairing a prior with different tokenizer weights.
 
 Data:
-    data/imagenette-128/{train,val}/<WNID>/*.JPEG, prepared by
-    tool_scripts/download_dataset.py --dataset imagenette.
+    data/celeba (official train and validation splits), prepared by
+    tool_scripts/download_dataset.py --dataset celeba.
 
 Outputs:
     output/vae/vq_vae/tokenizer_*.png: reconstruction comparisons
-    output/vae/vq_vae/prior_*.png: one PixelCNN sample per Imagenette class
+    output/vae/vq_vae/prior_*.png: one PixelCNN sample per Smiling label
     output/vae/vq_vae/tokenizer.pth: final tokenizer checkpoint
     output/vae/vq_vae/pixelcnn_prior.pth: final token-prior checkpoint
 
-Training data -- Imagenette-128:
-Training images:               9,469
-Validation images:             3,925
+Training data -- CelebA-128:
+Training images:             162,770
+Validation images:            19,867
 Batch size:                       64
-Samples per epoch:             9,408 (147 full batches; drop_last=True)
+Samples per epoch:           162,752 (2,543 full batches; drop_last=True)
 Tokenizer epochs:                 20
 Prior epochs:                     20
-Optimizer updates:             2,940 tokenizer / 2,940 prior
-Note: the tokenizer remains label-free; class labels condition only the frozen-
-token PixelCNN prior. The final 61 shuffled images are omitted per epoch.
+Optimizer updates:            50,860 tokenizer / 50,860 prior
+The tokenizer remains label-free; the frozen-token PixelCNN uses the binary
+Smiling attribute. The final 18 shuffled images are omitted per epoch.
+Both splits center-crop aligned faces to 178x178, resize to 128x128, and use
+no random horizontal flips.
 
 Default dimensions:
 Training input:             128x128 RGB
@@ -67,10 +69,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
-from dl_utils.data.imagenette import (
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    make_imagenette_train_validation_loaders,
+from dl_utils.data.celeba import (
+    CELEBA_SMILING_ATTRIBUTE,
+    CELEBA_SMILING_CLASSES,
+    make_aligned_celeba_train_validation_loaders,
 )
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
@@ -89,9 +91,9 @@ from dl_utils.vae.token_prior import (
 )
 
 PROJECT_ROOT = infer_project_root()
-DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
-IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
-NUM_CLASSES = IMAGENETTE_NUM_CLASSES
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "celeba"
+IMAGE_SIZE = 128
+NUM_CLASSES = len(CELEBA_SMILING_CLASSES)
 DOWNSAMPLE_STEPS = 3
 LATENT_GRID_SIZE = IMAGE_SIZE // (2**DOWNSAMPLE_STEPS)
 TOKENS_PER_IMAGE = LATENT_GRID_SIZE**2
@@ -121,11 +123,21 @@ def smoke_test() -> None:
     reconstruction, indices, quantizer_loss, diagnostics = tokenizer(x)
     loss, _ = tokenizer_loss(reconstruction, x, quantizer_loss)
     loss.backward()
-    logits = prior(indices.detach(), labels=labels)
-    prior_loss = F.cross_entropy(logits, indices)
-    prior_loss.backward()
+    assert tokenizer.encoder.net[0].weight.grad is not None
+    tokenizer.zero_grad(set_to_none=True)
+    tokenizer.eval().requires_grad_(False)
+    prior_loss = train_pixelcnn_prior_epoch(
+        tokenizer,
+        prior,
+        [(x, labels)],
+        torch.optim.Adam(prior.parameters(), lr=2e-4),
+        torch.device("cpu"),
+    )
+    assert all(parameter.grad is None for parameter in tokenizer.parameters())
+    assert prior.embedding.weight.grad is not None
     decoded = tokenizer.decode_indices(indices)
     with torch.inference_mode():
+        logits = prior(indices, labels=labels)
         sampled = prior.sample(
             1,
             LATENT_GRID_SIZE,
@@ -138,10 +150,9 @@ def smoke_test() -> None:
     assert generated.shape == (1, 3, IMAGE_SIZE, IMAGE_SIZE)
     assert indices.shape == (2, LATENT_GRID_SIZE, LATENT_GRID_SIZE)
     assert logits.shape == (2, 32, LATENT_GRID_SIZE, LATENT_GRID_SIZE)
-    assert tokenizer.encoder.net[0].weight.grad is not None
     print(
         f"smoke test passed: tokenizer={loss.item():.3f}, "
-        f"prior={prior_loss.item():.3f}, "
+        f"prior={prior_loss:.3f}, "
         f"PPL={diagnostics['perplexity'].item():.2f}, "
         f"active={diagnostics['active_codes'].item()}/32"
     )
@@ -206,6 +217,7 @@ def train_tokenizer(
         sums = torch.zeros(4, device=device)
         examples = 0
         usage = TokenUsageAccumulator(args.codebook_size)
+        preview = None
         for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             reconstruction, indices, quantizer_loss, diagnostics = model(x)
@@ -222,6 +234,9 @@ def train_tokenizer(
             sums += torch.stack(values) * x.shape[0]
             usage.update(indices)
             examples += x.shape[0]
+            preview = (x[:8].detach(), reconstruction[:8].detach())
+        if preview is None:
+            raise ValueError("training loader produced no batches; reduce batch size")
         means = (sums / examples).tolist()
         epoch_usage = usage.statistics()
         print(
@@ -232,7 +247,7 @@ def train_tokenizer(
         )
         if epoch == 1 or epoch % args.sample_every == 0:
             save_image(
-                torch.cat((x[:8], reconstruction[:8])).mul(0.5).add(0.5),
+                torch.cat(preview).mul(0.5).add(0.5),
                 out_dir / f"tokenizer_{epoch:03d}.png",
                 nrow=8,
             )
@@ -250,7 +265,7 @@ def train_tokenizer(
             "model_name": "vq_vae_tokenizer",
             "interface_id": interface_id,
             "model_config": config,
-            "dataset": "imagenette-128",
+            "dataset": "celeba",
             "image_size": IMAGE_SIZE,
         },
     )
@@ -268,10 +283,10 @@ def load_tokenizer(checkpoint_path: Path, device: torch.device) -> VQVAE:
     if checkpoint.get("model_name") != "vq_vae_tokenizer":
         raise ValueError("checkpoint is not a VQ-VAE tokenizer")
     if (
-        checkpoint.get("dataset") != "imagenette-128"
+        checkpoint.get("dataset") != "celeba"
         or checkpoint.get("image_size") != IMAGE_SIZE
     ):
-        raise ValueError("tokenizer is not the Imagenette-128 configuration")
+        raise ValueError("tokenizer is not the CelebA-128 configuration")
     model = VQVAE(**checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     if checkpoint.get("interface_id") != model_state_fingerprint(model):
@@ -324,7 +339,7 @@ def train_prior(
             save_image(
                 samples.mul(0.5).add(0.5),
                 out_dir / f"prior_{epoch:03d}.png",
-                nrow=5,
+                nrow=NUM_CLASSES,
             )
     validation = evaluate_pixelcnn_prior(
         tokenizer,
@@ -347,9 +362,11 @@ def train_prior(
             "model_name": "vq_vae_pixelcnn_prior",
             "model_config": prior_config,
             "tokenizer_interface_id": tokenizer_interface_id,
-            "dataset": "imagenette-128",
+            "dataset": "celeba",
             "image_size": IMAGE_SIZE,
             "conditioning": "class_conditional",
+            "attribute": CELEBA_SMILING_ATTRIBUTE,
+            "class_names": list(CELEBA_SMILING_CLASSES),
         },
     )
     print(
@@ -361,12 +378,13 @@ def train_prior(
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = PROJECT_ROOT / "output" / "vae" / "vq_vae"
-    train_loader, validation_loader = make_imagenette_train_validation_loaders(
+    train_loader, validation_loader = make_aligned_celeba_train_validation_loaders(
         args.data_dir,
+        IMAGE_SIZE,
         args.batch_size,
         device,
-        image_size=IMAGE_SIZE,
         num_workers=args.workers,
+        attribute=CELEBA_SMILING_ATTRIBUTE,
     )
     checkpoint_path = out_dir / "tokenizer.pth"
     if args.stage in {"tokenizer", "all"}:

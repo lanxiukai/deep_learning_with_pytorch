@@ -16,7 +16,7 @@ environment or dependency workflow.
 | Area | Responsibility | Start with |
 |---|---|---|
 | [d2l/](d2l/) | D2L-style textbook helpers | The relevant lesson call site |
-| [data/](data/) | Downloads, datasets, image preparation, and loaders | [celeba.py](data/celeba.py), [imagenette.py](data/imagenette.py), and [vision.py](data/vision.py) |
+| [data/](data/) | Downloads, datasets, image preparation, and loaders | [celeba.py](data/celeba.py) and [vision.py](data/vision.py) |
 | [diffusion/](diffusion/), [ebm/](ebm/), [gan/](gan/), [vae/](vae/) | Model-family building blocks | The importing lesson and focused source module |
 | [runtime/](runtime/), [training/](training/) | Devices, precision, checkpoints, metrics, and optimization | [accelerator.py](training/accelerator.py), [checkpoints.py](training/checkpoints.py), and [metrics.py](training/metrics.py) |
 | [filesystem/](filesystem/), [plot/](plot/) | Project paths, output directories, and figures | [figures.py](plot/figures.py) and [images.py](plot/images.py) |
@@ -32,17 +32,18 @@ environment or dependency workflow.
   objectives, regularization, and update order.
 - [gan/conditional_training.py](gan/conditional_training.py) owns the repeated
   conditional hinge epoch used by SN-GAN, SAGAN, and BigGAN. Their lesson
-  scripts retain paper-specific hyperparameters, update ratios, regularization,
+  scripts retain lesson-specific hyperparameters, update ratios, regularization,
   EMA, checkpoints, and artifacts.
-- [data/imagenette.py](data/imagenette.py) downloads Imagenette-320 and prepares
-  resumable Imagenette-128 JPEG caches for the official train and validation
-  splits. It records source-size exclusions and lets GAN and discrete-tokenizer
-  loaders skip repeated spatial preprocessing while retaining normalization,
-  dequantization, and optional augmentation.
+- [gan/inference.py](gan/inference.py) shares paired class sample grids,
+  bounded generation, and EMA normalization-buffer calibration.
+- [data/celeba.py](data/celeba.py) loads aligned faces using the official
+  partitions and optional binary attributes. Conditional GANs use Smiling
+  labels with 64x64 images; the discrete-tokenizer lessons use 128x128 images
+  and pass labels only to their second-stage priors.
 - [vae/vae.py](vae/vae.py) preserves the 256x256 introductory VAE and the
   comparable standard/beta-VAE training path. Focused modules cover compact
   32x32 hierarchical VAEs plus reusable discrete-tokenizer, token-prior, and
-  perceptual-autoencoder blocks for the 128x128 Imagenette lessons.
+  perceptual-autoencoder blocks for the 128x128 CelebA lessons.
 - [training/checkpoints.py](training/checkpoints.py) owns serialization and
   state restoration; [training/session.py](training/session.py) manages output
   lifecycles without owning optimization loops.

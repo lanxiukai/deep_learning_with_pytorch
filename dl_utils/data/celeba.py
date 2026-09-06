@@ -1,4 +1,4 @@
-"""Aligned CelebA dataset access for unconditional image generation."""
+"""Aligned CelebA images with optional binary attribute conditioning."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ from dl_utils.data.loading import make_device_aware_loader
 
 CELEBA_PARTITIONS = {"train": 0, "validation": 1, "test": 2}
 CELEBA_ALIGNED_CROP_SIZE = 178
+CELEBA_SMILING_ATTRIBUTE = "Smiling"
+CELEBA_SMILING_CLASSES = ("Not smiling", "Smiling")
 CELEBA_PIPELINES = frozenset({"auto", "cpu", "cuda"})
 
 
@@ -74,10 +76,21 @@ def _aligned_image_paths(root: Path, split: str) -> tuple[Path, ...]:
 class CelebAAlignedDataset(Dataset):
     """Read one official split from the locally prepared aligned CelebA."""
 
-    def __init__(self, root, split="train", transform=None):
+    def __init__(self, root, split="train", transform=None, *, attribute=None):
         super().__init__()
         self.image_paths = _aligned_image_paths(Path(root), split)
         self.transform = transform
+        if attribute is None:
+            self.targets = [0] * len(self.image_paths)
+        else:
+            with (Path(root) / "list_attr_celeba.csv").open(
+                newline="", encoding="utf-8"
+            ) as stream:
+                labels = {
+                    row["image_id"]: int(int(row[attribute]) > 0)
+                    for row in csv.DictReader(stream)
+                }
+            self.targets = [labels[path.name] for path in self.image_paths]
 
     def __len__(self):
         return len(self.image_paths)
@@ -86,7 +99,7 @@ class CelebAAlignedDataset(Dataset):
         image = load_rgb_image(self.image_paths[index])
         if self.transform is not None:
             image = self.transform(image)
-        return image, 0
+        return image, self.targets[index]
 
 
 class CelebAEncodedDataset(Dataset):
@@ -214,6 +227,19 @@ def resolve_celeba_pipeline(root, device: torch.device, requested="auto") -> str
     return "cpu"
 
 
+def aligned_celeba_transform(resolution: int, *, horizontal_flip: bool = False):
+    """Center-crop aligned faces and normalize RGB pixels to [-1, 1]."""
+    operations = [
+        transforms.CenterCrop(CELEBA_ALIGNED_CROP_SIZE),
+        transforms.Resize((resolution, resolution), antialias=True),
+    ]
+    if horizontal_flip:
+        operations.append(transforms.RandomHorizontalFlip())
+    return transforms.Compose(
+        [*operations, transforms.ToTensor(), transforms.Normalize([0.5] * 3, [0.5] * 3)]
+    )
+
+
 def make_aligned_celeba_loader(
     root,
     resolution: int,
@@ -225,28 +251,19 @@ def make_aligned_celeba_loader(
     num_workers: int = 4,
     drop_last: bool = True,
     prefetch_factor: int = 2,
+    attribute: str | None = None,
+    horizontal_flip: bool = True,
 ) -> DataLoader:
     """Create a normalized, resolution-specific aligned CelebA loader."""
     if resolution < 1 or batch_size < 1:
         raise ValueError("resolution and batch_size must be positive.")
     if num_workers < 0:
         raise ValueError("num_workers must be non-negative.")
-    transform = transforms.Compose(
-        [
-            transforms.CenterCrop(CELEBA_ALIGNED_CROP_SIZE),
-            transforms.Resize(
-                (resolution, resolution),
-                antialias=True,
-            ),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5] * 3, [0.5] * 3),
-        ]
-    )
     dataset = CelebAAlignedDataset(
         root,
         split=split,
-        transform=transform,
+        transform=aligned_celeba_transform(resolution, horizontal_flip=horizontal_flip),
+        attribute=attribute,
     )
     return make_device_aware_loader(
         dataset,
@@ -257,6 +274,44 @@ def make_aligned_celeba_loader(
         drop_last=drop_last,
         prefetch_factor=prefetch_factor,
     )
+
+
+def make_aligned_celeba_train_validation_loaders(
+    root,
+    resolution: int,
+    batch_size: int,
+    device: torch.device,
+    *,
+    num_workers: int = 4,
+    attribute: str | None = None,
+) -> tuple[DataLoader, DataLoader]:
+    """Create official train/validation loaders for the tokenizer lessons.
+
+    Both splits use deterministic image transforms. Only the training loader
+    shuffles images and drops its final incomplete batch.
+    """
+    train_loader = make_aligned_celeba_loader(
+        root,
+        resolution,
+        batch_size,
+        device,
+        num_workers=num_workers,
+        attribute=attribute,
+        horizontal_flip=False,
+    )
+    validation_loader = make_aligned_celeba_loader(
+        root,
+        resolution,
+        batch_size,
+        device,
+        split="validation",
+        shuffle=False,
+        num_workers=num_workers,
+        drop_last=False,
+        attribute=attribute,
+        horizontal_flip=False,
+    )
+    return train_loader, validation_loader
 
 
 def make_celeba_training_loader(

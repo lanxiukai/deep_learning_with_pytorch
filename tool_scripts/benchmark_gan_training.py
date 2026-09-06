@@ -1,4 +1,4 @@
-"""Run finite forward/backward checks for one Imagenette-128 GAN on RTX 5090."""
+"""Run finite forward/backward checks for one CelebA-64 GAN on RTX 5090."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from pathlib import Path
 
 import torch
 
-from dl_utils.data.imagenette import (
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    make_imagenette_loader,
+from dl_utils.data.celeba import (
+    CELEBA_SMILING_ATTRIBUTE,
+    CELEBA_SMILING_CLASSES,
+    make_aligned_celeba_loader,
 )
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.gan.biggan import (
@@ -35,12 +35,12 @@ from dl_utils.training.accelerator import (
 from dl_utils.training.optimization import update_ema
 
 MODEL_DEFAULT_BATCH_SIZES = {
-    "sn_gan": (32, 32),
-    "sagan": (32, 32),
-    "biggan": (32, 32),
+    "sn_gan": (64, 64),
+    "sagan": (64, 64),
+    "biggan": (64, 64),
 }
-NUM_CLASSES = IMAGENETTE_NUM_CLASSES
-IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
+NUM_CLASSES = len(CELEBA_SMILING_CLASSES)
+IMAGE_SIZE = 64
 
 
 def build_model(model_name, device, base_channels):
@@ -54,44 +54,43 @@ def build_model(model_name, device, base_channels):
         z_dim = 128
         generator = SNGenerator(z_dim=z_dim, **common).to(device)
         discriminator = SNDiscriminator(**common).to(device)
-        generator_lr = discriminator_lr = 2e-4
+        generator_lr = 1e-4
+        discriminator_lr = 2e-4
         betas = (0.0, 0.9)
         update_ratio = 1
-        averaged_generator = None
     elif model_name == "sagan":
         z_dim = 128
         generator = SAGANGenerator(
             z_dim=z_dim,
-            attention_resolution=32,
+            attention_resolution=16,
             **common,
         ).to(device)
         discriminator = SAGANDiscriminator(
-            attention_resolution=32,
+            attention_resolution=16,
             **common,
         ).to(device)
         generator_lr = discriminator_lr = 1e-4
         betas = (0.0, 0.9)
         update_ratio = 1
-        averaged_generator = None
     else:
         z_dim = 120
         generator = BigGANGenerator(
             z_dim=z_dim,
             class_embedding_dim=128,
-            attention_resolution=32,
+            attention_resolution=16,
             **common,
         ).to(device)
         discriminator = BigGANDiscriminator(
-            attention_resolution=32,
+            attention_resolution=16,
             **common,
         ).to(device)
         generator.apply(initialize_orthogonal_weights)
         discriminator.apply(initialize_orthogonal_weights)
-        averaged_generator = deepcopy(generator).eval().requires_grad_(False)
         generator_lr = discriminator_lr = 1e-4
         betas = (0.0, 0.9)
         update_ratio = 2
 
+    averaged_generator = deepcopy(generator).eval().requires_grad_(False)
     optimizer_g = make_fused_adam(
         generator.parameters(),
         device=device,
@@ -116,7 +115,7 @@ def build_model(model_name, device, base_channels):
 
 
 def make_real_batch_source(args, device, batch_size):
-    """Use prepared Imagenette when requested, otherwise deterministic noise."""
+    """Use aligned CelebA when requested, otherwise deterministic noise."""
     if args.data_dir is None:
         random_generator = torch.Generator(device=device).manual_seed(args.seed)
 
@@ -143,18 +142,18 @@ def make_real_batch_source(args, device, batch_size):
 
         return synthetic_batch
 
-    loader = make_imagenette_loader(
+    loader = make_aligned_celeba_loader(
         args.data_dir,
+        IMAGE_SIZE,
         batch_size,
         device,
-        dequantize=args.model == "sn_gan",
         horizontal_flip=True,
         num_workers=args.num_workers,
-        preprocessed=True,
+        attribute=CELEBA_SMILING_ATTRIBUTE,
     )
     iterator = iter(loader)
 
-    def imagenette_batch():
+    def celeba_batch():
         nonlocal iterator
         try:
             images, labels = next(iterator)
@@ -166,7 +165,7 @@ def make_real_batch_source(args, device, batch_size):
             labels.to(device, non_blocking=True),
         )
 
-    return imagenette_batch
+    return celeba_batch
 
 
 def benchmark(args):
@@ -203,18 +202,17 @@ def benchmark(args):
     discriminator_steps = 0
     generator_steps = 0
     generator_regularizer = None
-    after_generator_step = None
-    if averaged_generator is not None:
+    if args.model == "biggan":
         generator_regularizer = partial(
             modified_orthogonal_regularization,
             strength=1e-4,
         )
-        after_generator_step = partial(
-            update_ema,
-            averaged_generator,
-            generator,
-            decay=0.999,
-        )
+    after_generator_step = partial(
+        update_ema,
+        averaged_generator,
+        generator,
+        decay=0.999,
+    )
 
     def train_step():
         nonlocal discriminator_steps, generator_steps, last_loss_tensors
@@ -285,7 +283,7 @@ def benchmark(args):
         "peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30,
         "peak_reserved_gib": torch.cuda.max_memory_reserved(device) / 2**30,
         "losses": last_losses,
-        "data": "imagenette-128" if args.data_dir is not None else "synthetic",
+        "data": "celeba" if args.data_dir is not None else "synthetic",
     }
     if args.json_output is not None:
         # This run owns one JSON file; its parent may hold other benchmarks.
@@ -309,7 +307,7 @@ def parse_args():
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--generator-batch-size", type=int)
-    parser.add_argument("--base-channels", type=int, default=32)
+    parser.add_argument("--base-channels", type=int, default=64)
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--data-dir", type=Path)

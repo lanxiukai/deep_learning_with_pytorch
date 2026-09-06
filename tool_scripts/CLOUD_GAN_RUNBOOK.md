@@ -1,6 +1,6 @@
-# RTX 5090 Imagenette GAN runbook
+# RTX 5090 CelebA GAN runbook
 
-This workflow runs the repository's 128x128 SN-GAN, SAGAN, and BigGAN lessons
+This workflow runs the repository's 64x64 SN-GAN, SAGAN, and BigGAN lessons
 on an existing cloud RTX 5090. See the exact current interface with:
 
 ```bash
@@ -14,19 +14,18 @@ continues until you act in the provider console. Provisioning can install
 Ubuntu packages, clone or fast-forward the checkout, and synchronize the
 locked uv environment. It never installs an NVIDIA driver or CUDA Toolkit.
 
-The general dataset downloader includes Imagenette in its no-argument and
-`--dataset all` sequence. Cloud provisioning does not invoke that default:
-`cloud_gan.sh provision` requires `--download-imagenette` before it downloads
-and prepares the data. No account or dataset license prompt is involved.
-Reserve space for the archive, extracted Imagenette-320 source, derived
-Imagenette-128 cache, uv caches, and optimizer checkpoints.
+Cloud provisioning only prepares data when `--download-celeba` is supplied.
+That option installs the locked project-local `celeba` extra and invokes the
+existing dataset downloader. The downloader's separate CelebA option is
+still available for other experiments. Reserve space for aligned CelebA,
+project caches, and optimizer checkpoints.
 
 | Location | Default |
 |---|---|
 | Remote checkout | `/workspace/deep-learning-with-pytorch` |
-| Prepared data | `data/imagenette-128/train/<WNID>/*.JPEG` |
+| Prepared data | `data/celeba/img_align_celeba/` |
 | Cloud artifacts | `output-vast-dl/<model>/` |
-| Managed tmux server | `imagenette-gan-cloud` |
+| Managed tmux server | `celeba-gan-cloud` |
 
 Cloud output and data are ignored by Git. Result download merges files without
 deleting local-only content, but a differing same-path local file can be
@@ -54,7 +53,7 @@ ssh vast-dl 'uname -srm && nvidia-smi --query-gpu=name,memory.total,driver_versi
 
 ## 1. Prepare the host
 
-Provision the environment without downloading Imagenette:
+Provision the environment without downloading CelebA:
 
 ```bash
 bash tool_scripts/cloud_gan.sh provision
@@ -64,28 +63,28 @@ This clones the public repository revision, so publish or otherwise place the
 required revision on the remote host first. An existing checkout is updated
 with `git pull --ff-only`; local remote-host changes are never discarded.
 
-Opt into the direct Imagenette download and preprocessing when needed:
+Opt into downloading aligned CelebA when needed:
 
 ```bash
-bash tool_scripts/cloud_gan.sh provision --download-imagenette
+bash tool_scripts/cloud_gan.sh provision --download-celeba
 ```
 
 For an already provisioned checkout, prepare the data separately with:
 
 ```bash
+uv sync --locked --no-dev --extra celeba
 uv run --locked --no-sync python tool_scripts/download_dataset.py \
-  --dataset imagenette
+  --dataset celeba
 ```
 
-Archive preparation builds the 10-class source tree, then creates the filtered
-Imagenette-128 cache. Download, extraction, and resizing reuse completed files
-after interruption. The cache records images excluded by the configured
-source-size limits.
+The loader uses the official training split and the Smiling attribute. It
+center-crops aligned faces to 178x178 and resizes them to 64x64 during loading.
+Validation references come from the separate official validation split.
 
 ## 2. Validate the full models
 
 The smoke action performs short, sequential forward/backward checks with
-synthetic 128x128 batches. It uses the real 64-channel model definitions but a
+synthetic 64x64 batches. It uses the real 64-channel model definitions but a
 batch of one, and it exercises each model's update ratio, BigGAN orthogonal
 regularization, and EMA:
 
@@ -105,7 +104,7 @@ To include the real data pipeline:
 
 ```bash
 bash tool_scripts/cloud_gan.sh benchmark \
-  --data-dir data/imagenette-128 \
+  --data-dir data/celeba \
   --steps 20
 ```
 
@@ -125,10 +124,11 @@ bash tool_scripts/cloud_gan.sh train --model sagan
 bash tool_scripts/cloud_gan.sh train --model biggan
 ```
 
-The command rejects a second managed run while one session is active. Defaults
-are paper-oriented where practical: SN-GAN uses D/G batches 16/32, SAGAN uses
-batch 16, and BigGAN uses batch 8. All use BF16 automatically on the 5090.
-Reduce only the runtime batch if memory is constrained:
+The command rejects a second managed run while one session is active. All
+three lessons default to batch 64, two Smiling labels, and EMA sampling.
+SN-GAN and BigGAN use eight epochs; SAGAN uses four. SN-GAN and SAGAN use
+one D update per G update; BigGAN uses two.
+All use BF16 on the 5090. Lower the batch size if memory is constrained:
 
 ```bash
 bash tool_scripts/cloud_gan.sh train \
@@ -143,10 +143,11 @@ Resume from the model's `checkpoints/latest.pth`:
 bash tool_scripts/cloud_gan.sh train --model biggan --resume
 ```
 
-If the original run used epoch, batch, precision, or data-path overrides,
-repeat them on resume because checkpoint compatibility validates the complete
-run configuration. SN-GAN also validates that the epoch plan ends on a full
-five-to-one update cycle.
+Repeat the original batch, precision, and data-path overrides when resuming.
+Checkpoint compatibility validates the model and optimization settings;
+continue using the same dataset. A resumed run may extend the epoch budget. Fresh runs
+reset their model output directory and per-model log directory; resuming
+preserves both.
 
 ## 4. Monitor or stop the managed run
 
@@ -183,13 +184,13 @@ Use `--host <ssh-alias>` for a non-default SSH config host. Confirm that all
 required weights, checkpoints, sample grids, plots, JSON benchmark records,
 and logs arrived before releasing the cloud instance.
 
-If Imagenette is also prepared locally, render the shared reference comparison
+If CelebA is also prepared locally, render the shared reference comparison
 against the downloaded output tree with:
 
 ```bash
 uv run --locked python \
   genai/1.0_generative_adversarial_network/6.3_sn_sagan_biggan_evaluation.py \
-  --data-dir data/imagenette-128 \
+  --data-dir data/celeba \
   --output-root output-vast-dl
 ```
 
@@ -198,11 +199,11 @@ uv run --locked python \
 - **RTX 5090 preflight fails:** check the selected instance, container GPU
   passthrough, driver, and locked PyTorch CUDA runtime. The scripts do not
   repair drivers.
-- **Imagenette readiness fails:** inspect the completion metadata and 10 WNID
-  directories below `data/imagenette-128/train`, then rerun the explicit
-  preparation command.
-- **Dataset download fails:** rerun the same command; partial archive downloads
-  and completed preprocessing files are reused.
+- **CelebA readiness fails:** check the aligned JPEG directory,
+  `list_eval_partition.csv`, and `list_attr_celeba.csv` below `data/celeba`,
+  then rerun the explicit preparation command.
+- **Dataset download fails:** check the locked `celeba` extra and the error
+  reported by the downloader, then rerun the explicit command.
 - **CUDA out of memory:** lower `--batch-size` (and SN-GAN's
   `--generator-batch-size`) while retaining the 64-channel architecture.
 - **A managed session already exists:** use `status`, then attach or explicitly

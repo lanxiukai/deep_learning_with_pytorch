@@ -1,8 +1,7 @@
-"""128x128 SN-GAN models and spectral-normalization teaching tools.
+"""64x64 and 128x128 SN-GAN models and spectral-normalization teaching tools.
 
-The default network adapts the public projection SN-GAN architecture to the
-10-class Imagenette teaching dataset: a 128-dimensional latent vector, a
-64-channel ResNet stem, categorical conditional BatchNorm in the generator,
+The network uses a 128-dimensional latent vector, a 64-channel ResNet stem,
+categorical conditional BatchNorm in the generator,
 and a projection discriminator. The generator is intentionally not spectrally
 normalized; that extension is introduced by the following SAGAN lesson.
 """
@@ -15,29 +14,35 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils import spectral_norm
 
-from dl_utils.data.imagenette import (
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    uniform_dequantize_uint8,
-)
 
-GENERATOR_128_BLOCK_RESOLUTIONS = (8, 16, 32, 64, 128)
-DISCRIMINATOR_128_BLOCK_RESOLUTIONS = (64, 32, 16, 8, 4, 4)
-_GENERATOR_128_CHANNEL_MULTIPLIERS = (16, 16, 8, 4, 2, 1)
+def generator_block_resolutions(image_size):
+    """Return the upsampling stages for the two teaching resolutions."""
+    if image_size not in (64, 128):
+        raise ValueError("image_size must be 64 or 128.")
+    return tuple(size for size in (8, 16, 32, 64, 128) if size <= image_size)
 
 
-def generator_128_channels(base_channels):
-    """Return the shared 4-to-128 generator channel schedule."""
+def discriminator_block_resolutions(image_size):
+    """Reverse the generator stages, ending with one 4x4 residual block."""
+    return tuple(
+        size // 2 for size in reversed(generator_block_resolutions(image_size))
+    ) + (4,)
+
+
+def generator_channels(base_channels, image_size):
+    """Scale the channel hierarchy with the requested output resolution."""
     if base_channels < 1:
         raise ValueError("base_channels must be positive.")
+    stages = len(generator_block_resolutions(image_size))
     return tuple(
-        base_channels * multiplier for multiplier in _GENERATOR_128_CHANNEL_MULTIPLIERS
+        base_channels * 2 ** min(stages - 1, stages - index)
+        for index in range(stages + 1)
     )
 
 
-def discriminator_128_channels(base_channels):
-    """Return the reverse 128-to-4 discriminator channel schedule."""
-    return tuple(reversed(generator_128_channels(base_channels)))
+def discriminator_channels(base_channels, image_size):
+    """Use the generator channel hierarchy in reverse."""
+    return tuple(reversed(generator_channels(base_channels, image_size)))
 
 
 def _maybe_spectral_norm(module, enabled):
@@ -142,24 +147,22 @@ class SNGeneratorResidualBlock(nn.Module):
 
 
 class SNGenerator(nn.Module):
-    """Projection SN-GAN's class-conditional 128x128 generator."""
+    """Projection SN-GAN's class-conditional image generator."""
 
     def __init__(
         self,
         z_dim=128,
-        num_classes=IMAGENETTE_NUM_CLASSES,
+        num_classes=2,
         base_channels=64,
-        image_size=IMAGENETTE_IMAGE_SIZE,
+        image_size=64,
     ):
         super().__init__()
         if z_dim < 1 or base_channels < 1 or num_classes < 1:
             raise ValueError("z_dim, base_channels, and num_classes must be positive.")
-        if image_size != IMAGENETTE_IMAGE_SIZE:
-            raise ValueError("SNGenerator currently implements only 128x128 output.")
         self.z_dim = z_dim
         self.num_classes = num_classes
         self.image_size = image_size
-        channels = generator_128_channels(base_channels)
+        channels = generator_channels(base_channels, image_size)
         self.input = nn.Linear(z_dim, channels[0] * 4 * 4)
         blocks = [
             SNGeneratorResidualBlock(
@@ -238,22 +241,20 @@ class SNDiscriminatorResidualBlock(nn.Module):
 
 
 class SNDiscriminator(nn.Module):
-    """128x128 spectral-normalized projection discriminator."""
+    """Spectral-normalized projection discriminator."""
 
     def __init__(
         self,
-        num_classes=IMAGENETTE_NUM_CLASSES,
+        num_classes=2,
         base_channels=64,
-        image_size=IMAGENETTE_IMAGE_SIZE,
+        image_size=64,
     ):
         super().__init__()
         if base_channels < 1 or num_classes < 1:
             raise ValueError("base_channels and num_classes must be positive.")
-        if image_size != IMAGENETTE_IMAGE_SIZE:
-            raise ValueError("SNDiscriminator currently implements only 128x128 input.")
         self.num_classes = num_classes
         self.image_size = image_size
-        channels = discriminator_128_channels(base_channels)
+        channels = discriminator_channels(base_channels, image_size)
         self.blocks = nn.ModuleList(
             [SNDiscriminatorResidualBlock(3, channels[0], first=True)]
             + [
@@ -373,21 +374,18 @@ def spectral_norm_scratch_minimal(
 
 
 __all__ = [
-    "DISCRIMINATOR_128_BLOCK_RESOLUTIONS",
-    "GENERATOR_128_BLOCK_RESOLUTIONS",
-    "IMAGENETTE_IMAGE_SIZE",
-    "IMAGENETTE_NUM_CLASSES",
     "CategoricalConditionalBatchNorm2d",
     "SNDiscriminator",
     "SNDiscriminatorResidualBlock",
     "SNGenerator",
     "SNGeneratorResidualBlock",
-    "discriminator_128_channels",
+    "discriminator_block_resolutions",
+    "discriminator_channels",
     "discriminator_hinge_loss",
-    "generator_128_channels",
+    "generator_block_resolutions",
+    "generator_channels",
     "generator_hinge_loss",
     "init_spectral_norm_state",
     "spectral_norm_scratch_minimal",
-    "uniform_dequantize_uint8",
     "validate_class_labels",
 ]

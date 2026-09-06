@@ -1,4 +1,4 @@
-"""Evaluate trained VQGAN systems under one Imagenette-128 protocol.
+"""Evaluate trained VQGAN systems under one CelebA-128 protocol.
 
 This script reloads the tokenizer, PatchGAN discriminator, and causal
 Transformer prior from their stage artifacts. It reports:
@@ -10,7 +10,7 @@ Transformer prior from their stage artifacts. It reports:
 
 Pass ``--vqgan-tokenizer`` more than once to compare fixed, adaptive, and
 loss-ablation runs. Without explicit paths, the script discovers both the
-legacy flat VQGAN artifact and named run directories. A trained VQ-VAE system
+default VQGAN artifact and named run directories. A trained VQ-VAE system
 is included as a direct system baseline when its checkpoint exists; because
 the tokenizer architectures differ, that cross-script comparison is not a
 causal loss ablation.
@@ -20,8 +20,8 @@ for this lesson, not canonical TensorFlow FID. Unified cross-family generation
 evaluation remains outside this model-specific entry.
 
 Data:
-    data/imagenette-128/val/<WNID>/*.JPEG, prepared by
-    tool_scripts/download_dataset.py --dataset imagenette.
+    data/celeba (official validation split), prepared by
+    tool_scripts/download_dataset.py --dataset celeba.
 
 Checkpoints:
     output/vae/vqgan/**/tokenizer.pth: discovered VQGAN runs
@@ -34,8 +34,8 @@ Outputs:
     output/vae/vqgan_evaluation/<system>_real_and_reconstruction.png
     output/vae/vqgan_evaluation/<system>_prior_samples.png
 
-Evaluation data -- Imagenette validation:
-Available images:                       3,925
+Evaluation data -- CelebA validation:
+Available images:                      19,867
 Batch size:                                16
 Reconstruction examples:                1,024
 Generated examples:                       100
@@ -66,6 +66,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -73,10 +74,10 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
-from dl_utils.data.imagenette import (
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    make_imagenette_loader,
+from dl_utils.data.celeba import (
+    CELEBA_SMILING_ATTRIBUTE,
+    CELEBA_SMILING_CLASSES,
+    make_aligned_celeba_loader,
 )
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
@@ -104,9 +105,9 @@ from dl_utils.vae.token_prior import CausalTransformerPrior, PixelCNNPrior
 
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
-DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
-IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
-NUM_CLASSES = IMAGENETTE_NUM_CLASSES
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "celeba"
+IMAGE_SIZE = 128
+NUM_CLASSES = len(CELEBA_SMILING_CLASSES)
 
 Tokenizer = VQPerceptualAutoencoder | VQVAE
 TokenPrior = CausalTransformerPrior | PixelCNNPrior
@@ -140,12 +141,10 @@ class EvaluatedSystem:
 
     def prior_loss(self, indices: Tensor, labels: Tensor) -> Tensor | None:
         if isinstance(self.prior, CausalTransformerPrior):
-            class_labels = labels if self.prior.num_classes > 0 else None
-            logits, targets = self.prior.teacher_forcing(indices, class_labels)
+            logits, targets = self.prior.teacher_forcing(indices, labels)
             return F.cross_entropy(logits.flatten(0, 1), targets.flatten())
         if isinstance(self.prior, PixelCNNPrior):
-            class_labels = labels if self.prior.num_classes > 0 else None
-            return F.cross_entropy(self.prior(indices, labels=class_labels), indices)
+            return F.cross_entropy(self.prior(indices, labels=labels), indices)
         return None
 
     @torch.inference_mode()
@@ -166,7 +165,7 @@ class EvaluatedSystem:
             indices = self.prior.sample(
                 count,
                 device=device,
-                labels=labels if self.prior.num_classes > 0 else None,
+                labels=labels,
                 temperature=temperature,
             ).reshape(count, side, side)
         elif isinstance(self.prior, PixelCNNPrior):
@@ -176,7 +175,7 @@ class EvaluatedSystem:
                 side,
                 side,
                 device=device,
-                labels=labels if self.prior.num_classes > 0 else None,
+                labels=labels,
                 temperature=temperature,
             )
         else:
@@ -184,22 +183,24 @@ class EvaluatedSystem:
         return self.tokenizer.decode_indices(indices)
 
 
-def make_test_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
-    return make_imagenette_loader(
+def make_validation_loader(
+    args: argparse.Namespace, device: torch.device
+) -> DataLoader:
+    return make_aligned_celeba_loader(
         args.data_dir,
+        IMAGE_SIZE,
         args.batch_size,
         device,
-        split="val",
-        image_size=IMAGE_SIZE,
+        split="validation",
+        attribute=CELEBA_SMILING_ATTRIBUTE,
         horizontal_flip=False,
         num_workers=args.workers,
         shuffle=False,
-        preprocessed=True,
         drop_last=False,
     )
 
 
-def _load_checkpoint(path: Path, expected_model_name: str) -> dict[str, object]:
+def _load_checkpoint(path: Path, expected_model_name: str) -> dict[str, Any]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict):
         raise TypeError(f"{path} does not contain a checkpoint mapping")
@@ -239,10 +240,10 @@ def load_vqgan_system(tokenizer_path: Path, device: torch.device) -> EvaluatedSy
     if not isinstance(model_config, dict):
         raise TypeError("VQGAN model_config must be a mapping")
     training_config = _training_config(checkpoint)
-    if training_config.get("dataset") != "imagenette-128" or training_config.get(
+    if training_config.get("dataset") != "celeba" or training_config.get(
         "image_shape"
     ) != [3, IMAGE_SIZE, IMAGE_SIZE]:
-        raise ValueError(f"{tokenizer_path} is not an Imagenette-128 tokenizer")
+        raise ValueError(f"{tokenizer_path} is not a CelebA-128 tokenizer")
     tokenizer = VQPerceptualAutoencoder(**model_config)
     tokenizer.load_state_dict(checkpoint["state_dict"], strict=True)
     interface_id = model_state_fingerprint(tokenizer)
@@ -268,14 +269,18 @@ def load_vqgan_system(tokenizer_path: Path, device: torch.device) -> EvaluatedSy
         prior_checkpoint = _load_checkpoint(prior_path, "vqgan_transformer_prior")
         prior_training_config = _training_config(prior_checkpoint)
         if (
-            prior_training_config.get("dataset") != "imagenette-128 tokens"
+            prior_training_config.get("dataset") != "celeba"
             or prior_training_config.get("conditioning") != "class_conditional"
+            or prior_training_config.get("attribute") != CELEBA_SMILING_ATTRIBUTE
+            or prior_training_config.get("class_names") != list(CELEBA_SMILING_CLASSES)
         ):
-            raise ValueError(f"{prior_path} is not an Imagenette-128 conditional prior")
+            raise ValueError(f"{prior_path} is not a CelebA-128 conditional prior")
         prior_config = prior_checkpoint.get("model_config")
         if not isinstance(prior_config, dict):
             raise TypeError("VQGAN prior model_config must be a mapping")
         prior = CausalTransformerPrior(**prior_config)
+        if prior.num_classes != NUM_CLASSES:
+            raise ValueError(f"{prior_path} must use the two Smiling labels")
         prior.load_state_dict(prior_checkpoint["state_dict"], strict=True)
         if prior_checkpoint.get("tokenizer_interface_id") != interface_id:
             raise ValueError(f"{prior_path} was trained for another tokenizer")
@@ -304,10 +309,10 @@ def load_vq_vae_baseline(
         return None
     checkpoint = _load_checkpoint(tokenizer_path, "vq_vae_tokenizer")
     if (
-        checkpoint.get("dataset") != "imagenette-128"
+        checkpoint.get("dataset") != "celeba"
         or checkpoint.get("image_size") != IMAGE_SIZE
     ):
-        raise ValueError(f"{tokenizer_path} is not an Imagenette-128 tokenizer")
+        raise ValueError(f"{tokenizer_path} is not a CelebA-128 tokenizer")
     model_config = checkpoint.get("model_config")
     if not isinstance(model_config, dict):
         raise TypeError("VQ-VAE model_config must be a mapping")
@@ -321,15 +326,19 @@ def load_vq_vae_baseline(
     if prior_path.is_file():
         prior_checkpoint = _load_checkpoint(prior_path, "vq_vae_pixelcnn_prior")
         if (
-            prior_checkpoint.get("dataset") != "imagenette-128"
+            prior_checkpoint.get("dataset") != "celeba"
             or prior_checkpoint.get("image_size") != IMAGE_SIZE
             or prior_checkpoint.get("conditioning") != "class_conditional"
+            or prior_checkpoint.get("attribute") != CELEBA_SMILING_ATTRIBUTE
+            or prior_checkpoint.get("class_names") != list(CELEBA_SMILING_CLASSES)
         ):
-            raise ValueError(f"{prior_path} is not an Imagenette-128 conditional prior")
+            raise ValueError(f"{prior_path} is not a CelebA-128 conditional prior")
         prior_config = prior_checkpoint.get("model_config")
         if not isinstance(prior_config, dict):
             raise TypeError("VQ-VAE prior model_config must be a mapping")
         prior = PixelCNNPrior(**prior_config)
+        if prior.num_classes != NUM_CLASSES:
+            raise ValueError(f"{prior_path} must use the two Smiling labels")
         prior.load_state_dict(prior_checkpoint["state_dict"], strict=True)
         if prior_checkpoint.get("tokenizer_interface_id") != interface_id:
             raise ValueError(f"{prior_path} was trained for another tokenizer")
@@ -566,7 +575,7 @@ def evaluate(args: argparse.Namespace) -> None:
         raise ValueError("temperature must be positive")
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loader = make_test_loader(args, device)
+    loader = make_validation_loader(args, device)
     systems = load_systems(args, device)
     projection_dim = (
         None if args.inception_projection_dim == 0 else args.inception_projection_dim
@@ -589,8 +598,12 @@ def evaluate(args: argparse.Namespace) -> None:
     model_results: dict[str, dict[str, object]] = {}
     results: dict[str, object] = {
         "protocol": {
-            "dataset": "imagenette-128 validation",
+            "dataset": "celeba",
+            "split": "validation",
+            "image_size": IMAGE_SIZE,
             "conditioning": "class_conditional",
+            "attribute": CELEBA_SMILING_ATTRIBUTE,
+            "class_names": list(CELEBA_SMILING_CLASSES),
             "max_reconstruction_examples": args.max_examples,
             "generation_examples": args.generation_examples,
             "generation_batch_size": args.generation_batch_size,
@@ -727,7 +740,7 @@ def smoke_test() -> None:
                 "training_config": {
                     "run_name": "smoke",
                     "adversarial_weighting": "fixed",
-                    "dataset": "imagenette-128",
+                    "dataset": "celeba",
                     "image_shape": [3, IMAGE_SIZE, IMAGE_SIZE],
                 },
             },
@@ -740,8 +753,10 @@ def smoke_test() -> None:
                 "model_config": prior_config,
                 "tokenizer_interface_id": interface_id,
                 "training_config": {
-                    "dataset": "imagenette-128 tokens",
+                    "dataset": "celeba",
                     "conditioning": "class_conditional",
+                    "attribute": CELEBA_SMILING_ATTRIBUTE,
+                    "class_names": list(CELEBA_SMILING_CLASSES),
                 },
             },
             tokenizer_path.with_name("transformer_prior.pth"),
@@ -774,7 +789,7 @@ def smoke_test() -> None:
                     "codebook_size": 16,
                     "downsample_steps": 3,
                 },
-                "dataset": "imagenette-128",
+                "dataset": "celeba",
                 "image_size": IMAGE_SIZE,
             },
             baseline_tokenizer_path,
@@ -790,9 +805,11 @@ def smoke_test() -> None:
                     "num_classes": NUM_CLASSES,
                 },
                 "tokenizer_interface_id": baseline_interface_id,
-                "dataset": "imagenette-128",
+                "dataset": "celeba",
                 "image_size": IMAGE_SIZE,
                 "conditioning": "class_conditional",
+                "attribute": CELEBA_SMILING_ATTRIBUTE,
+                "class_names": list(CELEBA_SMILING_CLASSES),
             },
             baseline_prior_path,
         )
@@ -802,7 +819,7 @@ def smoke_test() -> None:
         loader = DataLoader(
             TensorDataset(
                 torch.rand(8, 3, IMAGE_SIZE, IMAGE_SIZE).mul(2).sub(1),
-                torch.arange(8) % 10,
+                torch.arange(8) % NUM_CLASSES,
             ),
             batch_size=4,
         )

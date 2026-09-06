@@ -1,4 +1,4 @@
-"""Compare VQ-VAE and FSQ with their frozen priors on Imagenette-128.
+"""Compare VQ-VAE and FSQ with their frozen priors on CelebA-128.
 
 Tokenizer evidence:
 
@@ -15,8 +15,8 @@ projection.  It is a consistent Fréchet proxy for this comparison, not the
 canonical TensorFlow FID implementation.
 
 Data:
-    data/imagenette-128/val/<WNID>/*.JPEG, prepared by
-    tool_scripts/download_dataset.py --dataset imagenette.
+    data/celeba (official validation split), prepared by
+    tool_scripts/download_dataset.py --dataset celeba.
 
 Checkpoints:
     output/vae/vq_vae/{tokenizer.pth,pixelcnn_prior.pth}: VQ-VAE system
@@ -28,8 +28,8 @@ Outputs:
     output/vae/discrete_tokenizer_evaluation/<system>_real_and_reconstruction.png
     output/vae/discrete_tokenizer_evaluation/<system>_prior_samples.png
 
-Evaluation data -- Imagenette validation:
-Available images:                       3,925
+Evaluation data -- CelebA validation:
+Available images:                      19,867
 Batch size:                                64
 Reconstruction examples:                1,024
 Generated examples:                       100
@@ -64,10 +64,10 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
-from dl_utils.data.imagenette import (
-    IMAGENETTE_IMAGE_SIZE,
-    IMAGENETTE_NUM_CLASSES,
-    make_imagenette_loader,
+from dl_utils.data.celeba import (
+    CELEBA_SMILING_ATTRIBUTE,
+    CELEBA_SMILING_CLASSES,
+    make_aligned_celeba_loader,
 )
 from dl_utils.filesystem.directories import reset_dir
 from dl_utils.filesystem.project_root import infer_project_root
@@ -89,9 +89,9 @@ from dl_utils.vae.token_prior import PixelCNNPrior
 
 PROJECT_ROOT = infer_project_root()
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "vae"
-DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "imagenette-128"
-IMAGE_SIZE = IMAGENETTE_IMAGE_SIZE
-NUM_CLASSES = IMAGENETTE_NUM_CLASSES
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "celeba"
+IMAGE_SIZE = 128
+NUM_CLASSES = len(CELEBA_SMILING_CLASSES)
 
 
 @dataclass
@@ -114,12 +114,8 @@ class DiscreteSystem:
     ) -> tuple[Tensor, list[tuple[str, Tensor, int]], dict[str, Tensor]]:
         if isinstance(self.tokenizer, VQVAE):
             reconstruction, indices, _, diagnostics = self.tokenizer(x)
-            return (
-                reconstruction,
-                [("tokens", indices, self.tokenizer.quantizer.codebook_size)],
-                {"quantization_mse": diagnostics["quantization_mse"]},
-            )
-        reconstruction, indices, diagnostics = self.tokenizer(x)
+        else:
+            reconstruction, indices, diagnostics = self.tokenizer(x)
         return (
             reconstruction,
             [("tokens", indices, self.tokenizer.quantizer.codebook_size)],
@@ -135,10 +131,7 @@ class DiscreteSystem:
             return {}
         assert self.prior is not None
         indices = token_levels[0][1]
-        class_labels = labels if self.prior.num_classes > 0 else None
-        return {
-            "tokens": F.cross_entropy(self.prior(indices, labels=class_labels), indices)
-        }
+        return {"tokens": F.cross_entropy(self.prior(indices, labels=labels), indices)}
 
     @torch.inference_mode()
     def sample(
@@ -152,29 +145,30 @@ class DiscreteSystem:
         if not self.has_complete_prior:
             raise RuntimeError("the system does not have its complete prior")
         assert self.prior is not None
-        class_labels = labels if self.prior.num_classes > 0 else None
         indices = self.prior.sample(
             count,
             self.latent_grid_size,
             self.latent_grid_size,
             device=device,
-            labels=class_labels,
+            labels=labels,
             temperature=temperature,
         )
         return self.tokenizer.decode_indices(indices)
 
 
-def make_test_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
-    return make_imagenette_loader(
+def make_validation_loader(
+    args: argparse.Namespace, device: torch.device
+) -> DataLoader:
+    return make_aligned_celeba_loader(
         args.data_dir,
+        IMAGE_SIZE,
         args.batch_size,
         device,
-        split="val",
-        image_size=IMAGE_SIZE,
+        split="validation",
+        attribute=CELEBA_SMILING_ATTRIBUTE,
         horizontal_flip=False,
         num_workers=args.workers,
         shuffle=False,
-        preprocessed=True,
         drop_last=False,
     )
 
@@ -193,12 +187,16 @@ def _load_prior(
             f"expected {expected_model_name!r}"
         )
     if (
-        checkpoint.get("dataset") != "imagenette-128"
+        checkpoint.get("dataset") != "celeba"
         or checkpoint.get("image_size") != IMAGE_SIZE
         or checkpoint.get("conditioning") != "class_conditional"
+        or checkpoint.get("attribute") != CELEBA_SMILING_ATTRIBUTE
+        or checkpoint.get("class_names") != list(CELEBA_SMILING_CLASSES)
     ):
-        raise ValueError(f"{path} is not an Imagenette-128 conditional prior")
+        raise ValueError(f"{path} is not a CelebA-128 conditional prior")
     prior = PixelCNNPrior(**checkpoint["model_config"]).to(device)
+    if prior.num_classes != NUM_CLASSES:
+        raise ValueError(f"{path} must use the two Smiling labels")
     prior.load_state_dict(checkpoint["state_dict"])
     if checkpoint.get("tokenizer_interface_id") != tokenizer_interface_id:
         raise ValueError(f"{path} was trained for a different tokenizer")
@@ -217,10 +215,10 @@ def load_single_level_system(
     checkpoint = torch.load(tokenizer_path, map_location=device, weights_only=True)
     model_name = checkpoint.get("model_name")
     if (
-        checkpoint.get("dataset") != "imagenette-128"
+        checkpoint.get("dataset") != "celeba"
         or checkpoint.get("image_size") != IMAGE_SIZE
     ):
-        raise ValueError(f"{tokenizer_path} is not an Imagenette-128 tokenizer")
+        raise ValueError(f"{tokenizer_path} is not a CelebA-128 tokenizer")
     if model_name == "vq_vae_tokenizer":
         tokenizer: VQVAE | FSQAutoencoder = VQVAE(**checkpoint["model_config"])
         expected_prior_name = "vq_vae_pixelcnn_prior"
@@ -372,7 +370,7 @@ def evaluate_tokenizer(
 def evaluate(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loader = make_test_loader(args, device)
+    loader = make_validation_loader(args, device)
     systems = load_systems(args, device)
     if not systems:
         raise FileNotFoundError("no tokenizer checkpoint exists; run 6.0 or 6.1 first")
@@ -399,8 +397,12 @@ def evaluate(args: argparse.Namespace) -> None:
     model_results: dict[str, object] = {}
     results: dict[str, object] = {
         "protocol": {
-            "dataset": "imagenette-128 validation",
+            "dataset": "celeba",
+            "split": "validation",
+            "image_size": IMAGE_SIZE,
             "conditioning": "class_conditional",
+            "attribute": CELEBA_SMILING_ATTRIBUTE,
+            "class_names": list(CELEBA_SMILING_CLASSES),
             "max_reconstruction_examples": args.max_examples,
             "generation_examples": args.generation_examples,
             "feature_extractor": "torchvision Inception-v3 pool features",

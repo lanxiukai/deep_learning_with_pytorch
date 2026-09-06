@@ -19,9 +19,9 @@ usage() {
     cat <<'EOF'
 Usage: bash tool_scripts/benchmark_rtx5090_gans.sh [options]
 
-Run sequential finite-loss optimization checks for the Imagenette-128 SN-GAN,
-SAGAN, and BigGAN defaults on one RTX 5090. Synthetic 128x128 batches are used
-unless --data-dir points to a prepared Imagenette-128 root.
+Run sequential finite-loss optimization checks for the CelebA-64 SN-GAN,
+SAGAN, and BigGAN defaults on one RTX 5090. Synthetic 64x64 batches are used
+unless --data-dir points to a prepared CelebA root.
 
 Options:
   --models LIST          Comma-separated sn_gan,sagan,biggan (default: all)
@@ -31,9 +31,9 @@ Options:
   --generator-batch-size N
                          Override the generated-image batch independently
   --precision MODE       bf16 (default) or fp32
-  --data-dir PATH        Use Imagenette-128 instead of synthetic images
-  --num-workers N        Imagenette DataLoader workers (default: 4)
-  --output-dir PATH      New result directory (default: timestamped)
+  --data-dir PATH        Use CelebA-64 instead of synthetic images
+  --num-workers N        CelebA DataLoader workers (default: 4)
+  --output-dir PATH      Result directory; reset at start (default: timestamped)
   -h, --help             Show this help
 EOF
 }
@@ -139,10 +139,9 @@ if [[ -z "$output_dir" ]]; then
 elif [[ "$output_dir" != /* ]]; then
     output_dir="$PROJECT_ROOT/$output_dir"
 fi
-[[ ! -e "$output_dir" ]] || die "output directory already exists: $output_dir"
-mkdir -p "$output_dir"
-
 cd "$PROJECT_ROOT"
+GAN_BENCHMARK_DIR="$output_dir" uv run --locked --no-sync python -c \
+    'import os; from dl_utils.filesystem.directories import reset_dir; reset_dir(os.environ["GAN_BENCHMARK_DIR"])'
 printf '[rtx5090-benchmark] GPU: %s\n' "$gpu_name"
 printf '[rtx5090-benchmark] Results: %s\n' "$output_dir"
 for model in "${models[@]}"; do
